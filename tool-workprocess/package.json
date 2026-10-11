@@ -1,0 +1,18 @@
+{
+  "name": "tool-workprocess",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "workprocess": "workspace:*",
+    "@deepseek-ai/dsh-tools": "0.2.0-rc.1"
+  }
+}

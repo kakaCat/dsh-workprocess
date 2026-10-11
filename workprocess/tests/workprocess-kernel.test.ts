@@ -1,0 +1,366 @@
+/**
+ * workprocess 内核：**两层模型**的行为钉死（层1 workStage 串行分组 / 层2 workTask = 宿主 goal 语义）。
+ *
+ * 【守护什么（任一被回退即红）】
+ *   ① 结构：一个阶段装多个任务（层1 是"一组任务的集合"，不是"一个任务"）；
+ *   ② **串行门**：前序阶段全部 done 才允许下一阶段开工；阶段收口要求任务非空且全 complete；
+ *   ③ 层2 相位机与宿主 goal 同构：complete 是终态、block 必须带结构化原因、幂等重放零写入；
+ *   ④ 身份：任务编号 `wt:<stage>:<seq>` 在 clear 后**不复用**（墓碑守）；
+ *   ⑤ 聚合 CAS：两层的写共用一个 revision；记录的快照必须与事件重算逐字段一致。
+ */
+import { describe, it, expect } from 'vitest'
+import type { WorkChange, WorkEvent } from 'workprocess/domain.js'
+import { applyWorkEvent, decodeWorkProcess, foldWorkProcess, processAllowsClose, sameProcess, workProgressOf } from 'workprocess/fold.js'
+import { WorkError } from 'workprocess/runtime.js'
+import type { WorkProcess, WorkStageDraft } from 'workprocess/types.js'
+import {
+  clearWorkTask, completeWorkStage, completeWorkTask, createWorkProcess, createWorkTask,
+  defineWorkStages, progressOf, startWorkStage, workProcessViewOf, workTaskOf,
+  type WorkRecordLike,
+} from 'workprocess'
+
+const STAGES: readonly WorkStageDraft[] = [
+  { key: 'prep', statement: '准备数据', doneCriteria: ['数据可用'] },
+  { key: 'train', statement: '训练模型' },
+  { key: 'release', statement: '发布上线' },
+]
+
+const INIT: WorkEvent = { kind: 'init', id: 'wp:ws-a', objective: '把模型发上线', stages: STAGES }
+
+/** 从 init 事件折出一个流程（多数用例的起点）。 */
+function initProcess(): WorkProcess {
+  const r = applyWorkEvent(undefined, INIT)
+  if (!r.changed || r.next === undefined) throw new Error('夹具失败：init 未成立')
+  return r.next
+}
+
+/** 一条耐久变更（事件 + 结果快照）：折叠/解码用例的手工构造入口。 */
+function change(event: WorkEvent, process: WorkProcess): WorkChange {
+  return { kind: 'work/change', version: 1, event, process }
+}
+
+/** 走一遍"建任务 → 完成"的便捷折线（返回最新快照）。 */
+function apply(process: WorkProcess, event: WorkEvent): WorkProcess {
+  const r = applyWorkEvent(process, event)
+  if (!r.changed || r.next === undefined) throw new Error('夹具失败：事件未成立（' + event.kind + '：' + r.reason + '）')
+  return r.next
+}
+
+describe('两层结构 · init', () => {
+  it('建流程：阶段表初值全 pending、无任务、revision=1', () => {
+    const p = initProcess()
+    expect(p.id).toBe('wp:ws-a')
+    expect(p.revision).toBe(1)
+    expect(p.stages.map((s) => [s.key, s.state, s.tasks.length])).toEqual([
+      ['prep', 'pending', 0], ['train', 'pending', 0], ['release', 'pending', 0],
+    ])
+  })
+
+  it('幂等：同 id + 同陈述 + 同阶段表重放 → 零写入', () => {
+    const r = applyWorkEvent(initProcess(), INIT)
+    expect(r.changed).toBe(false)
+    expect(r.reason).toBe('init:idempotent-replay')
+  })
+
+  it('身份冲突：同一 id 想建成另一条流程 → 零写入', () => {
+    const r = applyWorkEvent(initProcess(), { ...INIT, objective: '换了目标' })
+    expect(r.changed).toBe(false)
+    expect(r.reason).toBe('init:identity-conflict')
+  })
+
+  it('阶段定义非法（重复键 / 空 statement）→ 零写入，不静默丢一段', () => {
+    const dup = applyWorkEvent(undefined, { kind: 'init', id: 'wp:ws-b', objective: 'x', stages: [STAGES[0], STAGES[0]] })
+    expect(dup.changed).toBe(false)
+    expect(dup.reason).toContain('阶段键重复')
+    const empty = applyWorkEvent(undefined, { kind: 'init', id: 'wp:ws-b', objective: 'x', stages: [{ key: 'a', statement: '  ' }] })
+    expect(empty.changed).toBe(false)
+    expect(empty.reason).toContain('statement')
+  })
+})
+
+describe('串行门 · 阶段之间串行（一个阶段装多个任务）', () => {
+  it('前序阶段未 done 时，后一阶段不许开工', () => {
+    const p = initProcess()
+    const r = applyWorkEvent(p, { kind: 'stage-start', stageKey: 'train' })
+    expect(r.changed).toBe(false)
+    expect(r.reason).toBe('stage-start:serial-blocked')
+  })
+
+  it('阶段开工 → active；已开工再开工零写入', () => {
+    const p = apply(initProcess(), { kind: 'stage-start', stageKey: 'prep' })
+    expect(p.stages[0].state).toBe('active')
+    const again = applyWorkEvent(p, { kind: 'stage-start', stageKey: 'prep' })
+    expect(again.changed).toBe(false)
+    expect(again.reason).toBe('stage-start:not-pending:active')
+  })
+
+  it('阶段收口：无任务 / 有未完成任务 一律拒（缺失 ≠ 达成）', () => {
+    let p = apply(initProcess(), { kind: 'stage-start', stageKey: 'prep' })
+    const empty = applyWorkEvent(p, { kind: 'stage-done', stageKey: 'prep' })
+    expect(empty.changed).toBe(false)
+    expect(empty.reason).toBe('stage-done:tasks-open')
+
+    p = apply(p, { kind: 'task-create', task: { id: 'wt:prep:1', stageKey: 'prep', objective: '清洗数据' } })
+    const open = applyWorkEvent(p, { kind: 'stage-done', stageKey: 'prep' })
+    expect(open.changed).toBe(false)
+    expect(open.reason).toBe('stage-done:tasks-open')
+  })
+
+  it('一个阶段可装多个任务；全部 complete 后阶段可收口，下一阶段才放行', () => {
+    let p = apply(initProcess(), { kind: 'stage-start', stageKey: 'prep' })
+    p = apply(p, { kind: 'task-create', task: { id: 'wt:prep:1', stageKey: 'prep', objective: '清洗数据' } })
+    p = apply(p, { kind: 'task-create', task: { id: 'wt:prep:2', stageKey: 'prep', objective: '对齐口径' } })
+    expect(p.stages[0].tasks.length).toBe(2)
+
+    p = apply(p, { kind: 'task-complete', taskId: 'wt:prep:1' })
+    expect(applyWorkEvent(p, { kind: 'stage-done', stageKey: 'prep' }).changed).toBe(false)
+    p = apply(p, { kind: 'task-complete', taskId: 'wt:prep:2' })
+    p = apply(p, { kind: 'stage-done', stageKey: 'prep' })
+    expect(p.stages.map((s) => s.state)).toEqual(['done', 'pending', 'pending'])
+
+    p = apply(p, { kind: 'stage-start', stageKey: 'train' })
+    expect(p.stages[1].state).toBe('active')
+  })
+
+  it('已收口的阶段不许再塞任务（要加活先重开）', () => {
+    let p = apply(initProcess(), { kind: 'stage-start', stageKey: 'prep' })
+    p = apply(p, { kind: 'task-create', task: { id: 'wt:prep:1', stageKey: 'prep', objective: '清洗数据' } })
+    p = apply(p, { kind: 'task-complete', taskId: 'wt:prep:1' })
+    p = apply(p, { kind: 'stage-done', stageKey: 'prep' })
+    const r = applyWorkEvent(p, { kind: 'task-create', task: { id: 'wt:prep:2', stageKey: 'prep', objective: '补一条' } })
+    expect(r.changed).toBe(false)
+    expect(r.reason).toBe('task-create:stage-done:prep')
+  })
+
+  it('收口判据：全阶段 done 才算流程可收口（空阶段表恒不可）', () => {
+    expect(processAllowsClose(initProcess())).toBe(false)
+    let p = apply(initProcess(), { kind: 'stage-define', stages: [{ key: 'only', statement: '独苗' }] })
+    p = apply(p, { kind: 'stage-start', stageKey: 'only' })
+    p = apply(p, { kind: 'task-create', task: { id: 'wt:only:1', stageKey: 'only', objective: '干完' } })
+    p = apply(p, { kind: 'task-complete', taskId: 'wt:only:1' })
+    p = apply(p, { kind: 'stage-done', stageKey: 'only' })
+    expect(processAllowsClose(p)).toBe(true)
+  })
+})
+
+describe('层2 相位机 · 与宿主 goal 同构', () => {
+  function withTask(): { p: WorkProcess; id: string } {
+    const p = apply(apply(initProcess(), { kind: 'stage-start', stageKey: 'prep' }),
+      { kind: 'task-create', task: { id: 'wt:prep:1', stageKey: 'prep', objective: '清洗数据' } })
+    return { p, id: 'wt:prep:1' }
+  }
+
+  it('created 任务初态 active / revision=1，挂在所属阶段下', () => {
+    const { p } = withTask()
+    expect(p.stages[0].tasks[0]).toEqual({ id: 'wt:prep:1', stageKey: 'prep', objective: '清洗数据', phase: 'active', revision: 1 })
+  })
+
+  it('pause → paused；resume → active；同值重放零写入', () => {
+    const { p, id } = withTask()
+    const paused = apply(p, { kind: 'task-pause', taskId: id })
+    expect(paused.stages[0].tasks[0].phase).toBe('paused')
+    const replay = applyWorkEvent(paused, { kind: 'task-pause', taskId: id })
+    expect(replay.changed).toBe(false)
+    expect(replay.reason).toBe('task-pause:not-active:paused')
+    expect(apply(paused, { kind: 'task-resume', taskId: id }).stages[0].tasks[0].phase).toBe('active')
+  })
+
+  it('block 必须带结构化原因（空 code/message 一律拒）', () => {
+    const { p, id } = withTask()
+    const bad = applyWorkEvent(p, { kind: 'task-block', taskId: id, reason: { code: ' ', message: '等人' } })
+    expect(bad.changed).toBe(false)
+    expect(bad.reason).toBe('task-block:reason-required')
+    const blocked = apply(p, { kind: 'task-block', taskId: id, reason: { code: 'wait-human', message: '等人确认' } })
+    expect(blocked.stages[0].tasks[0].blockedReason).toEqual({ code: 'wait-human', message: '等人确认' })
+  })
+
+  it('complete 是终态：之后再 pause / 再 complete 一律零写入', () => {
+    const { p, id } = withTask()
+    const done = apply(p, { kind: 'task-complete', taskId: id })
+    expect(done.stages[0].tasks[0].phase).toBe('complete')
+    expect(applyWorkEvent(done, { kind: 'task-pause', taskId: id }).changed).toBe(false)
+    expect(applyWorkEvent(done, { kind: 'task-complete', taskId: id }).reason).toBe('task-complete:terminal')
+  })
+
+  it('任务相位一改，所属阶段立刻不可收口（跨层联动）', () => {
+    const { p, id } = withTask()
+    const done = apply(apply(p, { kind: 'task-complete', taskId: id }), { kind: 'stage-done', stageKey: 'prep' })
+    expect(done.stages[0].state).toBe('done')
+    const back = applyWorkEvent(done, { kind: 'task-resume', taskId: id })
+    expect(back.changed).toBe(false)   // complete 不可逆 → 阶段也不会被拖着走
+  })
+})
+
+describe('身份 · 编号与墓碑（清掉的不复用）', () => {
+  it('clear 之后新建的任务编号递增，不复用被清掉的号', () => {
+    let p = apply(initProcess(), { kind: 'stage-start', stageKey: 'prep' })
+    p = apply(p, { kind: 'task-create', task: { id: 'wt:prep:1', stageKey: 'prep', objective: 'a' } })
+    p = apply(p, { kind: 'task-create', task: { id: 'wt:prep:2', stageKey: 'prep', objective: 'b' } })
+    p = apply(p, { kind: 'task-clear', taskId: 'wt:prep:2', clearedAt: 1_000 })
+    expect(p.stages[0].tasks.map((t) => t.id)).toEqual(['wt:prep:1'])
+    expect(p.cleared).toEqual([{ id: 'wt:prep:2', revision: 1, clearedAt: 1_000 }])
+    const reuse = applyWorkEvent(p, { kind: 'task-create', task: { id: 'wt:prep:2', stageKey: 'prep', objective: 'c' } })
+    expect(reuse.changed).toBe(false)
+    expect(reuse.reason).toBe('task-create:identity-reuse:wt:prep:2')
+  })
+})
+
+describe('聚合 CAS 与严格解码', () => {
+  it('折叠校验链：revision 未恰好 +1 → 抛 WORK_CORRUPT', () => {
+    const p = initProcess()
+    const skip = change({ kind: 'stage-start', stageKey: 'prep' }, { ...p, revision: p.revision + 2 })
+    expect(() => foldWorkProcess([change(INIT, p), skip])).toThrow(WorkError)
+  })
+
+  it('折叠校验链：记录的快照与事件重算不一致 → 抛 WORK_CORRUPT', () => {
+    const p = initProcess()
+    const started = applyWorkEvent(p, { kind: 'stage-start', stageKey: 'prep' }).next!
+    const forged: WorkProcess = { ...started, stages: started.stages.map((s) => (s.key === 'prep' ? { ...s, state: 'done' } : s)) }
+    expect(() => foldWorkProcess([change(INIT, p), change({ kind: 'stage-start', stageKey: 'prep' }, forged)])).toThrow(WorkError)
+  })
+
+  it('严格解码：坏快照当场响亮（多字段 / 串行门被破 / 任务归属不符）', () => {
+    const p = initProcess()
+    expect(() => decodeWorkProcess({ ...p, extra: 1 })).toThrow(WorkError)
+    expect(() => decodeWorkProcess({ ...p, stages: [p.stages[0], { ...p.stages[1], state: 'done' }, p.stages[2]] })).toThrow(WorkError)
+    const started = applyWorkEvent(p, { kind: 'stage-start', stageKey: 'prep' }).next!
+    const moved = applyWorkEvent(started, { kind: 'task-create', task: { id: 'wt:prep:1', stageKey: 'prep', objective: 'x' } }).next!
+    expect(() => decodeWorkProcess({ ...moved, stages: moved.stages.map((s) => (s.key === 'train' ? { ...s, tasks: moved.stages[0].tasks } : s)) })).toThrow(WorkError)
+  })
+
+  it('幂等重放不产出变更：sameProcess 是唯一的"没变"口径', () => {
+    const p = initProcess()
+    expect(sameProcess(p, initProcess())).toBe(true)
+    expect(sameProcess(p, apply(p, { kind: 'stage-start', stageKey: 'prep' }))).toBe(false)
+  })
+})
+
+describe('阶段表整体替换（stage-define）', () => {
+  it('同值零写入；新增阶段为 pending；改名保留原有任务与态', () => {
+    const p = initProcess()
+    expect(applyWorkEvent(p, { kind: 'stage-define', stages: STAGES }).reason).toBe('stage-define:idempotent-replay')
+
+    const started = applyWorkEvent(p, { kind: 'stage-start', stageKey: 'prep' }).next!
+    const withTask = applyWorkEvent(started, { kind: 'task-create', task: { id: 'wt:prep:1', stageKey: 'prep', objective: 'x' } }).next!
+    const redefined = applyWorkEvent(withTask, {
+      kind: 'stage-define',
+      stages: [{ key: 'prep', statement: '准备数据（改名）' }, { key: 'ship', statement: '发布' }],
+    })
+    expect(redefined.changed).toBe(true)
+    expect(redefined.next?.stages[0].statement).toBe('准备数据（改名）')
+    expect(redefined.next?.stages[0].state).toBe('active')
+    expect(redefined.next?.stages[0].tasks.length).toBe(1)
+    expect(redefined.next?.stages[1]).toEqual({ key: 'ship', statement: '发布', doneCriteria: [], state: 'pending', tasks: [] })
+  })
+
+  it('会被丢掉的非空阶段一律拒（不静默丢任务）', () => {
+    const started = applyWorkEvent(initProcess(), { kind: 'stage-start', stageKey: 'prep' }).next!
+    const withTask = applyWorkEvent(started, { kind: 'task-create', task: { id: 'wt:prep:1', stageKey: 'prep', objective: 'x' } }).next!
+    const r = applyWorkEvent(withTask, { kind: 'stage-define', stages: [{ key: 'train', statement: '训练' }] })
+    expect(r.changed).toBe(false)
+    expect(r.reason).toBe('stage-define:would-drop-tasks:prep')
+  })
+
+  it('重排后串行门被破坏 → 拒（不能把 active 阶段排到未完成阶段后面）', () => {
+    const started = applyWorkEvent(initProcess(), { kind: 'stage-start', stageKey: 'prep' }).next!
+    const r = applyWorkEvent(started, {
+      kind: 'stage-define',
+      stages: [{ key: 'train', statement: '训练' }, { key: 'prep', statement: '准备数据' }],
+    })
+    expect(r.changed).toBe(false)
+    expect(r.reason).toContain('串行门被破坏')
+  })
+
+  it('进度投影：阶段与任务两层分别计数', () => {
+    const started = applyWorkEvent(initProcess(), { kind: 'stage-start', stageKey: 'prep' }).next!
+    const withTasks = applyWorkEvent(started, { kind: 'task-create', task: { id: 'wt:prep:1', stageKey: 'prep', objective: 'x' } }).next!
+    const done = applyWorkEvent(withTasks, { kind: 'task-complete', taskId: 'wt:prep:1' }).next!
+    expect(workProgressOf(done)).toEqual({ stages: { total: 3, done: 0 }, tasks: { total: 1, done: 1 } })
+  })
+})
+
+/* -------------------------------------------------------------------------- */
+/* 服务层（I/O 编排）：store 假件 + 幂等判据靠 writes 计数                          */
+
+function storeOf(records: Record<string, WorkRecordLike>) {
+  let writes = 0
+  return {
+    records,
+    get writes() { return writes },
+    get: async (scope: string) => records[scope],
+    mutate: async (scope: string, fn: (draft: WorkRecordLike) => unknown) => {
+      const record = records[scope]
+      if (record === undefined) return { changed: false }
+      const out = fn(record)
+      const changed = (out as { changed?: boolean } | undefined)?.changed === true
+      if (changed) writes += 1
+      return { changed }
+    },
+  }
+}
+
+describe('服务层 · 读写收口', () => {
+  it('建流程 → 落记录 + 通知；幂等重放零写盘', async () => {
+    const st = storeOf({ 'ws-a': { updatedAt: 1 } })
+    const notes: string[] = []
+    const deps = { store: st as never, now: () => 1_000, onChanged: (n: { change: { event: WorkEvent } }) => { notes.push(n.change.event.kind) } }
+
+    expect(await createWorkProcess(deps, 'ws-a', { objective: '把模型发上线', stages: STAGES })).toBe(true)
+    expect(st.writes).toBe(1)
+    expect(notes).toEqual(['init'])
+    expect(await createWorkProcess(deps, 'ws-a', { objective: '把模型发上线', stages: STAGES })).toBe(false)
+    expect(st.writes).toBe(1)
+    expect(notes).toEqual(['init'])
+  })
+
+  it('建任务：身份由服务分配（wt:<stage>:<seq>），clear 后不回头', async () => {
+    const st = storeOf({ 'ws-a': { updatedAt: 1 } })
+    const deps = { store: st as never, now: () => 1_000 }
+    await createWorkProcess(deps, 'ws-a', { objective: 'x', stages: STAGES })
+    await startWorkStage(deps, 'ws-a', 'prep')
+    await createWorkTask(deps, 'ws-a', { stageKey: 'prep', objective: 'a' })
+    await createWorkTask(deps, 'ws-a', { stageKey: 'prep', objective: 'b' })
+    await clearWorkTask(deps, 'ws-a', 'wt:prep:2')
+    expect(await createWorkTask(deps, 'ws-a', { stageKey: 'prep', objective: 'c' })).toBe(true)
+    const ids = await workTaskOf(deps, 'ws-a', 'wt:prep:3')
+    expect(ids?.objective).toBe('c')
+  })
+
+  it('CAS：拿旧 revision 改 → WORK_CONFLICT（写前拒）', async () => {
+    const st = storeOf({ 'ws-a': { updatedAt: 1 } })
+    const deps = { store: st as never, now: () => 1_000 }
+    await createWorkProcess(deps, 'ws-a', { objective: 'x', stages: STAGES })
+    await startWorkStage(deps, 'ws-a', 'prep')
+    await expect(startWorkStage(deps, 'ws-a', 'prep', 1)).rejects.toMatchObject({ code: 'WORK_CONFLICT' })
+  })
+
+  it('没有流程就建任务 → WORK_NO_PROCESS（不落半份状态）', async () => {
+    const st = storeOf({ 'ws-a': { updatedAt: 1 } })
+    const deps = { store: st as never, now: () => 1_000 }
+    await expect(createWorkTask(deps, 'ws-a', { stageKey: 'prep', objective: 'a' }))
+      .rejects.toMatchObject({ code: 'WORK_NO_PROCESS' })
+    expect(st.writes).toBe(0)
+  })
+
+  it('视图：计数与许可派生自归属记录（不另存第二份）', async () => {
+    const st = storeOf({ 'ws-a': { updatedAt: 1, rounds: { started: 4, activation: 'armed' } } })
+    const deps = { store: st as never, now: () => 1_000 }
+    await createWorkProcess(deps, 'ws-a', { objective: 'x', stages: STAGES })
+    const view = await workProcessViewOf(deps, 'ws-a')
+    expect(view?.roundsStarted).toBe(4)
+    expect(view?.activation).toBe('armed')
+    expect(await progressOf(deps, 'ws-a')).toEqual({ stages: { total: 3, done: 0 }, tasks: { total: 0, done: 0 } })
+  })
+
+  it('阶段推进链：人工确认收口后才放行下一阶段', async () => {
+    const st = storeOf({ 'ws-a': { updatedAt: 1 } })
+    const deps = { store: st as never, now: () => 1_000 }
+    await createWorkProcess(deps, 'ws-a', { objective: 'x', stages: STAGES })
+    await startWorkStage(deps, 'ws-a', 'prep')
+    await createWorkTask(deps, 'ws-a', { stageKey: 'prep', objective: 'a' })
+    await completeWorkTask(deps, 'ws-a', 'wt:prep:1')
+    expect(await completeWorkStage(deps, 'ws-a', 'prep')).toBe(true)
+    expect(await startWorkStage(deps, 'ws-a', 'train')).toBe(true)
+    expect(await defineWorkStages(deps, 'ws-a', [{ key: 'prep', statement: '准备数据', doneCriteria: ['数据可用'] }, { key: 'train', statement: '训练模型' }, { key: 'release', statement: '发布上线' }])).toBe(false)
+  })
+})
