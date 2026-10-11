@@ -12,7 +12,8 @@
  * 【三条纪律】
  *   ① 写一律经 `applyWorkEvent` 纯函数——本文件不自己拼状态；
  *   ② 幂等：纯函数说 `changed:false` → 本文件零写入（不写盘、不 bump revision）；
- *   ③ 阶段收口（`stage-done`）**只允许人工确认路径调用**（agent 自写 = 越权）。
+ *   ③ 阶段收口（`stage-done`）的**授权**由收口策略定（`human` = 只有人能落、agent 只提议；
+ *      `auto` = 会话回合 / 驱动器也能落）——本包只管状态规则，不判"谁在调"（那是授权面的事）。
  *
  * @module workprocess
  */
@@ -31,7 +32,7 @@ import type {
 // runtime 的同名构造器会撞——类型改以 `…Type` 露出。
 export type {
   WorkActivation, WorkBlockReason, WorkProcess, WorkProcessView, WorkProgress, WorkStage, WorkStageDraft,
-  WorkStageState, WorkTask, WorkTaskDraft, WorkTaskPhase, WorkTaskRef, WorkTaskTombstone,
+  WorkStageClosePolicy, WorkStageState, WorkTask, WorkTaskDraft, WorkTaskPhase, WorkTaskRef, WorkTaskTombstone,
   CreateWorkProcessRequest, CreateWorkTaskRequest, EditWorkTaskRequest,
   WorkProcessId as WorkProcessIdType, WorkTaskId as WorkTaskIdType,
 } from './types.js'
@@ -178,7 +179,40 @@ export async function startWorkStage(
 }
 
 /**
- * 阶段收口（**人工确认路径专属**：本阶段任务须非空且全 complete）。幂等：已 done ⇒ 零写入。
+ * **丢弃流程**（连根拔掉，不是状态迁移）。幂等：没有流程 ⇒ 零写入。
+ *
+ * 【为什么不经事件表】事件表描述"聚合怎么变"，而这条是把聚合**整个摘掉**——没有"变更后的快照"
+ * （`WorkChange` 必带快照），硬塞进事件流会让"记录 = 事件重算"那条不变量自相矛盾。
+ * 故它是**服务层动作**：状态规则仍只有一份（事件表管迁移，本函数管摘除）。
+ *
+ * 语义：流程没了（再建是 revision 1 的**新**流程）、回合计数归零、任务墓碑一并消失
+ * （那不是"清一个任务"，是整条流程不再存在）。给 `expectedRevision` 时旧值即拒（CAS 同款）。
+ */
+export async function discardWorkProcess(
+  deps: WorkDeps, scope: string, expectedRevision?: number,
+): Promise<boolean> {
+  if (expectedRevision !== undefined) {
+    const current = await deps.store.get(scope)
+    assertRevision(decodeExisting(current?.workProcess), expectedRevision)
+  }
+  let changed = false
+  await deps.store.mutate(scope, (r) => {
+    const prev = decodeExisting(r.workProcess)
+    if (prev === undefined) return undefined
+    delete r.workProcess
+    if (r.rounds !== undefined) r.rounds = { ...r.rounds, started: 0 }
+    r.updatedAt = deps.now()
+    changed = true
+    return { changed: true }
+  })
+  return changed
+}
+
+/**
+ * 阶段收口（本阶段任务须非空且全 complete）。幂等：已 done ⇒ 零写入。
+ *
+ * 这里不判"谁在调"：`human` 策略下由授权面（工具面 / 驱动器）拦 agent 自写，`auto` 策略下放行——
+ * 内核只落状态，授权是调用方的事。
  */
 export async function completeWorkStage(
   deps: WorkDeps, scope: string, stageKey: string, expectedRevision?: number,

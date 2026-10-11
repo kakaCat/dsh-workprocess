@@ -61,6 +61,19 @@ describe('工具壳 · 与登记表同源', () => {
       expect(tools[entry.handler].description).toBe(entry.description)
     }
   })
+
+  it('回执渲染必须是内容块数组（宿主口径）：返回裸字符串会在宿主侧炸', () => {
+    const tools = allTools(depsOf({ 'ws-a': { updatedAt: 1 } }))
+    for (const entry of WORK_TOOL_REGISTRY) {
+      const output = (tools[entry.handler] as { output?: { render?: (a: unknown, v: unknown) => unknown } }).output
+      const blocks = output?.render?.({}, { success: true, stages: [{ state: 'done' }] }) as Array<{ type?: string; text?: string }>
+      expect(Array.isArray(blocks), entry.toolName + ' 的 render 必须返回数组').toBe(true)
+      expect(blocks[0]).toMatchObject({ type: 'text' })
+      expect(typeof blocks[0].text).toBe('string')
+      // 渲染的是**第二个**形参（宿主口径 render(args, value)）：读成第一个只会渲染出一行"未成功"。
+      expect(String(blocks[0].text)).toContain('已收口')
+    }
+  })
 })
 
 describe('工具壳 · 协议面走通', () => {
@@ -94,7 +107,7 @@ describe('工具壳 · 协议面走通', () => {
     expect(after.allows_start).toBe(true)
   })
 
-  it('真人专属动作在协议面也被拦（stage_done / task_edit / task_resume）', async () => {
+  it('真人专属动作在协议面也被拦（缺省 human 策略的 stage_done / task_edit / task_resume）', async () => {
     const records = { 'ws-a': { updatedAt: 1 } }
     const agent = allTools(depsOf(records))
     await agent.createWorkstage.execute({ scope: 'ws-a', objective: 'x', stages: STAGES })

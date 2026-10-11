@@ -45,6 +45,7 @@ function factsOf(process: WorkProcess): WorkFacts {
         doneCriteria: current.doneCriteria,
         state: current.state,
         allowsStart: stageAllowsStart(process, current.key),
+        ...(current.closePolicy === undefined ? {} : { closePolicy: current.closePolicy }),
         tasks: current.tasks.map((t) => ({
           id: t.id, objective: t.objective, phase: t.phase, revision: t.revision,
           ...(t.maxRounds === undefined ? {} : { maxRounds: t.maxRounds }),
@@ -60,6 +61,7 @@ function label(d: RoundDecision): string {
     case 'start-stage': return 'start-stage:' + d.stageKey
     case 'drive': return 'drive:' + d.taskId
     case 'ask-stage-done': return 'ask-stage-done:' + d.stageKey
+    case 'close-stage': return 'close-stage:' + d.stageKey
     case 'ask-close': return 'ask-close'
     case 'block-task': return 'block-task:' + d.taskId
     case 'wait-human': return 'wait-human:' + d.reason
@@ -95,7 +97,9 @@ describe('端到端 · 驱动器环', () => {
 
       if (decision.kind === 'ask-close') break
       if (decision.kind === 'start-stage') await startWorkStage(deps, 'ws-a', decision.stageKey)
-      else if (decision.kind === 'drive') {
+      else if (decision.kind === 'close-stage') {
+        await completeWorkStage(deps, 'ws-a', decision.stageKey) // 策略 auto：驱动器自己落 done，不等人
+      } else if (decision.kind === 'drive') {
         rounds += 1                                   // 准入了一个回合
         await completeWorkTask(deps, 'ws-a', decision.taskId)   // 该回合真的把任务干完了
       } else if (decision.kind === 'ask-stage-done') {
@@ -119,6 +123,50 @@ describe('端到端 · 驱动器环', () => {
     const end = await workProcessOf(deps, 'ws-a')
     expect(end!.stages.map((s) => s.state)).toEqual(['done', 'done'])
     expect(processAllowsClose(end!)).toBe(true)
+  })
+
+  it('收口策略 auto：任务全完成即由驱动器自动收口，阶段边界不等人工确认', async () => {
+    const records = { 'ws-a': { updatedAt: 1 } }
+    const deps = { store: storeOf(records) as never, now: () => 1_000 }
+    await createWorkProcess(deps, 'ws-a', {
+      objective: '把模型发上线',
+      stages: [
+        { key: 'prep', statement: '准备数据', closePolicy: 'auto' },
+        { key: 'train', statement: '训练模型', closePolicy: 'auto' },
+      ],
+    })
+    await createWorkTask(deps, 'ws-a', { stageKey: 'prep', objective: '清洗数据' })
+    await createWorkTask(deps, 'ws-a', { stageKey: 'train', objective: '调参' })
+
+    const seen: string[] = []
+    let ticks = 0
+    for (;;) {
+      ticks += 1
+      expect(ticks).toBeLessThan(20)
+      const process = await workProcessOf(deps, 'ws-a')
+      const decision = decideWorkRound({
+        now: 1_000, scope: SCOPE, gates: {}, work: factsOf(process!), roundsStarted: ticks,
+      })
+      seen.push(label(decision))
+      if (decision.kind === 'ask-close') break
+      if (decision.kind === 'start-stage') await startWorkStage(deps, 'ws-a', decision.stageKey)
+      else if (decision.kind === 'close-stage') await completeWorkStage(deps, 'ws-a', decision.stageKey)
+      else if (decision.kind === 'drive') await completeWorkTask(deps, 'ws-a', decision.taskId)
+      else if (decision.kind === 'ask-stage-done') await completeWorkStage(deps, 'ws-a', decision.stageKey)
+      else throw new Error('驱动拍给出了不该出现的结论：' + label(decision))
+    }
+
+    // 两段策略都是 auto：收口由驱动器落，全程没有一拍是"请人确认"
+    expect(seen).toEqual([
+      'start-stage:prep',
+      'drive:wt:prep:1',
+      'close-stage:prep',      // 自动收口（人工确认那条路没有被触发）
+      'start-stage:train',
+      'drive:wt:train:1',
+      'close-stage:train',
+      'ask-close',             // 流程级收口仍是人的判断（流程没有"完成"态）
+    ])
+    expect(seen.some((s) => s.startsWith('ask-stage-done'))).toBe(false)
   })
 
   it('阶段已开工但没有任务 → hold（决策层不臆造任务）；有任务在跑就不许偷下一步', async () => {

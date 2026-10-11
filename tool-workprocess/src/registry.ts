@@ -40,13 +40,13 @@ export const WORK_TOOL_REGISTRY: readonly WorkToolRegistryEntry[] = [
     handler: 'createWorkstage',
     toolName: 'create_workstage',
     layer: 'stage',
-    description: '建流程（带阶段表）或整体替换阶段表：同名阶段保留其任务与态，会丢掉非空阶段的一律拒',
+    description: '建流程（带阶段表：key / statement / done_criteria? / close_policy?）或整体替换阶段表：同名阶段保留其任务与态，会丢掉非空阶段的一律拒',
   },
   {
     handler: 'updateWorkstage',
     toolName: 'update_workstage',
     layer: 'stage',
-    description: '阶段态变更（action=done：阶段收口确认，**真人专属**，本阶段任务须非空且全部 complete）',
+    description: '阶段态变更：action=done（阶段收口，本阶段任务须非空且全部 complete）——策略 human 时**真人专属**，策略 auto 时可由驱动器自动落；action=discard（丢弃整条流程，不可逆，**真人专属**）',
   },
   {
     handler: 'getWorktask',

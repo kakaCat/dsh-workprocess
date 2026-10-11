@@ -41,7 +41,7 @@ export type WorkEvent =
   | { readonly kind: 'stage-define'; readonly stages: readonly WorkStageDraft[] }
   /** 阶段开工（串行门：前序阶段必须全 `done`）。 */
   | { readonly kind: 'stage-start'; readonly stageKey: string }
-  /** 阶段收口（**人工确认路径专属**：本阶段任务须全 complete）。 */
+  /** 阶段收口（本阶段任务须全 complete；**谁有权落**由阶段收口策略定：human = 人工确认，auto = 自动收口）。 */
   | { readonly kind: 'stage-done'; readonly stageKey: string }
   /** 建任务（id 由调用方按 `WorkTaskId()` 分配；`done` 阶段不许再建）。 */
   | { readonly kind: 'task-create'; readonly task: WorkTaskDraft }

@@ -11,9 +11,9 @@
  * 【为什么决策是纯函数】闸 + 两层分支必须能被穷举单测（与内核 `fold` 同款：
  * 纯函数、零 I/O）。I/O 全在端口后面。
  *
- * @module workprocess-round-driver/types
+ * @module workprocess/round/types
  */
-import type { WorkStageState, WorkTaskPhase } from 'workprocess'
+import type { WorkStageClosePolicy, WorkStageState, WorkTaskPhase } from 'workprocess'
 
 /** 归属侧窄投影（驱动拍要读的**有界**事实）。 */
 export interface RoundScopeFacts {
@@ -62,6 +62,8 @@ export interface StageFacts {
   readonly state: WorkStageState
   /** 串行门：前序阶段全 done 且本阶段 pending（`stageAllowsStart()` 的读数）。 */
   readonly allowsStart?: boolean
+  /** 收口策略（缺省 `human`；`auto` = 任务全 complete 后直接自动收口，不等人工确认）。 */
+  readonly closePolicy?: WorkStageClosePolicy
   /** 本阶段的任务（层2）；空数组 = 阶段已开工但还没有任务。 */
   readonly tasks?: readonly TaskFacts[]
 }
@@ -87,14 +89,16 @@ export interface DecideInput {
   readonly roundsStarted?: number
 }
 
-/** 驱动拍的结论（**穷尽**七态）。 */
+/** 驱动拍的结论（**穷尽九态**）。 */
 export type RoundDecision =
   /** 起轮：把提示词投给会话（层2 的该任务已是 active）。 */
   | { readonly kind: 'drive'; readonly processId: string; readonly stageKey: string; readonly taskId: string }
   /** **层1 开工**：当前阶段还是 pending 且串行门已放行 ⇒ 先开工（下一拍再起轮）。 */
   | { readonly kind: 'start-stage'; readonly processId: string; readonly stageKey: string }
-  /** 阶段任务全 complete ⇒ 触发弹框请人确认（人工确认，agent 不写）。 */
+  /** 阶段任务全 complete 且策略 `human` ⇒ 触发弹框请人确认（agent 不写）。 */
   | { readonly kind: 'ask-stage-done'; readonly processId: string; readonly stageKey: string }
+  /** 阶段任务全 complete 且策略 `auto` ⇒ **自动收口**（驱动器直接落 done，不等人工确认）。 */
+  | { readonly kind: 'close-stage'; readonly processId: string; readonly stageKey: string }
   /** 全部阶段 done ⇒ 触发收口弹框。 */
   | { readonly kind: 'ask-close'; readonly processId: string }
   /** 任务达回合上限 ⇒ **落盘 block**（重启不失忆、人可见可裁）。 */

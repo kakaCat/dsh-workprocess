@@ -29,17 +29,29 @@
       "workprocess/*": [
         "./workprocess/src/*"
       ],
+      "tool-workprocess": [
+        "./tool-workprocess/src/index.ts"
+      ],
+      "dsh-command-workprocess": [
+        "./command-workprocess/src/index.ts"
+      ],
+      "dsh-command-workprocess/*": [
+        "./command-workprocess/src/*"
+      ],
+      "tool-workprocess/*": [
+        "./tool-workprocess/src/*"
+      ],
       "workprocess-round-driver": [
         "./workprocess-round-driver/src/index.ts"
       ],
       "workprocess-round-driver/*": [
         "./workprocess-round-driver/src/*"
       ],
-      "tool-workprocess": [
-        "./tool-workprocess/src/index.ts"
+      "dsh-workprocess": [
+        "./dsh-workprocess/src/index.ts"
       ],
-      "tool-workprocess/*": [
-        "./tool-workprocess/src/*"
+      "dsh-workprocess/*": [
+        "./dsh-workprocess/src/*"
       ]
     }
   }

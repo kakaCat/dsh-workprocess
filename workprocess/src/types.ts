@@ -39,6 +39,17 @@ export type WorkTaskPhase = 'active' | 'paused' | 'blocked' | 'complete'
  */
 export type WorkStageState = 'pending' | 'active' | 'done'
 
+/**
+ * **层1** 的收口策略：谁来把阶段标 `done`。
+ *
+ *   · `human`（缺省）——**人工确认**收口：agent 只提议，不落 done；
+ *   · `auto` ——**自动收口**：本阶段任务全 `complete` 后由驱动器直接落 done，阶段边界不必等人。
+ *
+ * 缺省为什么是 `human`：收口是"这一段算不算成了"的判定，而一旦 `done`，串行门就放行下一段——
+ * 判错的代价是"下一段建在没验完的地基上"。故默认交给人，只有**显式声明** `auto` 的阶段才自动推进。
+ */
+export type WorkStageClosePolicy = 'human' | 'auto'
+
 /** 进程内续跑许可（对齐宿主 `GoalActivation`）。 */
 export type WorkActivation = 'armed' | 'disarmed'
 
@@ -89,6 +100,8 @@ export interface WorkStage {
   readonly statement: string
   /** 阶段达成判据（进提示词；缺省空数组）。 */
   readonly doneCriteria: readonly string[]
+  /** 收口策略（缺省 `human` = 人工确认；`auto` = 任务全完成即自动收口）。读它请用 `stageClosePolicyOf()`。 */
+  readonly closePolicy?: WorkStageClosePolicy
   /** 串行门：`pending` → `active` → `done`（前序阶段全 `done` 才可 `active`）。 */
   readonly state: WorkStageState
   /** 本阶段的任务（层2）；可空。 */
@@ -130,6 +143,8 @@ export interface WorkStageDraft {
   readonly key: string
   readonly statement: string
   readonly doneCriteria?: readonly string[]
+  /** 收口策略（缺省 `human`；`define-stages` 是**整体替换定义**，缺省即改回人工确认）。 */
+  readonly closePolicy?: WorkStageClosePolicy
 }
 
 /** 建任务的输入（`task-create` 的载荷）：id 由调用方按 `WorkTaskId()` 分配。 */

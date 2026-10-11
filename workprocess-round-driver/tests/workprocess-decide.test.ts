@@ -82,9 +82,23 @@ describe('层1 · 串行门与收口', () => {
     expect(r).toEqual({ kind: 'hold', reason: 'stage-serial-blocked:train', processId: 'wp:ws-a' })
   })
 
-  it('阶段已开工但任务全 complete → 请人确认（agent 不自写 done）', () => {
+  it('阶段已开工但任务全 complete → 请人确认（缺省策略 human，agent 不自写 done）', () => {
     const r = decideWorkRound(input({ work: { processId: 'wp:ws-a', currentStage: stage({ tasks: [task({ phase: 'complete' })] }) } }))
     expect(r).toEqual({ kind: 'ask-stage-done', processId: 'wp:ws-a', stageKey: 'prep' })
+  })
+
+  it('阶段策略 auto：任务全 complete → close-stage（自动收口，不等人工确认）', () => {
+    const r = decideWorkRound(input({
+      work: { processId: 'wp:ws-a', currentStage: stage({ closePolicy: 'auto', tasks: [task({ phase: 'complete' })] }) },
+    }))
+    expect(r).toEqual({ kind: 'close-stage', processId: 'wp:ws-a', stageKey: 'prep' })
+  })
+
+  it('策略只管"谁落 done"，不改"没全完成就不许收口"', () => {
+    const r = decideWorkRound(input({
+      work: { processId: 'wp:ws-a', currentStage: stage({ closePolicy: 'auto', tasks: [task({ phase: 'complete' }), task({ id: 'wt:prep:2' })] }) },
+    }))
+    expect(r).toEqual({ kind: 'drive', processId: 'wp:ws-a', stageKey: 'prep', taskId: 'wt:prep:2' })
   })
 
   it('阶段已开工却没有任何任务 → hold（决策层不臆造任务）', () => {
@@ -156,5 +170,21 @@ describe('回合提示词：两层都要写进模型看得见的地方', () => {
     })
     expect(text).toContain('未登记达成判据')
     expect(text).toContain('上限 不限')
+  })
+
+  it('边界按收口策略写：human 请人确认 / auto 由驱动器自动收口（缺省 = human）', () => {
+    const base = {
+      processObjective: 'x',
+      task: { id: 'wt:prep:1', objective: 'y' },
+      round: 1,
+    }
+    const human = renderWorkRoundPrompt({ ...base, stage: { key: 'prep', statement: '准备', doneCriteria: [] } })
+    expect(human).toContain('人工确认')
+    expect(human).not.toContain('自动收口')
+    const auto = renderWorkRoundPrompt({
+      ...base, stage: { key: 'prep', statement: '准备', doneCriteria: [], closePolicy: 'auto' },
+    })
+    expect(auto).toContain('自动收口')
+    expect(auto).not.toContain('人工确认')
   })
 })

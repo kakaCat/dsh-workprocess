@@ -11,11 +11,12 @@
  *   ⑧ **层1**：全阶段 done → ask-close；当前阶段 pending → 串行门放行则 start-stage，否则 hold
  *   ⑨ **层2**：有 active 任务 → 回合作顶则 block-task，否则 drive；
  *              有 paused/blocked 任务 → wait-human；
- *              任务全 complete → ask-stage-done；
+ *              任务全 complete → 策略 `auto` 则 close-stage（自动收口），否则 ask-stage-done（请人确认）；
  *              阶段已开工却没任务 → hold（**决策层不臆造任务**）
  *
- * @module workprocess-round-driver/decide
+ * @module workprocess/round/decide
  */
+import { stageClosePolicyOf } from 'workprocess'
 import type { DecideInput, RoundDecision, StageFacts, TaskFacts } from './types.js'
 
 const hold = (reason: string, processId?: string): RoundDecision =>
@@ -85,9 +86,13 @@ function layerBranch(input: DecideInput, processId: string, stage: StageFacts | 
     return { kind: 'wait-human', processId, reason: 'task-' + waiting.phase + ':' + waiting.id }
   }
 
-  // 层2 全 complete ⇒ 层1 可收口：请人确认（agent 不得自写 done）。
+  // 层2 全 complete ⇒ 层1 该收口了。**由谁落 done 由阶段收口策略定**：
+  //   · `human`（缺省）——请人确认（agent 只提议，不写）；
+  //   · `auto` ——驱动器直接落 done（"自动推进下一阶段"这条路的唯一入口；判据仍要求任务非空且全 complete）。
   if (tasks.length > 0 && tasks.every((t) => t.phase === 'complete')) {
-    return { kind: 'ask-stage-done', processId, stageKey: stage.key }
+    return stageClosePolicyOf(stage) === 'auto'
+      ? { kind: 'close-stage', processId, stageKey: stage.key }
+      : { kind: 'ask-stage-done', processId, stageKey: stage.key }
   }
 
   // 阶段已开工却没有可跑的任务：**决策层不臆造任务**，停下等人/上游落任务。

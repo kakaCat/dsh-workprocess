@@ -17,6 +17,10 @@ WorkProcess（聚合根：一次完整流程，一个归属对象一条）
   **严格串行是决定，不是省略**（用户决定）：唯一合法形态 `[done…][active?][pending…]`——
   跳阶段 / 两个阶段并行 / 后阶段先收口一律拒；**不做阶段间 DAG**。注意被禁的并行只在**阶段之间**：
   阶段内的多个 `WorkTask` 本来就是并列的。
+  收口**由谁落**是**每阶段的策略** `closePolicy: 'human' | 'auto'`（缺省 `human`）：
+  `human` = 人工确认（agent 只提议）；`auto` = 任务全 `complete` 后由驱动器直接落 done。
+  策略只决定"谁有权落"，不改收口判据（`auto` 同样要求任务非空且全 complete）；读它一律走
+  `stageClosePolicyOf()`（缺省口径的唯一定义处）。
 - **层2（`WorkTask`）**：相位机与宿主 `GoalSnapshot` **逐条对齐**（`active/paused/blocked/complete`、
   `revision` 乐观锁、`blockedReason` 结构化、`maxRounds` 回合上限）——自动续跑真正推动的就是它。
 - **聚合根（`WorkProcess`）**：持顺序化阶段表；两层的写**共用同一个 CAS revision**（分开两个版本号必然打架）。
@@ -29,7 +33,7 @@ WorkProcess（聚合根：一次完整流程，一个归属对象一条）
 | `src/domain.ts` | `packages/goal/goal/src/domain.ts` | 事件与变更词汇：两层动词共用**一条**耐久变更流 |
 | `src/fold.ts` | `packages/goal/goal/src/fold.ts` | 纯折叠与判据：`applyWorkEvent` / 严格解码 `decodeWorkProcess`+`decodeWorkChange` / 迁移链 `applyWorkChange` / `foldWorkProcess`（严格）与 `tryFoldWorkProcess`（`failure` 哨兵）/ 串行门判据 `stageAllowsStart` / `stageIsFinishable` / `processAllowsClose` / `taskAllowsRound` / `workProgressOf` |
 | `src/invariant.ts` | `packages/goal/goal/src/invariant.ts` | 六条不变量（INV-1~6）+ 写路径断言 `assertWorkInvariants()` |
-| `src/stages.ts` | 无（宿主只有单层 goal） | **阶段表投影**（读侧单点）：`currentStageOf` / `stageIndexOf` / `nextStageOf` / `previousStagesDone`——驱动、工具面、折叠读的是同一份"当前阶段 / 串行门前半" |
+| `src/stages.ts` | 无（宿主只有单层 goal） | **阶段表投影**（读侧单点）：`currentStageOf` / `stageIndexOf` / `nextStageOf` / `previousStagesDone` / `stageClosePolicyOf`（收口策略缺省口径）——驱动、工具面、折叠读的是同一份"当前阶段 / 串行门前半 / 谁落 done" |
 | `src/runtime.ts` | `packages/goal/goal/src/runtime.ts` | 构造器与常量：`WorkProcessId()` / `WorkTaskId()` / `WORK_CHANGE_VERSION` / `WorkError` |
 | `src/client.ts` | `packages/goal/goal/src/client.ts` | 客户端命名空间纯再导出 |
 | `src/index.ts` | `packages/goal/goal/src/index.ts` | 服务本体：端口契约 + 读写收口（建流程 / 阶段表 / 阶段开工收口 / 任务五动作）+ 身份分配 |
@@ -54,7 +58,8 @@ WorkProcess（聚合根：一次完整流程，一个归属对象一条）
 ```
 workprocess  ←  workprocess-round-driver（决策/提示词）
              ←  tool-workprocess（工具面）
-             ←  （未来）归属记录的字段与投影接入
+             ←  dsh-workprocess（领域插件：存储域 / 真人判定 / 回合驱动 / ctx.workprocess 服务）
+             ←  command-workprocess（/work 命令行，只消费 ctx.workprocess）
 ```
 
 本包是**新建的独立体系**：不依赖仓内其它插件包，也不改动它们——
@@ -63,5 +68,5 @@ workprocess  ←  workprocess-round-driver（决策/提示词）
 ## 测试
 
 ```bash
-cd workprocess/workprocess && pnpm test      # 30 条：两层结构 / 串行门 / 相位机 / 身份不复用 / CAS / 值域
+cd workprocess/workprocess && pnpm test      # 41 条：两层结构 / 串行门 / 收口策略 / 丢弃流程 / 相位机 / 身份不复用 / CAS / 值域
 ```

@@ -15,13 +15,14 @@
  */
 import {
   WorkError, allTasksOf, applyWorkEvent, blockWorkTask, clearWorkTask, completeWorkStage, completeWorkTask,
-  createWorkProcess, createWorkTask, currentStageOf, defineWorkStages, editWorkTask, pauseWorkTask,
-  processAllowsClose, resumeWorkTask, stageAllowsStart, stageIsFinishable, workProcessOf,
+  createWorkProcess, createWorkTask, currentStageOf, defineWorkStages, discardWorkProcess, editWorkTask,
+  pauseWorkTask, processAllowsClose, resumeWorkTask, stageAllowsStart, stageClosePolicyOf, stageIsFinishable,
+  workProcessOf,
 } from 'workprocess'
-import type { WorkStageDraft, WorkStoreLike, WorkTask } from 'workprocess'
+import type { WorkStageClosePolicy, WorkStageDraft, WorkStoreLike, WorkTask } from 'workprocess'
 import {
   requireActionAuthority, workToolExecution,
-  type WorkAuthorityAction, type WorkRoundRef, type WorkToolAuthority,
+  type WorkAuthorityAction, type WorkAuthorityContext, type WorkRoundRef, type WorkToolAuthority,
 } from './authority.js'
 
 /** 组合根可注入的依赖（`store` = 归属记录端口；判据钩子见 `authority.ts`）。 */
@@ -34,15 +35,25 @@ export interface WorkToolDeps {
   readonly resolveAuthority?: (exec: unknown, expected?: WorkRoundRef) => WorkToolAuthority | undefined
   /** 调用者存活校验（缺省 = 不校验）。 */
   readonly verifyCaller?: (exec: unknown) => { readonly ok: boolean; readonly reason?: string }
+  /**
+   * **归属域键的缺省**（组合根按调用者投影，如"本会话 id"）。
+   * 缺省不接 = 调用方必须显式给 `scope`（工具面不替调用方猜归属）。
+   */
+  readonly defaultScope?: (exec: unknown) => string | undefined
 }
 
 /** 工具回执（普通对象；`success:false` 时带 `code`/`error`）。 */
 export type WorkToolReply = Record<string, unknown>
 
-/** 归属域键解析（`scope`：这条流程挂在谁名下——由组合根注入或调用方显式给）。 */
-function scopeOf(args: Record<string, unknown>): string | undefined {
+/**
+ * 归属域键解析：显式 `scope` 优先；缺省 = 组合根注入的**本调用者归属**（`defaultScope`）。
+ * 两处都没有 = 明说的缺失（不猜一个默认归属——那会把两条流程悄悄并成一条）。
+ */
+function scopeOf(args: Record<string, unknown>, deps: WorkToolDeps, exec?: unknown): string | undefined {
   const raw = args.scope
-  return raw === undefined ? undefined : String(raw)
+  if (raw !== undefined) return String(raw)
+  const fallback = deps.defaultScope?.(exec)
+  return fallback === undefined ? undefined : String(fallback)
 }
 
 /** 调用者存活（缺省不校验；接线后由宿主 agents 句柄给判据）。 */
@@ -59,8 +70,8 @@ function authorityOf(deps: WorkToolDeps, exec: unknown, expected?: WorkRoundRef)
 }
 
 /** 授权门（唯一一份在 `authority.ts`）。 */
-function authorize(action: WorkAuthorityAction, authority: WorkToolAuthority): void {
-  requireActionAuthority(action, authority)
+function authorize(action: WorkAuthorityAction, authority: WorkToolAuthority, ctx?: WorkAuthorityContext): void {
+  requireActionAuthority(action, authority, ctx)
 }
 
 /** 内核错误 → 结构化回执（不吞不编）。 */
@@ -76,7 +87,7 @@ async function guarded(fn: () => Promise<WorkToolReply>): Promise<WorkToolReply>
 /** 阶段表参数解析（非法即返回人话原因）。 */
 function parseStages(args: Record<string, unknown>): readonly WorkStageDraft[] | string {
   const raw = args.stages
-  if (!Array.isArray(raw) || raw.length === 0) return 'stages 必填（至少一个阶段：{ key, statement, done_criteria? }）'
+  if (!Array.isArray(raw) || raw.length === 0) return 'stages 必填（至少一个阶段：{ key, statement, done_criteria?, close_policy? }）'
   const out: WorkStageDraft[] = []
   for (const item of raw) {
     if (typeof item !== 'object' || item === null) return 'stages 里每一项都必须是对象'
@@ -84,9 +95,15 @@ function parseStages(args: Record<string, unknown>): readonly WorkStageDraft[] |
     const key = o.key === undefined ? '' : String(o.key)
     const statement = o.statement === undefined ? '' : String(o.statement)
     if (key.trim() === '' || statement.trim() === '') return '每个阶段都要有非空 key 与 statement'
+    const rawPolicy = o.close_policy === undefined ? undefined : String(o.close_policy)
+    if (rawPolicy !== undefined && rawPolicy !== 'human' && rawPolicy !== 'auto') {
+      return '阶段收口策略只认 human / auto（key=' + key + '，实际 ' + JSON.stringify(rawPolicy) + '）'
+    }
+    const closePolicy = rawPolicy as WorkStageClosePolicy | undefined
     out.push({
       key, statement,
       ...(Array.isArray(o.done_criteria) ? { doneCriteria: o.done_criteria.map((c) => String(c)) } : {}),
+      ...(closePolicy === undefined ? {} : { closePolicy }),
     })
   }
   return out
@@ -115,9 +132,9 @@ const KEBAB = /^[a-z0-9]+(-[a-z0-9]+)*$/
  * `get_workstage`：读阶段表（顺序即串行顺序）+ 当前阶段 + 串行门 + 收口条件。
  * 无流程不是错误值而是**明说的缺失**（缺失 ≠ 空表）。
  */
-export async function getWorkstage(deps: WorkToolDeps, args: Record<string, unknown>): Promise<WorkToolReply> {
-  const scope = scopeOf(args)
-  if (scope === undefined) return { success: false, error: '缺少 scope（归属域键：这条流程挂在谁名下）' }
+export async function getWorkstage(deps: WorkToolDeps, args: Record<string, unknown>, exec?: unknown): Promise<WorkToolReply> {
+  const scope = scopeOf(args, deps, exec)
+  if (scope === undefined) return { success: false, error: '缺少 scope（归属域键：这条流程挂在谁名下；未接默认归属时请显式给）' }
   const process = await workProcessOf(deps, scope)
   if (process === undefined) {
     return { success: false, scope, error: '该归属域还没有流程（先调 create_workstage 建流程）' }
@@ -132,6 +149,7 @@ export async function getWorkstage(deps: WorkToolDeps, args: Record<string, unkn
     revision: process.revision,
     stages: process.stages.map((s) => ({
       key: s.key, statement: s.statement, state: s.state, done_criteria: s.doneCriteria,
+      close_policy: stageClosePolicyOf(s),
       tasks: s.tasks.length, tasks_done: s.tasks.filter((t) => t.phase === 'complete').length,
     })),
     current_stage: current?.key ?? null,
@@ -148,8 +166,8 @@ export async function getWorkstage(deps: WorkToolDeps, args: Record<string, unkn
 export async function createWorkstage(
   deps: WorkToolDeps, args: Record<string, unknown>, exec?: unknown,
 ): Promise<WorkToolReply> {
-  const scope = scopeOf(args)
-  if (scope === undefined) return { success: false, error: '缺少 scope（归属域键：这条流程挂在谁名下）' }
+  const scope = scopeOf(args, deps, exec)
+  if (scope === undefined) return { success: false, error: '缺少 scope（归属域键：这条流程挂在谁名下；未接默认归属时请显式给）' }
   const callerBad = callerRejection(deps, exec)
   if (callerBad !== undefined) return { success: false, scope, error: callerBad }
   const stages = parseStages(args)
@@ -174,23 +192,36 @@ export async function createWorkstage(
   })
 }
 
-/** `update_workstage` 认的动词（**只有 done**：阶段开工是驱动器的动作，不经工具面）。 */
-const STAGE_ACTIONS = ['done'] as const
+/**
+ * `update_workstage` 认的动词：
+ *   · `done` —— 阶段收口（要 stage_key）；
+ *   · `discard` —— **丢弃整条流程**（不要 stage_key；误建流程的补救口，见下）。
+ * 阶段开工不是本工具的动词：串行门放行后由驱动器开工。
+ */
+const STAGE_ACTIONS = ['done', 'discard'] as const
 
 /**
  * `update_workstage`：阶段态变更（对齐宿主 `update_goal` 的 `action` 形状）。
  *
- * 当前只有一个动词 `done` = **人工确认**（真人专属）；内核仍会复核
- * "本阶段任务非空且全 complete"，此处的授权拒绝只是第一道。
+ * `done` = 阶段收口；**谁来落**看目标阶段的收口策略（`stageClosePolicyOf`）：
+ *   · `human`（缺省）——人工确认（真人专属；agent 自写 = 越权）；
+ *   · `auto`——自动收口，自治回合（驱动器决策）也放行。
+ * 两条路都要过内核的收口判据（任务非空且全 complete）；授权拒绝只是第一道。
+ *
+ * `discard` = **连根拔掉这条流程**（不可逆：流程与任务墓碑一起消失、回合计数归零）；
+ * 刻意做成**真人专属**——建流程要想清楚，误建也只能由人来撤。幂等：没有流程 ⇒ `changed:false`。
  */
 export async function updateWorkstage(
   deps: WorkToolDeps, args: Record<string, unknown>, exec?: unknown,
 ): Promise<WorkToolReply> {
-  const scope = scopeOf(args)
-  if (scope === undefined) return { success: false, error: '缺少 scope（归属域键：这条流程挂在谁名下）' }
+  const scope = scopeOf(args, deps, exec)
+  if (scope === undefined) return { success: false, error: '缺少 scope（归属域键：这条流程挂在谁名下；未接默认归属时请显式给）' }
   const stageKey = args.stage_key === undefined ? '' : String(args.stage_key)
-  if (stageKey.trim() === '') return { success: false, scope, error: '缺少 stage_key（更新哪个阶段）' }
   const action = String(args.action ?? '')
+  // stage_key 只对 done 必需：discard 是"整条流程"，没有"哪个阶段"可言。
+  if (action === 'done' && stageKey.trim() === '') {
+    return { success: false, scope, error: '缺少 stage_key（收口哪个阶段；discard 才不需要）' }
+  }
   if (!(STAGE_ACTIONS as readonly string[]).includes(action)) {
     return {
       success: false, scope, stage_key: stageKey, action,
@@ -202,19 +233,33 @@ export async function updateWorkstage(
   if (callerBad !== undefined) return { success: false, scope, error: callerBad }
   const revision = typeof args.revision === 'number' ? args.revision : undefined
   return guarded(async () => {
-    authorize('stage_done', authorityOf(deps, exec))
-    // 收口条件用内核判据先说清楚（`changed:false` 不能只有"没变"三个字）。
+    if (action === 'discard') {
+      // 真人专属（删掉的是整条流程，不可逆）；内核负责"没有流程就零写入"的幂等。
+      authorize('process_discard', authorityOf(deps, exec))
+      const changed = await discardWorkProcess(deps, scope, revision)
+      return { success: true, scope, action, changed }
+    }
+    // 先读目标阶段：授权判据要按它的收口策略判（策略不在参数里，在流程里）。
     const process = await workProcessOf(deps, scope)
     const stage = process?.stages.find((s) => s.key === stageKey)
     if (stage === undefined) return { success: false, scope, stage_key: stageKey, error: '阶段不存在' }
+    const closePolicy = stageClosePolicyOf(stage)
+    authorize('stage_done', authorityOf(deps, exec), { stageClosePolicy: closePolicy })
+    // 收口条件用内核判据先说清楚（`changed:false` 不能只有"没变"三个字）。
     if (stage.state !== 'active') {
-      return { success: true, scope, stage_key: stageKey, action, changed: false, reason: '阶段不是 active（当前 ' + stage.state + '）' }
+      return {
+        success: true, scope, stage_key: stageKey, action, close_policy: closePolicy,
+        changed: false, reason: '阶段不是 active（当前 ' + stage.state + '）',
+      }
     }
     if (!stageIsFinishable(stage)) {
-      return { success: true, scope, stage_key: stageKey, action, changed: false, reason: '本阶段任务未全部 complete（缺失 ≠ 达成）' }
+      return {
+        success: true, scope, stage_key: stageKey, action, close_policy: closePolicy,
+        changed: false, reason: '本阶段任务未全部 complete（缺失 ≠ 达成）',
+      }
     }
     const changed = await completeWorkStage(deps, scope, stageKey, revision)
-    return { success: true, scope, stage_key: stageKey, action, changed }
+    return { success: true, scope, stage_key: stageKey, action, close_policy: closePolicy, changed }
   })
 }
 
@@ -222,9 +267,9 @@ export async function updateWorkstage(
 /* 层2：get / create / update                                                      */
 
 /** `get_worktask`：读任务（给 task_id 读一条；给 stage_key 读一阶段；都不给读全部）。 */
-export async function getWorktask(deps: WorkToolDeps, args: Record<string, unknown>): Promise<WorkToolReply> {
-  const scope = scopeOf(args)
-  if (scope === undefined) return { success: false, error: '缺少 scope（归属域键：这条流程挂在谁名下）' }
+export async function getWorktask(deps: WorkToolDeps, args: Record<string, unknown>, exec?: unknown): Promise<WorkToolReply> {
+  const scope = scopeOf(args, deps, exec)
+  if (scope === undefined) return { success: false, error: '缺少 scope（归属域键：这条流程挂在谁名下；未接默认归属时请显式给）' }
   const process = await workProcessOf(deps, scope)
   if (process === undefined) return { success: false, scope, error: '该归属域还没有流程' }
   const taskId = args.task_id === undefined ? undefined : String(args.task_id)
@@ -247,8 +292,8 @@ export async function getWorktask(deps: WorkToolDeps, args: Record<string, unkno
 export async function createWorktask(
   deps: WorkToolDeps, args: Record<string, unknown>, exec?: unknown,
 ): Promise<WorkToolReply> {
-  const scope = scopeOf(args)
-  if (scope === undefined) return { success: false, error: '缺少 scope（归属域键：这条流程挂在谁名下）' }
+  const scope = scopeOf(args, deps, exec)
+  if (scope === undefined) return { success: false, error: '缺少 scope（归属域键：这条流程挂在谁名下；未接默认归属时请显式给）' }
   const stageKey = args.stage_key === undefined ? '' : String(args.stage_key)
   if (stageKey.trim() === '') return { success: false, scope, error: '缺少 stage_key（任务挂在哪个阶段下）' }
   const objective = args.objective === undefined ? '' : String(args.objective)
@@ -285,8 +330,8 @@ type TaskAction = (typeof TASK_ACTIONS)[number]
 export async function updateWorktask(
   deps: WorkToolDeps, args: Record<string, unknown>, exec?: unknown,
 ): Promise<WorkToolReply> {
-  const scope = scopeOf(args)
-  if (scope === undefined) return { success: false, error: '缺少 scope（归属域键：这条流程挂在谁名下）' }
+  const scope = scopeOf(args, deps, exec)
+  if (scope === undefined) return { success: false, error: '缺少 scope（归属域键：这条流程挂在谁名下；未接默认归属时请显式给）' }
   const taskId = args.task_id === undefined ? '' : String(args.task_id)
   if (taskId.trim() === '') return { success: false, scope, error: '缺少 task_id' }
   const action = String(args.action ?? '')

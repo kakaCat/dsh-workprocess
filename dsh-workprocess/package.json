@@ -1,0 +1,43 @@
+{
+  "name": "dsh-workprocess",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "workprocess 插件（组合根）：归属记录落宿主存储域 + 真人判定 + 回合边界驱动与续跑投递 + 提供 ctx.workprocess 服务",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./*": {
+      "types": "./dist/*.d.ts",
+      "default": "./dist/*.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-llm": "0.2.0-rc.1",
+    "@deepseek-ai/dsh-storage-domain": "0.2.0-rc.1",
+    "tool-workprocess": "workspace:*",
+    "workprocess": "workspace:*",
+    "workprocess-round-driver": "workspace:*",
+    "zod": "4.6.6"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

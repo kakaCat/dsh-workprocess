@@ -35,7 +35,7 @@ function entryOf(handler: string): WorkToolRegistryEntry {
 
 /** 归属参数（六个工具共用；缺省 = 组合根注入本会话绑定的归属）。 */
 const SCOPE_PARAM = { type: 'string', description: '归属域键：这条流程挂在谁名下（宿主可用会话 id，项目侧可用工作区/项目 id）；缺省 = 组合根注入的本会话绑定归属。' } as const
-const STAGE_KEY_PARAM = { type: 'string', description: '阶段键（阶段表里的 key）；从 get_workstage 的回执取。' } as const
+const STAGE_KEY_PARAM = { type: 'string', description: '阶段键（阶段表里的 key）；从 get_workstage 的回执取。action=discard（丢流程）时不需要。' } as const
 const TASK_ID_PARAM = { type: 'string', description: '任务 id（wt:<阶段键>:<序号>）；从 create_worktask / get_worktask 的回执取。' } as const
 const REVISION_PARAM = { type: 'number', description: 'CAS：给 get 里读到的 revision（旧值即拒——先 get 再改）。' } as const
 const OBJECTIVE_PARAM = { type: 'string', description: '这个工作单元要达成什么（写成可核验的陈述）。' } as const
@@ -69,7 +69,13 @@ function buildTool(deps: WorkToolDeps, handler: keyof typeof HANDLERS, parameter
     name: entry.toolName,
     description: entry.description,
     parameters,
-    output: { schema: REPLY_SCHEMA, render: (v: unknown) => renderReply(entry.toolName, v) },
+    output: {
+      schema: REPLY_SCHEMA,
+      // 宿主口径（@deepseek-ai/dsh-tools 的 `output.render`）：**返回 ContentBlock[]**——
+      // 喂给模型的是内容块，不是一行字符串。返回裸字符串会在宿主侧炸成 `content.some is not a function`。
+      // 注意形参序：宿主是 `render(args, value)`——渲染的是**第二个**（回执值），读错了只会渲染出一行"未成功"。
+      render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: renderReply(entry.toolName, value) }],
+    },
     execute: async (args: Record<string, unknown>, exec: unknown) => run(deps, args, exec),
   } as never)
 }
@@ -87,21 +93,24 @@ export function defineCreateWorkstageTool(deps: WorkToolDeps) {
     stages: {
       type: 'array',
       items: { type: 'object', additionalProperties: true },
-      description: '阶段表（数组顺序即**串行顺序**）：[{ key, statement, done_criteria? }]。',
+      description: '阶段表（数组顺序即**串行顺序**）：[{ key, statement, done_criteria?, close_policy? }]；'
+        + 'close_policy: human（缺省，人工确认收口）/ auto（任务全完成即自动收口）。',
     },
     revision: REVISION_PARAM,
   })
 }
 
-/** `update_workstage`：阶段态变更（当前只有 action=done：人工确认）。 */
+/** `update_workstage`：阶段态变更（action=done 收口落定 / action=discard 丢弃整条流程）。 */
 export function defineUpdateWorkstageTool(deps: WorkToolDeps) {
   return buildTool(deps, 'updateWorkstage', {
     scope: SCOPE_PARAM,
     stage_key: STAGE_KEY_PARAM,
     action: {
       type: 'string',
-      enum: ['done'],
-      description: 'done = 阶段收口确认（**真人专属**：本阶段任务须非空且全部 complete）。'
+      enum: ['done', 'discard'],
+      description: 'done = 阶段收口落定，按**本阶段的收口策略**判谁来落：human（缺省）= **真人专属**（人工确认）；'
+        + 'auto = 本回合（驱动器决策）可自动落 done。两条路都必须任务非空且全部 complete。'
+        + 'discard = **丢弃整条流程**（不需要 stage_key；不可逆：流程与任务墓碑一起消失、回合计数归零；**真人专属**）。'
         + '注意**阶段开工不是本工具的动词**——串行门放行后由驱动器开工。',
     },
     revision: REVISION_PARAM,

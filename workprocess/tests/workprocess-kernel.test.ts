@@ -15,7 +15,8 @@ import { WorkError } from 'workprocess/runtime.js'
 import type { WorkProcess, WorkStageDraft } from 'workprocess/types.js'
 import {
   clearWorkTask, completeWorkStage, completeWorkTask, createWorkProcess, createWorkTask,
-  defineWorkStages, progressOf, startWorkStage, workProcessViewOf, workTaskOf,
+  defineWorkStages, discardWorkProcess, progressOf, stageClosePolicyOf, startWorkStage,
+  workProcessOf, workProcessViewOf, workTaskOf,
   type WorkRecordLike,
 } from 'workprocess'
 
@@ -362,5 +363,169 @@ describe('服务层 · 读写收口', () => {
     expect(await completeWorkStage(deps, 'ws-a', 'prep')).toBe(true)
     expect(await startWorkStage(deps, 'ws-a', 'train')).toBe(true)
     expect(await defineWorkStages(deps, 'ws-a', [{ key: 'prep', statement: '准备数据', doneCriteria: ['数据可用'] }, { key: 'train', statement: '训练模型' }, { key: 'release', statement: '发布上线' }])).toBe(false)
+  })
+})
+
+describe('阶段收口策略（human 人工确认 / auto 自动收口）', () => {
+  const POLICY_STAGES: readonly WorkStageDraft[] = [
+    { key: 'prep', statement: '准备数据', closePolicy: 'auto' },
+    { key: 'train', statement: '训练模型' },   // 缺省 = human
+  ]
+  const POLICY_INIT: WorkEvent = { kind: 'init', id: 'wp:ws-p', objective: 'x', stages: POLICY_STAGES }
+
+  function initPolicy(): WorkProcess {
+    const r = applyWorkEvent(undefined, POLICY_INIT)
+    if (!r.changed || r.next === undefined) throw new Error('夹具失败：init 未成立')
+    return r.next
+  }
+
+  it('建流程带入策略；缺省不写 = human（缺失 ≠ auto）', () => {
+    const p = initPolicy()
+    expect(p.stages[0].closePolicy).toBe('auto')
+    expect(p.stages[1].closePolicy).toBeUndefined()
+    expect(stageClosePolicyOf(p.stages[0])).toBe('auto')
+    expect(stageClosePolicyOf(p.stages[1])).toBe('human')
+  })
+
+  it('init 判据把策略算进"同一条流程"：同陈述同策略 = 幂等；换了策略 = 身份冲突', () => {
+    expect(applyWorkEvent(initPolicy(), POLICY_INIT).reason).toBe('init:idempotent-replay')
+    const conflict = applyWorkEvent(initPolicy(), {
+      ...POLICY_INIT,
+      stages: [{ key: 'prep', statement: '准备数据', closePolicy: 'human' }, { key: 'train', statement: '训练模型' }],
+    })
+    expect(conflict.changed).toBe(false)
+    expect(conflict.reason).toBe('init:identity-conflict')
+  })
+
+  it('stage-define：策略是**定义**的一部分（可改），运行态（态 / 任务）保留；草案不写即回到 human', () => {
+    let p = apply(initPolicy(), { kind: 'stage-start', stageKey: 'prep' })
+    p = apply(p, { kind: 'task-create', task: { id: 'wt:prep:1', stageKey: 'prep', objective: '清洗数据' } })
+
+    const flipped = apply(p, {
+      kind: 'stage-define',
+      stages: [{ key: 'prep', statement: '准备数据', closePolicy: 'human' }, { key: 'train', statement: '训练模型', closePolicy: 'auto' }],
+    })
+    expect(flipped.stages.map((s) => stageClosePolicyOf(s))).toEqual(['human', 'auto'])
+    expect(flipped.stages[0].state).toBe('active')      // 运行态保留
+    expect(flipped.stages[0].tasks.length).toBe(1)
+
+    const same = applyWorkEvent(flipped, {
+      kind: 'stage-define',
+      stages: [{ key: 'prep', statement: '准备数据', closePolicy: 'human' }, { key: 'train', statement: '训练模型', closePolicy: 'auto' }],
+    })
+    expect(same.changed).toBe(false)                    // 同值重放零写入
+    expect(same.reason).toBe('stage-define:idempotent-replay')
+
+    const reset = applyWorkEvent(flipped, {
+      kind: 'stage-define',
+      stages: [{ key: 'prep', statement: '准备数据' }, { key: 'train', statement: '训练模型' }],
+    })
+    expect(reset.changed).toBe(true)
+    expect(reset.next!.stages.map((s) => stageClosePolicyOf(s))).toEqual(['human', 'human'])
+  })
+
+  it('非法策略零写入（写进去的东西必须读得回来）', () => {
+    const bad = applyWorkEvent(initPolicy(), {
+      kind: 'stage-define',
+      stages: [{ key: 'prep', statement: '准备数据', closePolicy: 'always' as never }, { key: 'train', statement: '训练模型' }],
+    })
+    expect(bad.changed).toBe(false)
+    expect(String(bad.reason)).toContain('收口策略不认识')
+  })
+
+  it('策略不改收口判据：auto 也要求任务非空且全 complete；收口后策略随阶段保留', () => {
+    let p = apply(initPolicy(), { kind: 'stage-start', stageKey: 'prep' })
+    expect(applyWorkEvent(p, { kind: 'stage-done', stageKey: 'prep' }).reason).toBe('stage-done:tasks-open')   // 没任务
+    p = apply(p, { kind: 'task-create', task: { id: 'wt:prep:1', stageKey: 'prep', objective: '清洗数据' } })
+    expect(applyWorkEvent(p, { kind: 'stage-done', stageKey: 'prep' }).reason).toBe('stage-done:tasks-open')   // 任务没完成
+    p = apply(p, { kind: 'task-complete', taskId: 'wt:prep:1' })
+    const done = apply(p, { kind: 'stage-done', stageKey: 'prep' })
+    expect(done.stages[0].state).toBe('done')
+    expect(done.stages[0].closePolicy).toBe('auto')
+  })
+
+  it('严格解码：策略只认 human / auto；缺省合法（老快照向后兼容）', () => {
+    const p = decodeWorkProcess(initPolicy())
+    expect(p.stages[0].closePolicy).toBe('auto')
+    const legacy = decodeWorkProcess({ ...p, stages: p.stages.map((s) => ({ ...s, closePolicy: undefined })) })
+    expect(legacy.stages[0].closePolicy).toBeUndefined()
+    expect(stageClosePolicyOf(legacy.stages[0])).toBe('human')
+    expect(() => decodeWorkProcess({
+      ...p, stages: p.stages.map((s, i) => (i === 0 ? { ...s, closePolicy: 'always' } : s)),
+    })).toThrowError(WorkError)
+  })
+
+describe('丢弃流程（连根拔掉，不是状态迁移）', () => {
+  it('丢弃后读不到流程、回合计数归零、再建是 revision 1 的新流程；重放幂等', async () => {
+    const st = storeOf({ 'ws-a': { updatedAt: 1, rounds: { started: 7, activation: 'armed' } } })
+    const deps = { store: st as never, now: () => 1_000 }
+    await createWorkProcess(deps, 'ws-a', { objective: 'x', stages: STAGES })
+    await startWorkStage(deps, 'ws-a', 'prep')
+    const before = st.writes
+    expect(await discardWorkProcess(deps, 'ws-a')).toBe(true)
+    expect(st.writes).toBe(before + 1)
+    expect(await workProcessOf(deps, 'ws-a')).toBeUndefined()
+    // 记录还在（归属没变），但流程没了、回合计数归零
+    expect(st.records['ws-a'].workProcess).toBeUndefined()
+    expect(st.records['ws-a'].rounds?.started).toBe(0)
+    // 幂等：没有流程 ⇒ 零写入
+    const after = st.writes
+    expect(await discardWorkProcess(deps, 'ws-a')).toBe(false)
+    expect(st.writes).toBe(after)
+    // 再建 = **新**流程（revision 1），不是"复活"旧流程
+    expect(await createWorkProcess(deps, 'ws-a', { objective: 'y', stages: STAGES })).toBe(true)
+    expect((await workProcessOf(deps, 'ws-a'))?.revision).toBe(1)
+  })
+
+  it('CAS：拿旧 revision 丢弃 → WORK_CONFLICT（写前拒，流程还在）', async () => {
+    const st = storeOf({ 'ws-a': { updatedAt: 1 } })
+    const deps = { store: st as never, now: () => 1_000 }
+    await createWorkProcess(deps, 'ws-a', { objective: 'x', stages: STAGES })
+    await expect(discardWorkProcess(deps, 'ws-a', 9)).rejects.toMatchObject({ code: 'WORK_CONFLICT' })
+    expect(await workProcessOf(deps, 'ws-a')).toBeDefined()
+  })
+})
+
+  it('迁移链：记录的快照必须与事件重算逐字段一致（收口策略也在内）', () => {
+    const p = initPolicy()
+    const event: WorkEvent = {
+      kind: 'stage-define',
+      stages: [{ key: 'prep', statement: '准备数据', closePolicy: 'human' }, { key: 'train', statement: '训练模型' }],
+    }
+    const right = apply(p, event)
+    expect(foldWorkProcess([change(POLICY_INIT, p), change(event, right)]).process?.stages[0].closePolicy).toBe('human')
+    const forged = { ...right, stages: right.stages.map((s, i) => (i === 0 ? { ...s, closePolicy: 'auto' as const } : s)) }
+    expect(() => foldWorkProcess([change(POLICY_INIT, p), change(event, forged)])).toThrowError(WorkError)
+  })
+})
+
+describe('丢弃流程（连根拔掉，不是状态迁移）', () => {
+  it('丢弃后读不到流程、回合计数归零、再建是 revision 1 的新流程；重放幂等', async () => {
+    const st = storeOf({ 'ws-a': { updatedAt: 1, rounds: { started: 7, activation: 'armed' } } })
+    const deps = { store: st as never, now: () => 1_000 }
+    await createWorkProcess(deps, 'ws-a', { objective: 'x', stages: STAGES })
+    await startWorkStage(deps, 'ws-a', 'prep')
+    const before = st.writes
+    expect(await discardWorkProcess(deps, 'ws-a')).toBe(true)
+    expect(st.writes).toBe(before + 1)
+    expect(await workProcessOf(deps, 'ws-a')).toBeUndefined()
+    // 记录还在（归属没变），但流程没了、回合计数归零
+    expect(st.records['ws-a'].workProcess).toBeUndefined()
+    expect(st.records['ws-a'].rounds?.started).toBe(0)
+    // 幂等：没有流程 ⇒ 零写入
+    const after = st.writes
+    expect(await discardWorkProcess(deps, 'ws-a')).toBe(false)
+    expect(st.writes).toBe(after)
+    // 再建 = **新**流程（revision 1），不是"复活"旧流程
+    expect(await createWorkProcess(deps, 'ws-a', { objective: 'y', stages: STAGES })).toBe(true)
+    expect((await workProcessOf(deps, 'ws-a'))?.revision).toBe(1)
+  })
+
+  it('CAS：拿旧 revision 丢弃 → WORK_CONFLICT（写前拒，流程还在）', async () => {
+    const st = storeOf({ 'ws-a': { updatedAt: 1 } })
+    const deps = { store: st as never, now: () => 1_000 }
+    await createWorkProcess(deps, 'ws-a', { objective: 'x', stages: STAGES })
+    await expect(discardWorkProcess(deps, 'ws-a', 9)).rejects.toMatchObject({ code: 'WORK_CONFLICT' })
+    expect(await workProcessOf(deps, 'ws-a')).toBeDefined()
   })
 })

@@ -118,6 +118,9 @@ export function stageAllowsStart(process: WorkProcess, key: string): boolean {
  *
  * 为什么要求"任务非空"：空集"全完成"是平凡真值，会让一个没装任何工作的阶段直接收口——
  * 与本仓"缺失 ≠ 达成"同一条纪律（对齐宿主 `readyToClose` 的空数组判定）。
+ *
+ * 与收口策略（`human` / `auto`）**无关**：策略只决定"谁有权落 done"，不决定"够不够格落"——
+ * 自动收口也必须任务非空且全 complete（否则 `auto` 会成为绕过判据的后门）。
  */
 export function stageIsFinishable(stage: WorkStage): boolean {
   return stage.state === 'active' && stage.tasks.length > 0
@@ -162,6 +165,7 @@ export function sameTask(a: WorkTask, b: WorkTask): boolean {
 
 function sameStage(a: WorkStage, b: WorkStage): boolean {
   return a.key === b.key && a.statement === b.statement && a.state === b.state
+    && a.closePolicy === b.closePolicy
     && sameStringList(a.doneCriteria, b.doneCriteria)
     && a.tasks.length === b.tasks.length && a.tasks.every((t, i) => sameTask(t, b.tasks[i]))
 }
@@ -180,6 +184,11 @@ export function sameProcess(a: WorkProcess, b: WorkProcess): boolean {
 /* -------------------------------------------------------------------------- */
 /* 阶段表构建与串行门体检                                                            */
 
+/** 收口策略值域（唯一定义处：`buildStages` 与严格解码器共用）。 */
+function isClosePolicy(v: unknown): v is 'human' | 'auto' {
+  return v === 'human' || v === 'auto'
+}
+
 /** 把阶段定义建成初态阶段表；非法返回人话原因（fold 不抛）。 */
 function buildStages(drafts: readonly WorkStageDraft[]): readonly WorkStage[] | string {
   const seen = new Set<string>()
@@ -189,7 +198,15 @@ function buildStages(drafts: readonly WorkStageDraft[]): readonly WorkStage[] | 
     if (seen.has(d.key)) return '阶段键重复：' + d.key
     seen.add(d.key)
     if (d.statement.trim() === '') return '阶段缺 statement（key=' + d.key + '）'
-    out.push({ key: d.key, statement: d.statement, doneCriteria: [...(d.doneCriteria ?? [])], state: 'pending', tasks: [] })
+    // 值域在此拦：写进去的东西必须读得回来（与严格解码器同一条口径，见 `KEBAB` 的同款理由）。
+    if (d.closePolicy !== undefined && !isClosePolicy(d.closePolicy)) {
+      return '阶段收口策略不认识（只认 human / auto；key=' + d.key + '）'
+    }
+    out.push({
+      key: d.key, statement: d.statement, doneCriteria: [...(d.doneCriteria ?? [])],
+      ...(d.closePolicy === undefined ? {} : { closePolicy: d.closePolicy }),
+      state: 'pending', tasks: [],
+    })
   }
   return out
 }
@@ -254,7 +271,11 @@ export function applyWorkEvent(current: WorkProcess | undefined, event: WorkEven
       const byKey = new Map(current.stages.map((s) => [s.key, s]))
       const merged: WorkStage[] = built.map((draft) => {
         const prev = byKey.get(draft.key)
-        return prev === undefined ? draft : { ...prev, statement: draft.statement, doneCriteria: draft.doneCriteria }
+        // 定义（statement / doneCriteria / 收口策略）以草案为准，运行态（state / tasks）保留 prev 的；
+        // 策略**缺省即回到 `human`**——整体替换定义不该把上一版的 `auto` 悄悄留着。
+        return prev === undefined ? draft : {
+          ...prev, statement: draft.statement, doneCriteria: draft.doneCriteria, closePolicy: draft.closePolicy,
+        }
       })
       // 被移除的阶段：空的无所谓，**有任务的一律拒**（静默丢任务是最坏的一类缺陷）。
       const droppedWithTasks = current.stages.find((s) => s.tasks.length > 0 && !merged.some((m) => m.key === s.key))
@@ -379,6 +400,7 @@ export function applyWorkEvent(current: WorkProcess | undefined, event: WorkEven
 /** 阶段表形状相等（init 幂等判据：初态阶段表按定义比，不比运行态）。 */
 function sameStagesShape(a: readonly WorkStage[], b: readonly WorkStage[]): boolean {
   return a.length === b.length && a.every((s, i) => s.key === b[i].key && s.statement === b[i].statement
+    && s.closePolicy === b[i].closePolicy
     && sameStringList(s.doneCriteria, b[i].doneCriteria))
 }
 
@@ -434,6 +456,12 @@ function requireStringList(v: unknown, what: string): readonly string[] {
   return (v as unknown[]).map((x) => requireString(x, what + '[]'))
 }
 
+/** 收口策略解码（严格：不认识的策略值不许读成缺省）。 */
+function requireClosePolicy(v: unknown, what: string): 'human' | 'auto' {
+  if (!isClosePolicy(v)) fail(what + ' 只认 human / auto：' + String(v))
+  return v
+}
+
 function decodeReason(raw: unknown, what: string): WorkBlockReason {
   if (typeof raw !== 'object' || raw === null) fail(what + ' 必须是对象')
   const r = raw as Record<string, unknown>
@@ -475,10 +503,12 @@ export function decodeWorkTask(raw: unknown, stageKey: string): WorkTask {
 export function decodeWorkStage(raw: unknown): WorkStage {
   if (typeof raw !== 'object' || raw === null) fail('阶段不是对象')
   const o = raw as Record<string, unknown>
-  requireKeys(o, ['key', 'statement', 'doneCriteria', 'state', 'tasks'], '阶段')
+  requireKeys(o, ['key', 'statement', 'doneCriteria', 'state', 'tasks'], '阶段', ['closePolicy'])
   const key = requireNonEmptyString(o.key, '阶段 key')
   const statement = requireNonEmptyString(o.statement, '阶段 statement')
   const doneCriteria = requireStringList(o.doneCriteria, '阶段 doneCriteria')
+  const closePolicy = o.closePolicy === undefined
+    ? undefined : requireClosePolicy(o.closePolicy, '阶段 closePolicy')
   const state = o.state
   if (state !== 'pending' && state !== 'active' && state !== 'done') fail('阶段 state 不认识：' + String(state))
   if (!Array.isArray(o.tasks)) fail('阶段 tasks 必须是数组')
@@ -488,7 +518,10 @@ export function decodeWorkStage(raw: unknown): WorkStage {
     if (ids.has(t.id)) fail('阶段内任务 id 重复：' + t.id)
     ids.add(t.id)
   }
-  return { key, statement, doneCriteria, state, tasks }
+  return {
+    key, statement, doneCriteria, state, tasks,
+    ...(closePolicy === undefined ? {} : { closePolicy }),
+  }
 }
 
 /**
@@ -623,11 +656,12 @@ export function decodeWorkEvent(raw: unknown): WorkEvent {
 function decodeStageDraft(raw: unknown): WorkStageDraft {
   if (typeof raw !== 'object' || raw === null) fail('阶段定义不是对象')
   const o = raw as Record<string, unknown>
-  requireKeys(o, ['key', 'statement'], '阶段定义', ['doneCriteria'])
+  requireKeys(o, ['key', 'statement'], '阶段定义', ['doneCriteria', 'closePolicy'])
   return {
     key: requireNonEmptyString(o.key, '阶段定义.key'),
     statement: requireNonEmptyString(o.statement, '阶段定义.statement'),
     ...(o.doneCriteria === undefined ? {} : { doneCriteria: requireStringList(o.doneCriteria, '阶段定义.doneCriteria') }),
+    ...(o.closePolicy === undefined ? {} : { closePolicy: requireClosePolicy(o.closePolicy, '阶段定义.closePolicy') }),
   }
 }
 

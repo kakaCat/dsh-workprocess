@@ -1,0 +1,20 @@
+# dsh-workprocess 的装载层（bundle patch）。
+#
+# 为什么必须有这个文件：目标 profile 的 `dsh.profile.bundles` 里列了本包，而本包
+# package.json 声明了 `dsh.bundle.patch: ./cordis.patch.yml` —— DSH 加载器**读不到**该文件时
+# 会**整个跳过**这个 bundle（现象：重启宿主也看不到任何 workprocess 工具）。
+#
+# 两条装载行 = 领域插件 + 命令行插件（与宿主 base bundle 里 `dsh-goal` / `dsh-command-goal`
+# 的关系一致）：命令行是**独立包**，只消费 `ctx.workprocess`，不装命令行也不影响工具面。
+- insert:
+    - id: workprocess
+      name: "dsh-workprocess"
+      config:
+        # 回合边界是否自动驱动（开工 / auto 阶段自动收口 / 落盘 block）：缺省 true。
+        tick: true
+        # 空闲边界是否**自动投递续跑回合**（任务自己往下跑）：这里打开。
+        # 刹车 = 任务自己的 max_rounds，没写就按 defaultMaxRounds（硬上限，防跑飞）。
+        drive: true
+        defaultMaxRounds: 20
+    - id: command-workprocess
+      name: "dsh-command-workprocess"

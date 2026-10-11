@@ -7,17 +7,19 @@
  *     "edit, pause, and resume require a direct top-level human request"）；
  *   · `task_resume` = **direct-human only**——"继续"只有人能发起（对齐 `arm-explicit`：
  *     改人的意图只有人能发起；agent 自行 resume 会让"人显式暂停"被悄悄推翻）；
- *   · `stage_done` = **direct-human only**——阶段收口是**人工确认**（agent 只提议，不确认）；
+ *   · `stage_done` = **策略 `human` 时是人工确认**（agent 只提议，不确认）；**策略 `auto` 时放行自治**——
+ *     阶段自己声明了"任务全完成就自动收口"，此时再由授权面按人工确认拦，等于把声明作废。
  *   · `task_pause` / `task_block` / `task_complete` / `task_clear` = agent 可发起
  *     （运行时故障、等上游、判据达成、误建任务要撤，都可能是 agent 先知道的）。
  *
  * 【为什么留解析钩子】本包的工具执行面拿不到宿主的 `ctx.agents` / 会话事件切面。故这里定义
  * **判据**并把解析做成可注入的钩子：组合根能提供真人判定就接上；缺省 = `autonomous`
- * （保守侧：edit / resume / stage_done 被拒并指路宿主界面）。
+ * （保守侧：edit / resume / human 策略的 stage_done 被拒并指路宿主界面）。
  *
  * @module tool-workprocess/authority
  */
 import { WorkError } from 'workprocess'
+import type { WorkStageClosePolicy } from 'workprocess'
 
 /** 一次状态变更调用获得的硬授权（对齐宿主 `GoalToolAuthority`）。 */
 export type WorkToolAuthority =
@@ -87,7 +89,7 @@ export function authorityFromEvents(
 /** 需要真人授权的**全部**动作（唯一一份：改这里即改全部调用点）。 */
 export type WorkAuthorityAction =
   | 'task_edit' | 'task_pause' | 'task_resume' | 'task_block' | 'task_complete' | 'task_clear'
-  | 'stage_done'
+  | 'stage_done' | 'process_discard'
 
 /** 调用者解析结果（对齐宿主 `GoalToolExecution` 的最小面）。 */
 export interface WorkToolExecution {
@@ -114,21 +116,47 @@ export function workToolExecution(
   }
 }
 
-/** 真人专属动作：改目标（`edit`）、继续（`resume`）、人工确认（`stage_done`）。 */
-const HUMAN_ONLY: ReadonlySet<WorkAuthorityAction> = new Set<WorkAuthorityAction>(['task_edit', 'task_resume', 'stage_done'])
+/**
+ * 真人专属动作：改目标（`edit`）、继续（`resume`）、**丢弃流程**（`process_discard`）。
+ * 前两个是"改人的意图"，第三个是"撤掉整条流程"——都是 agent 自行发起就会推翻人的决定的那类。
+ */
+const HUMAN_ONLY: ReadonlySet<WorkAuthorityAction> = new Set<WorkAuthorityAction>(
+  ['task_edit', 'task_resume', 'process_discard'],
+)
 
-/** 该动作在当前授权下是否放行（纯函数，可单测）。 */
-export function isActionAuthorized(action: WorkAuthorityAction, authority: WorkToolAuthority): boolean {
-  if (!HUMAN_ONLY.has(action)) return true
-  return authority.kind === 'direct-human'
+/**
+ * 判据的**上下文**（授权面不自己读流程：目标阶段的收口策略由调用方投影进来）。
+ * 缺失 = 按 `human` 口径判（保守侧：拿不准就别放行自治）。
+ */
+export interface WorkAuthorityContext {
+  /** `stage_done` 的目标阶段收口策略（缺省 `human` = 人工确认）。 */
+  readonly stageClosePolicy?: WorkStageClosePolicy
+}
+
+/** 该动作在当前授权与上下文下是否放行（纯函数，可单测）。 */
+export function isActionAuthorized(
+  action: WorkAuthorityAction, authority: WorkToolAuthority, ctx?: WorkAuthorityContext,
+): boolean {
+  if (authority.kind === 'direct-human') return true
+  // 策略 `auto` 的阶段：收口自治合法（阶段已声明任务全完成即自动收口）。
+  if (action === 'stage_done') return (ctx?.stageClosePolicy ?? 'human') === 'auto'
+  return !HUMAN_ONLY.has(action)
 }
 
 /** 放行判定；不放行则抛结构化错误（`WorkError`，机器可路由）。 */
-export function requireActionAuthority(action: WorkAuthorityAction, authority: WorkToolAuthority): void {
-  if (isActionAuthorized(action, authority)) return
+export function requireActionAuthority(
+  action: WorkAuthorityAction, authority: WorkToolAuthority, ctx?: WorkAuthorityContext,
+): void {
+  if (isActionAuthorized(action, authority, ctx)) return
   throw new WorkError(
-    '`' + action + '` 需要人显式发起（agent 自行 ' + action + ' 会推翻人的意图或越权确认）'
-    + '——请由人在宿主界面上确认，或由人直接调本工具',
+    action === 'stage_done'
+      ? '本阶段收口策略是 `human`（人工确认）：agent 自行 stage_done 等于替人判定"这一段算不算成了"'
+        + '——请由人在宿主界面上确认，或由人把该阶段改成 auto（close_policy）后自动收口'
+      : action === 'process_discard'
+        ? '丢弃流程是不可逆的（流程与任务墓碑一起消失、回合计数归零）：只能由人直接发起'
+          + '——agent 自撤流程会抹掉"这里曾经有一条流程"这段历史'
+        : '`' + action + '` 需要人显式发起（agent 自行 ' + action + ' 会推翻人的意图或越权确认）'
+          + '——请由人在宿主界面上确认，或由人直接调本工具',
     'WORK_NO_PERMISSION',
   )
 }

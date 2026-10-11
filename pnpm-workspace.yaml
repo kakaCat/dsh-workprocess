@@ -2,3 +2,5 @@ packages:
   - 'workprocess'
   - 'workprocess-round-driver'
   - 'tool-workprocess'
+  - 'dsh-workprocess'
+  - 'command-workprocess'

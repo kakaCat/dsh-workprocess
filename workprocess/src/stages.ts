@@ -14,11 +14,24 @@
  *
  * @module workprocess/stages
  */
-import type { WorkProcess, WorkStage } from './types.js'
+import type { WorkProcess, WorkStage, WorkStageClosePolicy } from './types.js'
 
 /** 阶段在串行顺序里的下标（不存在 ⇒ -1）。 */
 export function stageIndexOf(process: WorkProcess, key: string): number {
   return process.stages.findIndex((s) => s.key === key)
+}
+
+/**
+ * **收口策略读数**（缺省 `human` 的**唯一落点**）。
+ *
+ * 三处问的是同一件事——驱动拍（该自动收口还是请人确认）、工具面（授权按哪条口径放行）、
+ * 提示词（边界怎么写）。各写一份 `?? 'human'` 必然漂移，于是会出现"驱动认为能自动收口、
+ * 工具面按人工确认拒了"这类无法判定的分歧。
+ */
+export function stageClosePolicyOf(
+  stage: { readonly closePolicy?: WorkStageClosePolicy },
+): WorkStageClosePolicy {
+  return stage.closePolicy ?? 'human'
 }
 
 /**

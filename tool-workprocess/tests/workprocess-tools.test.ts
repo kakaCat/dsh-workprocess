@@ -3,7 +3,8 @@
  *
  * 【守护什么】
  *   ① 登记表与处理器**同名可达**（漏登记/改名不留悬空引用），命名 = 宿主口径 `get/create/update_*`；
- *   ② 真人专属动作：`stage_done`（人工确认）、`task_edit`（改目标）、`task_resume`（改人的意图）；
+ *   ② 真人专属动作：`task_edit`（改目标）、`task_resume`（改人的意图）恒为真人专属；
+ *      `stage_done`（收口）按**目标阶段的收口策略**判——`human` 真人专属、`auto` 放行自治；
  *   ③ 处理器的错误口径：内核错误如实转码（不吞不编），缺参 / 非法动词当场拒；
  *   ④ `changed:false` 必须带**内核给的原因**（幂等重放与"会被拒"分得清）。
  */
@@ -60,7 +61,7 @@ describe('登记表自洽（两层 × get/create/update，命名对齐宿主 dsh
 })
 
 describe('授权口径（对齐宿主 update 政策）', () => {
-  it('真人专属 = stage_done（确认）+ task_edit（改目标）+ task_resume（改人的意图）', () => {
+  it('缺省策略（human）下：stage_done（收口确认）+ task_edit（改目标）+ task_resume（改人的意图）都是真人专属', () => {
     for (const action of ['stage_done', 'task_edit', 'task_resume'] as const) {
       expect(isActionAuthorized(action, { kind: 'autonomous' })).toBe(false)
       expect(isActionAuthorized(action, { kind: 'direct-human' })).toBe(true)
@@ -70,13 +71,27 @@ describe('授权口径（对齐宿主 update 政策）', () => {
     }
   })
 
-  it('越权时抛结构化错误（WORK_NO_PERMISSION，指路宿主界面）', () => {
-    expect(() => requireActionAuthority('stage_done', { kind: 'autonomous' })).toThrowError(/需要人显式发起/)
+  it('越权时抛结构化错误（WORK_NO_PERMISSION，指路宿主界面 / 策略开关）', () => {
+    expect(() => requireActionAuthority('stage_done', { kind: 'autonomous' }))
+      .toThrowError(/本阶段收口策略是 `human`/)
+    expect(() => requireActionAuthority('stage_done', { kind: 'autonomous' }, { stageClosePolicy: 'auto' })).not.toThrow()
     try {
       requireActionAuthority('task_resume', { kind: 'autonomous' })
       throw new Error('应当抛错')
     } catch (err) {
       expect((err as { code?: string }).code).toBe('WORK_NO_PERMISSION')
+    }
+  })
+
+  it('stage_done 的授权按**目标阶段**的收口策略判：human 真人专属；auto 放行自治（不缺上下文就按保守侧）', () => {
+    expect(isActionAuthorized('stage_done', { kind: 'autonomous' }, { stageClosePolicy: 'human' })).toBe(false)
+    expect(isActionAuthorized('stage_done', { kind: 'autonomous' }, { stageClosePolicy: 'auto' })).toBe(true)
+    // 策略缺省 = human：拿不准就别放行自治（与内核的缺省口径同源）。
+    expect(isActionAuthorized('stage_done', { kind: 'autonomous' })).toBe(false)
+    expect(isActionAuthorized('stage_done', { kind: 'autonomous' }, {})).toBe(false)
+    // 收口策略不改变其余真人专属动作：edit / resume 永远要人直接发起。
+    for (const action of ['task_edit', 'task_resume'] as const) {
+      expect(isActionAuthorized(action, { kind: 'autonomous' }, { stageClosePolicy: 'auto' })).toBe(false)
     }
   })
 
@@ -113,8 +128,8 @@ describe('层1 处理器 · 阶段', () => {
     expect(got.allows_start).toBe(true)
     expect(got.allows_close).toBe(false)
     expect(got.stages).toEqual([
-      { key: 'prep', statement: '准备数据', state: 'pending', done_criteria: ['数据可用'], tasks: 0, tasks_done: 0 },
-      { key: 'train', statement: '训练模型', state: 'pending', done_criteria: [], tasks: 0, tasks_done: 0 },
+      { key: 'prep', statement: '准备数据', state: 'pending', done_criteria: ['数据可用'], close_policy: 'human', tasks: 0, tasks_done: 0 },
+      { key: 'train', statement: '训练模型', state: 'pending', done_criteria: [], close_policy: 'human', tasks: 0, tasks_done: 0 },
     ])
   })
 
@@ -159,8 +174,76 @@ describe('层1 处理器 · 阶段', () => {
     // 任务真的完成了，由人确认才成立（agent 自写 done 那条路始终不存在）。
     expect((await updateWorktask(agent, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'complete' })).changed).toBe(true)
     expect(await updateWorkstage(human, { scope: 'ws-a', stage_key: 'prep', action: 'done' }, {})).toEqual({
-      success: true, scope: 'ws-a', stage_key: 'prep', action: 'done', changed: true,
+      success: true, scope: 'ws-a', stage_key: 'prep', action: 'done', close_policy: 'human', changed: true,
     })
+  })
+
+  it('阶段收口策略：human（缺省）= 真人专属；auto = 自治回合也放行；非法值不静默当缺省', async () => {
+    const records = { 'ws-a': { updatedAt: 1 } }
+    const agent = depsOf(records)
+    const badStages = [{ key: 'prep', statement: '准备数据', close_policy: 'always' }]
+    expect(String((await createWorkstage(agent, { scope: 'ws-a', objective: 'x', stages: badStages })).error))
+      .toContain('只认 human / auto')
+
+    await createWorkstage(agent, {
+      scope: 'ws-a', objective: 'x',
+      stages: [{ key: 'prep', statement: '准备数据', close_policy: 'auto' }, { key: 'train', statement: '训练模型' }],
+    })
+    const got = await getWorkstage(agent, { scope: 'ws-a' })
+    expect((got.stages as Array<{ close_policy: string }>).map((s) => s.close_policy)).toEqual(['auto', 'human'])
+
+    await createWorktask(agent, { scope: 'ws-a', stage_key: 'prep', objective: '清洗数据' })
+    await startWorkStage(agent, 'ws-a', 'prep')
+    // 判据没齐时 auto 也不放行：策略只决定"谁有权落"，不决定"够不够格落"。
+    expect(String((await updateWorkstage(agent, { scope: 'ws-a', stage_key: 'prep', action: 'done' })).reason))
+      .toContain('未全部 complete')
+    await updateWorktask(agent, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'complete' })
+    expect(await updateWorkstage(agent, { scope: 'ws-a', stage_key: 'prep', action: 'done' })).toEqual({
+      success: true, scope: 'ws-a', stage_key: 'prep', action: 'done', close_policy: 'auto', changed: true,
+    })
+
+    // 策略按**阶段**读（不是全局开关）：下一段缺省 human，agent 自写照样被拒。
+    await createWorktask(agent, { scope: 'ws-a', stage_key: 'train', objective: '调参' })
+    await startWorkStage(agent, 'ws-a', 'train')
+    await updateWorktask(agent, { scope: 'ws-a', task_id: 'wt:train:1', action: 'complete' })
+    const denied = await updateWorkstage(agent, { scope: 'ws-a', stage_key: 'train', action: 'done' })
+    expect(denied.code).toBe('WORK_NO_PERMISSION')
+    expect(String(denied.error)).toContain('close_policy')
+  })
+
+  it('action=discard：丢整条流程（真人专属；幂等；不需要 stage_key）', async () => {
+    const records = { 'ws-a': { updatedAt: 1 } }
+    const agent = depsOf(records)
+    const human = depsOf(records, true)
+    await createWorkstage(agent, { scope: 'ws-a', objective: '误建的流程', stages: STAGES })
+    await createWorktask(agent, { scope: 'ws-a', stage_key: 'prep', objective: '误建的任务' })
+
+    // 自撤流程 = 越权：会抹掉"这里曾经有一条流程"这段历史
+    const denied = await updateWorkstage(agent, { scope: 'ws-a', action: 'discard' })
+    expect(denied.code).toBe('WORK_NO_PERMISSION')
+    expect(String(denied.error)).toContain('不可逆')
+
+    // 人删：不需要 stage_key；删完读不到流程（明说的缺失）
+    expect(await updateWorkstage(human, { scope: 'ws-a', action: 'discard' }))
+      .toEqual({ success: true, scope: 'ws-a', action: 'discard', changed: true })
+    expect(await getWorkstage(agent, { scope: 'ws-a' }))
+      .toMatchObject({ success: false, error: '该归属域还没有流程（先调 create_workstage 建流程）' })
+
+    // 幂等：没有流程 ⇒ 零写入（changed:false，不报错）
+    expect(await updateWorkstage(human, { scope: 'ws-a', action: 'discard' }))
+      .toEqual({ success: true, scope: 'ws-a', action: 'discard', changed: false })
+
+    // 再建是**新**流程（revision 1），不是复活
+    await createWorkstage(agent, { scope: 'ws-a', objective: '重来', stages: STAGES })
+    expect((await getWorkstage(agent, { scope: 'ws-a' })).revision).toBe(1)
+  })
+
+  it('action 非法 / done 缺 stage_key：当场拒并说明（discard 不需要 stage_key）', async () => {
+    const deps = depsOf({ 'ws-a': { updatedAt: 1 } }, true)
+    await createWorkstage(deps, { scope: 'ws-a', objective: 'x', stages: STAGES })
+    expect(String((await updateWorkstage(deps, { scope: 'ws-a', stage_key: 'prep', action: 'start' })).error))
+      .toContain('阶段开工是驱动器的动作')
+    expect(String((await updateWorkstage(deps, { scope: 'ws-a', action: 'done' })).error)).toContain('缺少 stage_key')
   })
 })
 
