@@ -329,3 +329,55 @@ describe('阶段规划轮（阶段开工了却没任务 ⇒ 让 agent 建任务�
     expect((await h.tools.get_workstage.execute({}, h.exec())).stages).toMatchObject([{ state: 'active' }])
   })
 })
+
+describe('收口确认轮（任务全达成 + 策略 human ⇒ 请人拍板，而不是安静地停住）', () => {
+  /** 起一条流程 + 一个任务并把它做完（策略由用例给）。 */
+  async function seededDone(policy: 'human' | 'auto' = 'human') {
+    const local = fakeHost()
+    apply(local.ctx, { drive: true })
+    await local.tools.create_workstage.execute({
+      objective: '实现一个俄罗斯方块小游戏',
+      stages: [{ key: 'ui', statement: '界面与交互', close_policy: policy }],
+    }, local.exec())
+    await local.tools.create_worktask.execute({ stage_key: 'ui', objective: '画棋盘' }, local.exec())
+    await local.emitStatus('idle')                       // 开工 + 投任务轮
+    await local.tools.update_worktask.execute({ task_id: 'wt:ui:1', action: 'complete' }, local.exec())
+    local.sent.length = 0                                 // 只关心收口这一段
+    return local
+  }
+
+  it('策略 human：投一轮请 agent 向人确认（说清"done 由人落"，并给出落章路径）', async () => {
+    const h = await seededDone('human')
+    await h.emitStatus('idle')
+    expect(h.sent).toHaveLength(1)
+    const text = JSON.stringify(h.sent[0].content)
+    expect(text).toContain('阶段收口待人工确认')
+    expect(text).toContain('ask_user_question')
+    expect(text).toContain('update_workstage')
+    expect(text).toContain('ui')
+    expect(h.sent[0].source).toMatchObject({ kind: 'work', processId: 'wp:session-1', stageKey: 'ui' })
+    expect(h.sent[0].source.round).toBeUndefined()
+    // 阶段**没有**被自己收口（human 策略：agent 只提议，done 由人落）
+    expect((await h.tools.get_workstage.execute({}, h.exec())).stages).toMatchObject([{ state: 'active' }])
+  })
+
+  it('同一件事只问一次：人还没答，不重复投（不刷屏）', async () => {
+    const h = await seededDone('human')
+    await h.emitStatus('idle')
+    await h.emitStatus('idle')
+    await h.emitStatus('idle')
+    expect(h.sent).toHaveLength(1)
+  })
+
+  it('策略 auto：驱动器自己收口，**不**投阶段确认轮；收完只剩"流程级"请人判', async () => {
+    const h = await seededDone('auto')
+    await h.emitStatus('idle')
+    // 阶段被驱动器自动收口（没问人）
+    expect((await h.tools.get_workstage.execute({}, h.exec())).stages).toMatchObject([{ state: 'done' }])
+    // 全阶段 done ⇒ 剩下的唯一一件事是"流程成没成"——那是人的判断，故投的是**流程级**确认轮
+    expect(h.sent).toHaveLength(1)
+    const text = JSON.stringify(h.sent[0].content)
+    expect(text).toContain('流程收口待人工判断')
+    expect(text).not.toContain('阶段收口待人工确认')
+  })
+})

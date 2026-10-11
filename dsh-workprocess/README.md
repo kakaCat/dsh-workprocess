@@ -49,6 +49,10 @@ apply(ctx, config) ⇒
 3. 该跑任务就**投一轮**（`agent.followup`，source 自署 `work`）；
    **本阶段一个任务都没有**（每过一个阶段边界都必然如此）⇒ 投**阶段规划轮**，请 agent 用
    `create_worktask` 给本阶段建任务。同一阶段只问一次，问过就停手等人（不空转、也不替它臆造任务）。
+4. 任务全达成但策略 `human`（或全阶段 done ⇒ 流程级收口）⇒ 投**收口确认轮**，请 agent 用
+   `ask_user_question`（或直接开口）把"该人拍板了"摆到人面前；人一确认就是人类回合，agent 落章
+   时授权面自然放行。**同一件事只问一次**（不刷屏）。没有这一轮，流程会安静地停在阶段边界上——
+   看起来就是卡死（真机踩过）。
 4. 同一轮（`taskId:revision:round`）**只投一次**；回合被接手（会话里出现该 source 的 `user/message`）才把
    `rounds.started` **耐久**前进一格。
 5. **刹车**：任务写了 `max_rounds` 用它，没写用 `defaultMaxRounds`；到顶 ⇒ 驱动器 `block-task` **落盘**
@@ -96,8 +100,8 @@ ln -sfn <repo>/dsh-workprocess ~/.dsh/profiles/desktop/node_modules/dsh-workproc
 
 ## 还没接的部分
 
-- **`ask-*`（人机弹框确认）**：`human` 策略的收口目前靠人在会话里说一句 → 模型调
-  `update_workstage(action=done)` 落章；没有弹框通道的接线。
+- **`ask-*`（宿主弹框通道）**：收口确认目前是**投一轮让 agent 开口问**（`ask_user_question`
+  或直接说明），不是宿主的原生弹框；接原生弹框是后续可换的实现，判据不变。
 
 ## 工具面上与流程相关的三个动词（在 `tool-workprocess`）
 
@@ -111,7 +115,7 @@ ln -sfn <repo>/dsh-workprocess ~/.dsh/profiles/desktop/node_modules/dsh-workproc
 ## 测试
 
 ```bash
-pnpm test   # 全仓 128 条；本包 20 条：装配面 / 域声明与内核校验 / 归属缺省 / 真人判定 /
-            #   空闲边界（开工·auto 收口·running 不动手）/ 续跑投递（自署来源·去重·上限刹车）/ **阶段规划轮** /
+pnpm test   # 全仓 132 条；本包 23 条：装配面 / 域声明与内核校验 / 归属缺省 / 真人判定 /
+            #   空闲边界（开工·auto 收口·running 不动手）/ 续跑投递（自署来源·去重·上限刹车）/ **阶段规划轮** / **收口确认轮** /
             #   服务面 ctx.workprocess（view / pauseActive / resumePaused / discard 幂等）
 ```

@@ -117,3 +117,69 @@ export function renderWorkPlanPrompt(input: WorkPlanPromptInput): string {
     '2. 规划是第 ' + String(input.round) + ' 轮：若本阶段确实无事可做，请明确说明并停手等人（不要反复空转）。',
   ].join('\n')
 }
+
+/** **收口确认轮**的输入（阶段级 / 流程级两种）。 */
+export interface WorkAskPromptInput {
+  /** 层0：流程目标。 */
+  readonly processObjective: string
+  /** `stage-done` = 请人确认本阶段收口；`close` = 全阶段已收口，请人判流程成没成。 */
+  readonly kind: 'stage-done' | 'close'
+  /** 要人确认的阶段（`kind: 'close'` 时缺省 = 全阶段已收口）。 */
+  readonly stage?: {
+    readonly key: string
+    readonly statement: string
+    readonly doneCriteria: readonly string[]
+  }
+}
+
+/**
+ * 渲染**收口确认轮**的提示词：到这里机器能做的都做完了，剩下的是**人的判断**。
+ *
+ * 【为什么必须投这一轮】`human` 策略下 done 由人落、agent 只提议（授权面把 agent 自写拒掉）。
+ * 但"提议"得真的**说出口**：没有这一轮，流程会安静地停在阶段边界上——**看起来就是卡死**
+ * （真机踩过：任务全 complete、策略 human、没有任何人被告知）。
+ * 没有弹框通道时，让 agent 用 `ask_user_question`（或直接开口）把这件事摆到人面前；
+ * 人一回答就是普通的人类回合，agent 落章时授权面自然放行。
+ */
+export function renderWorkAskPrompt(input: WorkAskPromptInput): string {
+  if (input.kind === 'close' || input.stage === undefined) {
+    return [
+      '# 流程收口待人工判断（workprocess）',
+      '',
+      '流程目标：' + input.processObjective,
+      '',
+      '## 现在要做的唯一一件事',
+      '全部阶段都已收口——但**流程没有"完成"态**：成没成是判据，由人来判。',
+      '请把这件事摆到人面前并等他回答（用 `ask_user_question` 问一句，或直接开口说清）：',
+      '- 目标达成了没有？还有没有要补做的事？',
+      '人要说还要做：用 `create_workstage` 替换阶段表（或新起一条流程），别自己宣布完成。',
+    ].join('\n')
+  }
+  const stage = input.stage
+  const criteria = stage.doneCriteria.length === 0
+    ? ['（本阶段未登记达成判据——按阶段陈述与人核对）']
+    : stage.doneCriteria.map((c) => '- ' + c)
+  return [
+    '# 阶段收口待人工确认（workprocess）',
+    '',
+    '流程目标：' + input.processObjective,
+    '',
+    '## 当前阶段（层1）',
+    '阶段 `' + stage.key + '`：' + stage.statement,
+    '达成判据：',
+    ...criteria,
+    '',
+    '## 现在要做的唯一一件事',
+    '本阶段的任务**已全部达成**，而本阶段的收口策略是 `human`（**人工确认**）：',
+    'done 由**人**落，不由你落（agent 自写会被授权面拒）。',
+    '请把这件事摆到人面前并等他回答：',
+    '1. 用 `ask_user_question` 问一句「阶段 ' + stage.key + ' 的任务已全部达成，是否收口？」',
+    '   （选项示例：确认收口 / 还要补做）；',
+    '2. 人确认后，你再调 `update_workstage { action: "done", stage_key: "' + stage.key + '" }` 落章；',
+    '3. 人要说还要补做，就用 `create_worktask` 补任务，**不要**收口。',
+    '',
+    '## 边界',
+    '- 不要在这一轮里直接调 `update_workstage done`：这一轮不是人发起的，落了也会被拒。',
+    '- 人也可能改主意（把该阶段改成 `close_policy: auto`，由驱动器自动收口）——按人说的办。',
+  ].join('\n')
+}

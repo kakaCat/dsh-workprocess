@@ -18,8 +18,8 @@ import {
   blockWorkTask, completeWorkStage, currentStageOf, stageAllowsStart, startWorkStage, workProcessOf,
 } from 'workprocess-core'
 import type { WorkProcess, WorkStoreLike, WorkTask } from 'workprocess-core'
-import { decideWorkRound, renderWorkPlanPrompt, renderWorkRoundPrompt } from 'workprocess-round-driver'
-import type { DecideInput, RoundDecision, StageFacts, WorkFacts } from 'workprocess-round-driver'
+import { decideWorkRound, renderWorkAskPrompt, renderWorkPlanPrompt, renderWorkRoundPrompt } from 'workprocess-round-driver'
+import type { DecideInput, GateFacts, RoundDecision, StageFacts, WorkFacts } from 'workprocess-round-driver'
 
 /** 任务没写 `max_rounds` 时的**生效上限**（缺省 20）：自动续跑必须有刹车，不许默认无限。 */
 export const DEFAULT_MAX_ROUNDS = 20
@@ -68,6 +68,11 @@ export interface TickDeps {
    * 决策树改为停手等人（`wait-human`）——把"阶段空着"这件事露出来。
    */
   readonly stagePlanAsked?: (stageKey: string) => boolean
+  /**
+   * **收口确认是否已经问过人**（同一件事只问一次）：问过就不再投，避免每个空闲边界都刷一轮。
+   * 键由组合根定（如 `stage-done:<阶段键>` / `close`）。
+   */
+  readonly humanAskAsked?: (askKey: string) => boolean
 }
 
 /**
@@ -81,14 +86,25 @@ export async function tickWorkprocess(
   if (process === undefined) return undefined
   const roundsStarted = await deps.roundsStartedOf?.(scope)
   const work = factsOf(process, sessionKey, deps.defaultMaxRounds ?? DEFAULT_MAX_ROUNDS)
-  const asked = deps.stagePlanAsked
+  const planAsked = deps.stagePlanAsked
+  const askAsked = deps.humanAskAsked
+  const gates: GateFacts = {
+    ...(planAsked === undefined || work.currentStage === undefined
+      ? {}
+      : { stagePlanBlocked: planAsked(work.currentStage.key) === true }),
+    ...(askAsked === undefined
+      ? {}
+      : {
+        humanAskBlocked: askAsked(
+          work.currentStage === undefined ? 'close' : 'stage-done:' + work.currentStage.key,
+        ) === true,
+      }),
+  }
   const input: DecideInput = {
     now: deps.now(),
     scope: { id: scope, drivable: true },
     work,
-    ...(asked === undefined || work.currentStage === undefined
-      ? {}
-      : { gates: { stagePlanBlocked: asked(work.currentStage.key) === true } }),
+    ...(Object.keys(gates).length === 0 ? {} : { gates }),
     ...(roundsStarted === undefined ? {} : { roundsStarted }),
   }
   const decision = decideWorkRound(input)
@@ -176,5 +192,37 @@ export function planDeliveryOf(
       },
       round: askedRound,
     }),
+  }
+}
+
+/**
+ * 造**收口确认轮**的载荷：到这一步机器能做的都做完了，剩下的是人的判断——
+ * 于是投一轮让 agent 把"该人拍板了"这件事**说出口**（没有这一轮，流程会安静地停住，看起来就是卡死）。
+ *
+ * 与规划轮同理：来源自署 `work`、**不带 `round`**（不消耗任务预算）。
+ */
+export function askDeliveryOf(
+  process: WorkProcess, kind: 'stage-done' | 'close', stageKey?: string,
+): RoundDelivery | undefined {
+  const stage = currentStageOf(process)
+  if (kind === 'stage-done') {
+    if (stage === undefined || stage.key !== stageKey) return undefined
+    return {
+      processId: process.id,
+      stageKey: stage.key,
+      revision: process.revision,
+      prompt: renderWorkAskPrompt({
+        processObjective: process.objective,
+        kind: 'stage-done',
+        stage: { key: stage.key, statement: stage.statement, doneCriteria: stage.doneCriteria },
+      }),
+    }
+  }
+  if (stage !== undefined) return undefined   // 还有阶段没 done：不是流程级收口
+  return {
+    processId: process.id,
+    stageKey: '',
+    revision: process.revision,
+    prompt: renderWorkAskPrompt({ processObjective: process.objective, kind: 'close' }),
   }
 }

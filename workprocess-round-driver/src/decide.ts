@@ -53,7 +53,12 @@ function pick(tasks: readonly TaskFacts[]): { running?: TaskFacts; waiting?: Tas
 
 /** 层的分支：先层1（串行门 / 收口），再层2（相位机 / 回合上限）。 */
 function layerBranch(input: DecideInput, processId: string, stage: StageFacts | undefined): RoundDecision {
-  if (stage === undefined) return { kind: 'ask-close', processId }
+  // 全阶段 done ⇒ 流程级收口请人判（流程没有"完成"态）；已经问过就停手等人。
+  if (stage === undefined) {
+    return input.gates?.humanAskBlocked === true
+      ? { kind: 'wait-human', processId, reason: 'ask-close-asked' }
+      : { kind: 'ask-close', processId }
+  }
 
   // 层1 未开工：串行门放行才开工（开工是驱动的事，不是 agent 的自选动作）。
   if (stage.state === 'pending') {
@@ -91,8 +96,10 @@ function layerBranch(input: DecideInput, processId: string, stage: StageFacts | 
   //   · `human`（缺省）——请人确认（agent 只提议，不写）；
   //   · `auto` ——驱动器直接落 done（"自动推进下一阶段"这条路的唯一入口；判据仍要求任务非空且全 complete）。
   if (tasks.length > 0 && tasks.every((t) => t.phase === 'complete')) {
-    return stageClosePolicyOf(stage) === 'auto'
-      ? { kind: 'close-stage', processId, stageKey: stage.key }
+    if (stageClosePolicyOf(stage) === 'auto') return { kind: 'close-stage', processId, stageKey: stage.key }
+    // 策略 human：请人确认。**已经问过就停手等人**（不再重复投，避免刷屏）。
+    return input.gates?.humanAskBlocked === true
+      ? { kind: 'wait-human', processId, reason: 'ask-stage-done-asked:' + stage.key }
       : { kind: 'ask-stage-done', processId, stageKey: stage.key }
   }
 

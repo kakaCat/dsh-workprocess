@@ -47,6 +47,11 @@ export interface GateFacts {
    * 已问过就不再问（否则每个空闲边界都投一轮 = 空转）：停手等人，把"阶段空着"这件事露出来。
    */
   readonly stagePlanBlocked?: boolean
+  /**
+   * ⑦ **收口确认已经问过人**（内存态：同一件事只问一次）。
+   * 问过就不再问——否则每个空闲边界都往会话里投一轮"请人确认"，人还没答就被刷屏。
+   */
+  readonly humanAskBlocked?: boolean
 }
 
 /** 层2：本阶段里的一个任务。 */

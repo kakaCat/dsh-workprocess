@@ -27,14 +27,14 @@ import { agentOf, authorityResolverOf, type AuthorityHostCtx, type HostAgent, ty
 import { storageDomainStoreOf, type StorageDomainCtx } from './domain.js'
 import { createWorkprocessService } from './service.js'
 import {
-  DEFAULT_MAX_ROUNDS, planDeliveryOf, roundDeliveryOf, tickWorkprocess, type RoundDelivery,
+  DEFAULT_MAX_ROUNDS, askDeliveryOf, planDeliveryOf, roundDeliveryOf, tickWorkprocess, type RoundDelivery,
 } from './driver.js'
 
 export { storageDomainStoreOf, workprocessDomain, WORKPROCESS_DOMAIN, WORKPROCESS_DOMAIN_VERSION } from './domain.js'
 export { createWorkprocessService } from './service.js'
 export type { WorkprocessService, WorkprocessStatus } from './service.js'
 export { agentOf, authorityResolverOf } from './authority.js'
-export { DEFAULT_MAX_ROUNDS, effectiveMaxRoundsOf, factsOf, planDeliveryOf, roundDeliveryOf, tickWorkprocess } from './driver.js'
+export { DEFAULT_MAX_ROUNDS, askDeliveryOf, effectiveMaxRoundsOf, factsOf, planDeliveryOf, roundDeliveryOf, tickWorkprocess } from './driver.js'
 export type { StorageDomainCtx, DomainTableHandle } from './domain.js'
 export type { HostAgent, HostEvent, HostSession } from './authority.js'
 export type { RoundDelivery } from './driver.js'
@@ -73,6 +73,8 @@ interface DriveCtx {
   readonly pending: Set<string>
   /** 已经问过**阶段规划轮**的阶段键（同一阶段只问一次：问过就停手等人，不空转）。 */
   readonly planAsked: Set<string>
+  /** 已经问过人的**收口确认**键（`stage-done:<阶段键>` / `close`：同一件事只问一次，不刷屏）。 */
+  readonly askAsked: Set<string>
 }
 
 interface PluginCtx extends AuthorityHostCtx, StorageDomainCtx {
@@ -108,6 +110,7 @@ export function apply(ctx: PluginCtx, config?: WorkprocessConfig): void {
       defaultMaxRounds: config?.defaultMaxRounds ?? DEFAULT_MAX_ROUNDS,
       pending: new Set<string>(),
       planAsked: new Set<string>(),
+      askAsked: new Set<string>(),
     }
     // ① 回合事实：只有我们自署来源的回合才算数（人的消息不是回合）。
     ctx.on('session/event', (session: HostSession, event: unknown) => {
@@ -161,6 +164,7 @@ async function driveAtIdle(
         roundsStartedOf: async (scope) => (await store.get(scope))?.rounds?.started,
         defaultMaxRounds: drive.defaultMaxRounds,
         stagePlanAsked: (stageKey) => drive.planAsked.has(stageKey),
+        humanAskAsked: (askKey) => drive.askAsked.has(askKey),
       }, session.id, session.id)
       if (decision === undefined) return
       if (decision.kind === 'drive') {
@@ -175,7 +179,16 @@ async function driveAtIdle(
         await deliverPlanRound(ctx, store, session, decision.stageKey)
         return
       }
-      // 只有**确实改了状态**的三种结论才值得再拍一次；其余（hold / wait-human / ask-*）停手。
+      // **收口确认轮**：任务全达成但策略是 human（或全阶段 done ⇒ 流程收口）⇒ 请人拍板。
+      // 到这一步机器能做的都做完了；不把"该人拍板了"说出口，流程就会安静地停住（看起来就是卡死）。
+      if (decision.kind === 'ask-stage-done' || decision.kind === 'ask-close') {
+        if (!drive.drive) return
+        const askKey = decision.kind === 'ask-close' ? 'close' : 'stage-done:' + decision.stageKey
+        drive.askAsked.add(askKey)
+        await deliverAskRound(ctx, store, session, decision.kind, decision.kind === 'ask-close' ? undefined : decision.stageKey)
+        return
+      }
+      // 只有**确实改了状态**的三种结论才值得再拍一次；其余（hold / wait-human）停手。
       if (decision.kind !== 'start-stage' && decision.kind !== 'close-stage' && decision.kind !== 'block-task') return
     }
   } catch (err) {
@@ -271,6 +284,34 @@ export async function deliverPlanRound(
     content: [{ type: 'text', text: delivery.prompt }],
     source: {
       kind: 'work', processId: delivery.processId, stageKey: delivery.stageKey, revision: delivery.revision,
+    },
+  }))
+  return delivery
+}
+
+/**
+ * 把**收口确认轮**投给会话：任务全达成但策略 `human`（或全阶段 done）⇒ 请 agent 向人确认。
+ *
+ * 【为什么这是必须的】`human` 策略下 done 由人落、agent 只提议——但"提议"得**说出口**。
+ * 没有这一轮：流程安静地停在阶段边界上，人只看到"卡住了"（真机踩过）。
+ * 来源同样自署 `work`（自动回合，不是人打的字），**不带 `round`**（不消耗任务预算）。
+ */
+export async function deliverAskRound(
+  ctx: PluginCtx, store: WorkToolDeps['store'], session: HostSession,
+  kind: 'ask-stage-done' | 'ask-close', stageKey?: string,
+): Promise<RoundDelivery | undefined> {
+  const process = await workProcessOf({ store }, session.id)
+  if (process === undefined) return undefined
+  const delivery = askDeliveryOf(process, kind === 'ask-close' ? 'close' : 'stage-done', stageKey)
+  if (delivery === undefined) return undefined
+  const agent = ctx.agents.get(session.id) as { followup?: (message: unknown) => void } | undefined
+  if (typeof agent?.followup !== 'function') return undefined
+  agent.followup(createUserMessage({
+    content: [{ type: 'text', text: delivery.prompt }],
+    source: {
+      kind: 'work', processId: delivery.processId,
+      ...(delivery.stageKey === '' ? {} : { stageKey: delivery.stageKey }),
+      revision: delivery.revision,
     },
   }))
   return delivery

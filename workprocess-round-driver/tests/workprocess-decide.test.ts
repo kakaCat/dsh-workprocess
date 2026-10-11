@@ -87,6 +87,19 @@ describe('层1 · 串行门与收口', () => {
     expect(r).toEqual({ kind: 'ask-stage-done', processId: 'wp:ws-a', stageKey: 'prep' })
   })
 
+  it('收口确认**问过一次**就不再问（humanAskBlocked）→ wait-human：不刷屏、也不自己收口', () => {
+    const done = [task({ phase: 'complete' })]
+    expect(decideWorkRound(input({
+      gates: { humanAskBlocked: true },
+      work: { processId: 'wp:ws-a', currentStage: stage({ tasks: done }) },
+    }))).toEqual({ kind: 'wait-human', processId: 'wp:ws-a', reason: 'ask-stage-done-asked:prep' })
+
+    expect(decideWorkRound(input({
+      gates: { humanAskBlocked: true },
+      work: { processId: 'wp:ws-a', currentStage: undefined },
+    }))).toEqual({ kind: 'wait-human', processId: 'wp:ws-a', reason: 'ask-close-asked' })
+  })
+
   it('阶段策略 auto：任务全 complete → close-stage（自动收口，不等人工确认）', () => {
     const r = decideWorkRound(input({
       work: { processId: 'wp:ws-a', currentStage: stage({ closePolicy: 'auto', tasks: [task({ phase: 'complete' })] }) },

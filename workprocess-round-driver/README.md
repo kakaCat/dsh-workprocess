@@ -9,7 +9,7 @@
 |---|---|
 | 该会话归属吗 | `work.sessionKey` vs `scope.ownerSessionId`（两侧都缺 = 放行，只有明确不等才拦） |
 | 现在该不该跑 | 六道闸：内存闭锁 → 退避 → 进程级上游 → 人工确认/弹框（wait-human）→ 起链预算 |
-| **层1**：阶段开工了吗 / 该收口了吗 | 阶段 `pending` 且串行门放行 → `start-stage`；全阶段 `done` → `ask-close`；任务全 `complete` → 策略 `auto` 则 `close-stage`（自动收口），策略 `human`（缺省）则 `ask-stage-done`（请人确认） |
+| **层1**：阶段开工了吗 / 该收口了吗 | 阶段 `pending` 且串行门放行 → `start-stage`；全阶段 `done` → `ask-close`；任务全 `complete` → 策略 `auto` 则 `close-stage`（自动收口），策略 `human`（缺省）则 `ask-stage-done`（请人确认）。两种 ask 都是**请人拍板**：组合根各投一轮让 agent 开口（闸 `humanAskBlocked` 保证同一件事只问一次） |
 | **层2**：这一轮跑哪个任务 | `active` 任务 → `drive`；回合作顶 → `block-task`（落盘）；`paused/blocked` → `wait-human`；**本阶段一个任务都没有 → `plan-stage`**（投一轮让 agent 建任务） |
 
 **决策层不臆造任务，但会把"这个阶段是空的"交给 agent**：阶段串行 ⇒ 任务只属于当前阶段 ⇒
@@ -24,6 +24,7 @@
 | `decideWorkRound(input)` | 纯决策树（零 I/O，可穷举单测）；结论穷尽十态 |
 | `renderWorkRoundPrompt(input)` | 纯提示词渲染：流程目标 / 当前阶段与判据 / 本轮任务 / 边界（含"不越阶段开工"与**收口策略**写的"请人确认 / 自动收口"）/ 停手条件 |
 | `renderWorkPlanPrompt(input)` | **阶段规划轮**提示词：本阶段开工了却没任务 ⇒ 请 agent 用 `create_worktask` 给本阶段建任务并直接动手 |
+| `renderWorkAskPrompt(input)` | **收口确认轮**提示词：任务全达成（策略 `human`）或全阶段 done ⇒ 请 agent 向人拍板（`ask_user_question`），并给回落章路径 |
 | 契约类型 | `RoundScopeFacts` / `GateFacts` / `WorkFacts` / `StageFacts` / `TaskFacts` / `DecideInput` / `RoundDecision` |
 
 ## 决策顺序（顺序即纪律）
@@ -48,5 +49,5 @@
 ## 测试
 
 ```bash
-cd workprocess/workprocess-round-driver && pnpm test   # 25 条：闸顺序 / 串行门 / 收口策略 / 相位机 / 回合上限 / 规划轮 / 提示词
+cd workprocess/workprocess-round-driver && pnpm test   # 26 条：闸顺序 / 串行门 / 收口策略 / 相位机 / 回合上限 / 规划轮 / 提示词
 ```
