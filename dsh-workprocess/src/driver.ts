@@ -18,7 +18,7 @@ import {
   blockWorkTask, completeWorkStage, currentStageOf, stageAllowsStart, startWorkStage, workProcessOf,
 } from 'workprocess-core'
 import type { WorkProcess, WorkStoreLike, WorkTask } from 'workprocess-core'
-import { decideWorkRound, renderWorkRoundPrompt } from 'workprocess-round-driver'
+import { decideWorkRound, renderWorkPlanPrompt, renderWorkRoundPrompt } from 'workprocess-round-driver'
 import type { DecideInput, RoundDecision, StageFacts, WorkFacts } from 'workprocess-round-driver'
 
 /** 任务没写 `max_rounds` 时的**生效上限**（缺省 20）：自动续跑必须有刹车，不许默认无限。 */
@@ -63,11 +63,16 @@ export interface TickDeps {
   readonly roundsStartedOf?: (scope: string) => Promise<number | undefined>
   /** 任务没写 `max_rounds` 时的生效上限（缺省 {@link DEFAULT_MAX_ROUNDS}）。 */
   readonly defaultMaxRounds?: number
+  /**
+   * 本阶段的**规划轮是否已经问过**（组合根的内存态）：问过就不再问（否则每个空闲边界都投 = 空转），
+   * 决策树改为停手等人（`wait-human`）——把"阶段空着"这件事露出来。
+   */
+  readonly stagePlanAsked?: (stageKey: string) => boolean
 }
 
 /**
  * 一拍：读现状 → 决策 → 只落"不需要人"的副作用。
- * @returns 本拍的结论（`drive` 的投递由调用方做）；该归属域没有流程 ⇒ `undefined`。
+ * @returns 本拍的结论（`drive` / `plan-stage` 的投递由调用方做）；该归属域没有流程 ⇒ `undefined`。
  */
 export async function tickWorkprocess(
   deps: TickDeps, scope: string, sessionKey?: string,
@@ -75,10 +80,15 @@ export async function tickWorkprocess(
   const process = await workProcessOf({ store: deps.store }, scope)
   if (process === undefined) return undefined
   const roundsStarted = await deps.roundsStartedOf?.(scope)
+  const work = factsOf(process, sessionKey, deps.defaultMaxRounds ?? DEFAULT_MAX_ROUNDS)
+  const asked = deps.stagePlanAsked
   const input: DecideInput = {
     now: deps.now(),
     scope: { id: scope, drivable: true },
-    work: factsOf(process, sessionKey, deps.defaultMaxRounds ?? DEFAULT_MAX_ROUNDS),
+    work,
+    ...(asked === undefined || work.currentStage === undefined
+      ? {}
+      : { gates: { stagePlanBlocked: asked(work.currentStage.key) === true } }),
     ...(roundsStarted === undefined ? {} : { roundsStarted }),
   }
   const decision = decideWorkRound(input)
@@ -93,7 +103,8 @@ export async function tickWorkprocess(
       await blockWorkTask(deps, scope, decision.taskId, decision.reason)
       break
     default:
-      // drive：只**返回**结论（投递是组合根的事）；ask-* / wait-human / hold：没有对应能力就不假装有。
+      // drive / plan-stage：只**返回**结论（投递是组合根的事）；
+      // ask-* / wait-human / hold：没有对应能力就不假装有。
       break
   }
   return decision
@@ -102,9 +113,16 @@ export async function tickWorkprocess(
 /** 一轮续跑的**载荷**（提示词 + 授权来源；投递口由组合根接）。 */
 export interface RoundDelivery {
   readonly processId: string
-  readonly taskId: string
+  /**
+   * 这一轮跑的**任务**；**阶段规划轮没有任务**（`undefined` = 让 agent 先给本阶段建任务）。
+   * 规划轮也不带 `round`：它不消耗任何任务的回合预算。
+   */
+  readonly taskId?: string
+  /** 本轮的阶段（任务轮与规划轮都带：投递来源与日志同源）。 */
+  readonly stageKey: string
+  /** 授权判据的第三维：任务轮 = 任务 revision；规划轮 = 流程 revision。 */
   readonly revision: number
-  readonly round: number
+  readonly round?: number
   readonly prompt: string
 }
 
@@ -131,5 +149,32 @@ export function roundDeliveryOf(
     round,
     maxRounds: effectiveMaxRoundsOf(task, fallbackMaxRounds),
   })
-  return { processId: process.id, taskId: task.id, revision: task.revision, round, prompt }
+  return { processId: process.id, taskId: task.id, stageKey: stage.key, revision: task.revision, round, prompt }
+}
+
+/**
+ * 造**阶段规划轮**的载荷：当前阶段已开工但还没有任务 ⇒ 让 agent 给本阶段建任务。
+ *
+ * 刹车**不在回合数上**（规划轮不消耗任务的回合预算），而在"同一阶段只问一次"：
+ * 组合根按阶段键记一次（`stagePlanAsked`），问过之后决策树改成停手等人。
+ * 阶段已不在当前 / 已有任务 ⇒ `undefined`（没什么可规划的）。
+ */
+export function planDeliveryOf(
+  process: WorkProcess, stageKey: string, askedRound = 1,
+): RoundDelivery | undefined {
+  const stage = currentStageOf(process)
+  if (stage === undefined || stage.key !== stageKey || stage.tasks.length > 0) return undefined
+  return {
+    processId: process.id,
+    stageKey: stage.key,
+    revision: process.revision,
+    prompt: renderWorkPlanPrompt({
+      processObjective: process.objective,
+      stage: {
+        key: stage.key, statement: stage.statement, doneCriteria: stage.doneCriteria,
+        ...(stage.closePolicy === undefined ? {} : { closePolicy: stage.closePolicy }),
+      },
+      round: askedRound,
+    }),
+  }
 }

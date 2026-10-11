@@ -13,13 +13,19 @@
  */
 import type {} from '@deepseek-ai/dsh-llm'
 
-/** 续跑回合的来源载荷（进程 / 任务 / 任务修订 / 回合号：授权面按它精确匹配）。 */
+/** 续跑回合的来源载荷（进程 / 阶段 / 任务 / 修订 / 回合号：授权面按它精确匹配）。 */
 export interface WorkRoundMessageSource {
   readonly kind: 'work'
   readonly processId: string
-  readonly taskId: string
+  /** 本轮所在的阶段（任务轮与**阶段规划轮**都带）。 */
+  readonly stageKey?: string
+  /**
+   * 这一轮跑的**任务**；**阶段规划轮没有任务**（它在请 agent 给本阶段建任务），
+   * 也因此没有 `round`——规划轮不消耗任务的回合预算，不该推进 `rounds.started`。
+   */
+  readonly taskId?: string
   readonly revision: number
-  readonly round: number
+  readonly round?: number
 }
 
 declare module '@deepseek-ai/dsh-llm' {

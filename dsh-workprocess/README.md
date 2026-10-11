@@ -46,7 +46,9 @@ apply(ctx, config) ⇒
    翻完之后又不再有事件——驱动器会**一枪不放**（真机踩过；会话事件到达时若 agent 已空闲，另有一拍兜底）。
 2. **一次空闲边界要把该做的做完**：开工（`start-stage`）与投第一轮是两拍，而边界只来一次，
    故一拍推进完**立刻再拍**，直到得出 `drive`（投递）或非推进结论（`hold` / `wait-human` / `ask-*`）为止。
-3. 该跑任务就**投一轮**（`agent.followup`，source 自署 `work`）。
+3. 该跑任务就**投一轮**（`agent.followup`，source 自署 `work`）；
+   **本阶段一个任务都没有**（每过一个阶段边界都必然如此）⇒ 投**阶段规划轮**，请 agent 用
+   `create_worktask` 给本阶段建任务。同一阶段只问一次，问过就停手等人（不空转、也不替它臆造任务）。
 4. 同一轮（`taskId:revision:round`）**只投一次**；回合被接手（会话里出现该 source 的 `user/message`）才把
    `rounds.started` **耐久**前进一格。
 5. **刹车**：任务写了 `max_rounds` 用它，没写用 `defaultMaxRounds`；到顶 ⇒ 驱动器 `block-task` **落盘**
@@ -109,7 +111,7 @@ ln -sfn <repo>/dsh-workprocess ~/.dsh/profiles/desktop/node_modules/dsh-workproc
 ## 测试
 
 ```bash
-pnpm test   # 全仓 122 条；本包 16 条：装配面 / 域声明与内核校验 / 归属缺省 / 真人判定 /
-            #   回合边界（开工·auto 收口·活动轮次不动手）/ 续跑投递（自署来源·去重·上限刹车）/
+pnpm test   # 全仓 128 条；本包 20 条：装配面 / 域声明与内核校验 / 归属缺省 / 真人判定 /
+            #   空闲边界（开工·auto 收口·running 不动手）/ 续跑投递（自署来源·去重·上限刹车）/ **阶段规划轮** /
             #   服务面 ctx.workprocess（view / pauseActive / resumePaused / discard 幂等）
 ```

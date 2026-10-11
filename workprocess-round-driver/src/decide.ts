@@ -12,7 +12,8 @@
  *   ⑨ **层2**：有 active 任务 → 回合作顶则 block-task，否则 drive；
  *              有 paused/blocked 任务 → wait-human；
  *              任务全 complete → 策略 `auto` 则 close-stage（自动收口），否则 ask-stage-done（请人确认）；
- *              阶段已开工却没任务 → hold（**决策层不臆造任务**）
+ *              **阶段已开工却没任务 → plan-stage**（投一轮让 agent 给本阶段建任务；问过一次就停手等人）。
+ *              决策层仍**不臆造任务**：它只把"这个阶段是空的"这件事交给 agent。
  *
  * @module workprocess/round/decide
  */
@@ -95,7 +96,15 @@ function layerBranch(input: DecideInput, processId: string, stage: StageFacts | 
       : { kind: 'ask-stage-done', processId, stageKey: stage.key }
   }
 
-  // 阶段已开工却没有可跑的任务：**决策层不臆造任务**，停下等人/上游落任务。
+  // 阶段已开工却**没有任务**：投一轮**阶段规划轮**，让 agent 给本阶段建任务。
+  // 这里不能只是 hold——阶段是串行的、任务只属于当前阶段（建满后续阶段的任务等于把串行作废），
+  // 于是**每过一个阶段边界，新阶段必然是空的**；hold 会让流程在每个阶段边界上停死（真机踩过）。
+  // 问过一次（`stagePlanBlocked`）就停手等人：不空转，也不替 agent 臆造任务。
+  if (tasks.length === 0) {
+    return input.gates?.stagePlanBlocked === true
+      ? { kind: 'wait-human', processId, reason: 'stage-plan-asked:' + stage.key }
+      : { kind: 'plan-stage', processId, stageKey: stage.key }
+  }
   return hold('stage-has-no-runnable-task:' + stage.key, processId)
 }
 

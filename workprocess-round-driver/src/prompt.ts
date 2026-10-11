@@ -36,8 +36,7 @@ export interface WorkRoundPromptInput {
 }
 
 /** 渲染一轮提示词。 */
-export function renderWorkRoundPrompt(input: WorkRoundPromptInput): string {
-  const criteria = input.stage.doneCriteria.length === 0
+export function renderWorkRoundPrompt(input: WorkRoundPromptInput): string {  const criteria = input.stage.doneCriteria.length === 0
     ? ['（本阶段未登记达成判据——按阶段陈述推进）']
     : input.stage.doneCriteria.map((c) => '- ' + c)
   const cap = input.maxRounds === undefined ? '不限' : String(input.maxRounds)
@@ -67,5 +66,54 @@ export function renderWorkRoundPrompt(input: WorkRoundPromptInput): string {
     '## 停手条件',
     '- 判据未齐又推不动：block 任务并说明被什么挡住（等人/等上游）。',
     '- 任务已达成：task-complete 后停手，不要顺手开新任务。',
+  ].join('\n')
+}
+
+/** 阶段规划轮的输入（本阶段已开工但还没有任务）。 */
+export interface WorkPlanPromptInput {
+  /** 层0：流程目标。 */
+  readonly processObjective: string
+  /** 层1：当前阶段（键 + 陈述 + 达成判据 + 收口策略）。 */
+  readonly stage: {
+    readonly key: string
+    readonly statement: string
+    readonly doneCriteria: readonly string[]
+    readonly closePolicy?: WorkStageClosePolicy
+  }
+  /** 这一轮是第几轮规划（同一阶段重复规划时如实报号）。 */
+  readonly round: number
+}
+
+/**
+ * 渲染**阶段规划轮**的提示词：当前阶段已开工、**还没有任务**，请 agent 给本阶段建任务。
+ *
+ * 【为什么由驱动器发这一轮】阶段串行决定了"任务只属于当前阶段"，于是每过一个阶段边界新阶段必然是空的；
+ * 决策层不臆造任务（怎么拆是判断），但**必须有人把"这个阶段是空的"这件事告诉 agent**——
+ * 否则自动推进在每个阶段边界上都会停死。
+ */
+export function renderWorkPlanPrompt(input: WorkPlanPromptInput): string {
+  const criteria = input.stage.doneCriteria.length === 0
+    ? ['（本阶段未登记达成判据——按阶段陈述拆任务）']
+    : input.stage.doneCriteria.map((c) => '- ' + c)
+  return [
+    '# 阶段规划轮（workprocess）',
+    '',
+    '流程目标：' + input.processObjective,
+    '',
+    '## 当前阶段（层1）',
+    '阶段 `' + input.stage.key + '`：' + input.stage.statement,
+    '达成判据：',
+    ...criteria,
+    '',
+    '## 现在要做的唯一一件事',
+    '本阶段已经开工，但**还没有任何任务**（阶段串行 ⇒ 任务只属于当前阶段，所以每个新阶段开始时都是空的）。',
+    '请用 `create_worktask`（`stage_key: "' + input.stage.key + '"`）给本阶段建 **1–3 个任务**：',
+    '- 每个任务的 objective 写成**可核验**的陈述（跑什么、看到什么算过）；',
+    '- 只建本阶段要做的，**不要**替后续阶段建任务（阶段是串行的）。',
+    '建完之后**直接动手做第一个任务**，不要只回报就停手。',
+    '',
+    '## 边界',
+    '1. 不越阶段开工（前一阶段全部达成后才轮到下一阶段）。',
+    '2. 规划是第 ' + String(input.round) + ' 轮：若本阶段确实无事可做，请明确说明并停手等人（不要反复空转）。',
   ].join('\n')
 }

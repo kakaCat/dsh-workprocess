@@ -42,6 +42,11 @@ export interface GateFacts {
   /** ⑤ 起链预算闸。 */
   readonly chainBudgetAllowed?: boolean
   readonly chainBudgetReason?: string
+  /**
+   * ⑥ **阶段规划轮已问过**（内存态：本阶段开工后没任务，已经投过一轮"给本阶段建任务"）。
+   * 已问过就不再问（否则每个空闲边界都投一轮 = 空转）：停手等人，把"阶段空着"这件事露出来。
+   */
+  readonly stagePlanBlocked?: boolean
 }
 
 /** 层2：本阶段里的一个任务。 */
@@ -89,10 +94,18 @@ export interface DecideInput {
   readonly roundsStarted?: number
 }
 
-/** 驱动拍的结论（**穷尽九态**）。 */
+/** 驱动拍的结论（**穷尽十态**）。 */
 export type RoundDecision =
   /** 起轮：把提示词投给会话（层2 的该任务已是 active）。 */
   | { readonly kind: 'drive'; readonly processId: string; readonly stageKey: string; readonly taskId: string }
+  /**
+   * **阶段规划轮**：当前阶段已开工但**还没有任务** ⇒ 投一轮让 agent 给本阶段建任务。
+   *
+   * 为什么必须有它：阶段是串行的、任务只属于当前阶段（建满后续阶段的任务等于把串行作废），
+   * 于是**每过一个阶段边界，新阶段必然是空的**。此时若只是 `hold`，流程会在每个阶段边界上停死
+   * （真机踩过：core 自动收口 → ui 开工 → 0 任务 → 永远无人叫 agent 拆任务）。
+   */
+  | { readonly kind: 'plan-stage'; readonly processId: string; readonly stageKey: string }
   /** **层1 开工**：当前阶段还是 pending 且串行门已放行 ⇒ 先开工（下一拍再起轮）。 */
   | { readonly kind: 'start-stage'; readonly processId: string; readonly stageKey: string }
   /** 阶段任务全 complete 且策略 `human` ⇒ 触发弹框请人确认（agent 不写）。 */

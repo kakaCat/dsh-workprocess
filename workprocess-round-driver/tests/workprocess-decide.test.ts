@@ -101,9 +101,17 @@ describe('层1 · 串行门与收口', () => {
     expect(r).toEqual({ kind: 'drive', processId: 'wp:ws-a', stageKey: 'prep', taskId: 'wt:prep:2' })
   })
 
-  it('阶段已开工却没有任何任务 → hold（决策层不臆造任务）', () => {
+  it('阶段已开工却没有任何任务 → plan-stage（投一轮让 agent 建任务；决策层仍不臆造任务）', () => {
     const r = decideWorkRound(input({ work: { processId: 'wp:ws-a', currentStage: stage({ tasks: [] }) } }))
-    expect(r).toEqual({ kind: 'hold', reason: 'stage-has-no-runnable-task:prep', processId: 'wp:ws-a' })
+    expect(r).toEqual({ kind: 'plan-stage', processId: 'wp:ws-a', stageKey: 'prep' })
+  })
+
+  it('规划轮已经问过（stagePlanBlocked）→ wait-human：不空转，把"阶段空着"这件事露出来', () => {
+    const r = decideWorkRound(input({
+      gates: { stagePlanBlocked: true },
+      work: { processId: 'wp:ws-a', currentStage: stage({ tasks: [] }) },
+    }))
+    expect(r).toEqual({ kind: 'wait-human', processId: 'wp:ws-a', reason: 'stage-plan-asked:prep' })
   })
 })
 

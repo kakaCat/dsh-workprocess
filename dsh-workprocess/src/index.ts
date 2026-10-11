@@ -27,14 +27,14 @@ import { agentOf, authorityResolverOf, type AuthorityHostCtx, type HostAgent, ty
 import { storageDomainStoreOf, type StorageDomainCtx } from './domain.js'
 import { createWorkprocessService } from './service.js'
 import {
-  DEFAULT_MAX_ROUNDS, roundDeliveryOf, tickWorkprocess, type RoundDelivery,
+  DEFAULT_MAX_ROUNDS, planDeliveryOf, roundDeliveryOf, tickWorkprocess, type RoundDelivery,
 } from './driver.js'
 
 export { storageDomainStoreOf, workprocessDomain, WORKPROCESS_DOMAIN, WORKPROCESS_DOMAIN_VERSION } from './domain.js'
 export { createWorkprocessService } from './service.js'
 export type { WorkprocessService, WorkprocessStatus } from './service.js'
 export { agentOf, authorityResolverOf } from './authority.js'
-export { DEFAULT_MAX_ROUNDS, effectiveMaxRoundsOf, factsOf, roundDeliveryOf, tickWorkprocess } from './driver.js'
+export { DEFAULT_MAX_ROUNDS, effectiveMaxRoundsOf, factsOf, planDeliveryOf, roundDeliveryOf, tickWorkprocess } from './driver.js'
 export type { StorageDomainCtx, DomainTableHandle } from './domain.js'
 export type { HostAgent, HostEvent, HostSession } from './authority.js'
 export type { RoundDelivery } from './driver.js'
@@ -71,6 +71,8 @@ interface DriveCtx {
   readonly defaultMaxRounds: number
   /** 已投递、尚未接手的回合（`taskId:revision:round`；内存态——跨重启不重复投同一轮）。 */
   readonly pending: Set<string>
+  /** 已经问过**阶段规划轮**的阶段键（同一阶段只问一次：问过就停手等人，不空转）。 */
+  readonly planAsked: Set<string>
 }
 
 interface PluginCtx extends AuthorityHostCtx, StorageDomainCtx {
@@ -105,6 +107,7 @@ export function apply(ctx: PluginCtx, config?: WorkprocessConfig): void {
       drive: config?.drive === true,
       defaultMaxRounds: config?.defaultMaxRounds ?? DEFAULT_MAX_ROUNDS,
       pending: new Set<string>(),
+      planAsked: new Set<string>(),
     }
     // ① 回合事实：只有我们自署来源的回合才算数（人的消息不是回合）。
     ctx.on('session/event', (session: HostSession, event: unknown) => {
@@ -157,10 +160,19 @@ async function driveAtIdle(
         now: () => Date.now(),
         roundsStartedOf: async (scope) => (await store.get(scope))?.rounds?.started,
         defaultMaxRounds: drive.defaultMaxRounds,
+        stagePlanAsked: (stageKey) => drive.planAsked.has(stageKey),
       }, session.id, session.id)
       if (decision === undefined) return
       if (decision.kind === 'drive') {
         if (drive.drive) await deliverRound(ctx, store, session, decision.taskId, drive)
+        return
+      }
+      // **阶段规划轮**：本阶段开工了却没任务 ⇒ 投一轮让 agent 给本阶段建任务。
+      // 记下"已经问过"（决策树下一拍会改成停手等人），不消耗任何任务的回合预算。
+      if (decision.kind === 'plan-stage') {
+        if (!drive.drive) return
+        drive.planAsked.add(decision.stageKey)
+        await deliverPlanRound(ctx, store, session, decision.stageKey)
         return
       }
       // 只有**确实改了状态**的三种结论才值得再拍一次；其余（hold / wait-human / ask-*）停手。
@@ -229,10 +241,37 @@ export async function deliverRound(
     content: [{ type: 'text', text: delivery.prompt }],
     // **自署来源**：这一轮不是人打的字（授权面据此判自治），也绝不许冒充人。
     source: {
-      kind: 'work', processId: delivery.processId, taskId: delivery.taskId,
+      kind: 'work', processId: delivery.processId, stageKey: delivery.stageKey, taskId: delivery.taskId,
       revision: delivery.revision, round: delivery.round,
     },
   }))
   drive.pending.add(key)
+  return delivery
+}
+
+/**
+ * 把**阶段规划轮**投给会话：本阶段开工了却没任务 ⇒ 请 agent 用 `create_worktask` 给本阶段建任务。
+ *
+ * 【为什么这是自动推进闭环缺的一环】阶段串行 ⇒ 任务只属于当前阶段 ⇒ **每过一个阶段边界，
+ * 新阶段必然是空的**；没人叫 agent 拆任务，流程就在每个阶段边界上停死（真机踩过）。
+ *
+ * 来源同样自署 `work`（这是自动回合，不是人打的字），但**不带 `round`**：
+ * 规划轮不消耗任务预算，也就不该把 `rounds.started` 往前推（那个计数是回合上限的判据）。
+ */
+export async function deliverPlanRound(
+  ctx: PluginCtx, store: WorkToolDeps['store'], session: HostSession, stageKey: string,
+): Promise<RoundDelivery | undefined> {
+  const process = await workProcessOf({ store }, session.id)
+  if (process === undefined) return undefined
+  const delivery = planDeliveryOf(process, stageKey)
+  if (delivery === undefined) return undefined
+  const agent = ctx.agents.get(session.id) as { followup?: (message: unknown) => void } | undefined
+  if (typeof agent?.followup !== 'function') return undefined
+  agent.followup(createUserMessage({
+    content: [{ type: 'text', text: delivery.prompt }],
+    source: {
+      kind: 'work', processId: delivery.processId, stageKey: delivery.stageKey, revision: delivery.revision,
+    },
+  }))
   return delivery
 }

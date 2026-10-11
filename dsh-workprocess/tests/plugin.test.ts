@@ -286,3 +286,46 @@ describe('续跑投递（drive）', () => {
     expect(h.domain.writes.length).toBe(writes)
   })
 })
+
+describe('阶段规划轮（阶段开工了却没任务 ⇒ 让 agent 建任务）', () => {
+  /** 起一条流程（**不建任务**：模拟"刚跨过阶段边界"的新阶段）。 */
+  async function seededEmpty(config: Record<string, unknown> = { drive: true }) {
+    const local = fakeHost()
+    apply(local.ctx, config)
+    await local.tools.create_workstage.execute(
+      { objective: '实现一个俄罗斯方块小游戏', stages: [{ key: 'ui', statement: '界面与交互' }] }, local.exec(),
+    )
+    return local
+  }
+
+  it('一个空闲边界内：开工 + 投规划轮（请 agent 用 create_worktask 建本阶段任务）', async () => {
+    const h = await seededEmpty()
+    await h.emitStatus('idle')
+    expect(h.sent).toHaveLength(1)
+    const text = JSON.stringify(h.sent[0].content)
+    expect(text).toContain('阶段规划轮')
+    expect(text).toContain('create_worktask')
+    expect(text).toContain('界面与交互')
+    // 来源自署 work；**不带 round**（规划轮不消耗任务预算，不推进 rounds.started）
+    expect(h.sent[0].source).toMatchObject({ kind: 'work', processId: 'wp:session-1', stageKey: 'ui' })
+    expect(h.sent[0].source.round).toBeUndefined()
+    expect(h.record()?.rounds?.started ?? 0).toBe(0)
+  })
+
+  it('同一阶段只问一次：再空闲也不重复投（不空转），把"阶段空着"留给人和状态面', async () => {
+    const h = await seededEmpty()
+    await h.emitStatus('idle')
+    await h.emitStatus('idle')
+    await h.emitStatus('idle')
+    expect(h.sent).toHaveLength(1)
+    // 阶段确实开工了（不是没动），只是没人接活
+    expect((await h.tools.get_workstage.execute({}, h.exec())).stages).toMatchObject([{ state: 'active' }])
+  })
+
+  it('drive 关着 ⇒ 开工照做、规划轮不投（规划是"替 agent 起话头"，属于自动投递）', async () => {
+    const h = await seededEmpty({})
+    await h.emitStatus('idle')
+    expect(h.sent).toHaveLength(0)
+    expect((await h.tools.get_workstage.execute({}, h.exec())).stages).toMatchObject([{ state: 'active' }])
+  })
+})

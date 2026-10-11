@@ -60,6 +60,7 @@ function label(d: RoundDecision): string {
   switch (d.kind) {
     case 'start-stage': return 'start-stage:' + d.stageKey
     case 'drive': return 'drive:' + d.taskId
+    case 'plan-stage': return 'plan-stage:' + d.stageKey
     case 'ask-stage-done': return 'ask-stage-done:' + d.stageKey
     case 'close-stage': return 'close-stage:' + d.stageKey
     case 'ask-close': return 'ask-close'
@@ -169,7 +170,7 @@ describe('端到端 · 驱动器环', () => {
     expect(seen.some((s) => s.startsWith('ask-stage-done'))).toBe(false)
   })
 
-  it('阶段已开工但没有任务 → hold（决策层不臆造任务）；有任务在跑就不许偷下一步', async () => {
+  it('阶段已开工但没有任务 → plan-stage（让 agent 建任务）；有任务在跑就不许偷下一步', async () => {
     const records = { 'ws-a': { updatedAt: 1 } }
     const deps = { store: storeOf(records) as never, now: () => 1_000 }
     await createWorkProcess(deps, 'ws-a', {
@@ -179,7 +180,7 @@ describe('端到端 · 驱动器环', () => {
     await startWorkStage(deps, 'ws-a', 'prep')
     const empty = await workProcessOf(deps, 'ws-a')
     expect(decideWorkRound({ now: 1_000, scope: SCOPE, gates: {}, work: factsOf(empty!) }))
-      .toEqual({ kind: 'hold', reason: 'stage-has-no-runnable-task:prep', processId: 'wp:ws-a' })
+      .toEqual({ kind: 'plan-stage', processId: 'wp:ws-a', stageKey: 'prep' })
 
     // 有在跑的任务：下一段仍然 pending → 一拍只干一件事（drive），不会顺手开工下一段
     await createWorkTask(deps, 'ws-a', { stageKey: 'prep', objective: '清洗数据' })
