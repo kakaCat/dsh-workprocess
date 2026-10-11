@@ -16,8 +16,8 @@
  */
 import {
   blockWorkTask, completeWorkStage, currentStageOf, stageAllowsStart, startWorkStage, workProcessOf,
-} from 'workprocess'
-import type { WorkProcess, WorkStoreLike, WorkTask } from 'workprocess'
+} from 'workprocess-core'
+import type { WorkProcess, WorkStoreLike, WorkTask } from 'workprocess-core'
 import { decideWorkRound, renderWorkRoundPrompt } from 'workprocess-round-driver'
 import type { DecideInput, RoundDecision, StageFacts, WorkFacts } from 'workprocess-round-driver'
 

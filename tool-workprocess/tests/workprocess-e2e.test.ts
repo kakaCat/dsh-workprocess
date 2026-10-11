@@ -10,8 +10,8 @@ import { describe, it, expect } from 'vitest'
 import { WORK_TOOL_REGISTRY } from 'tool-workprocess/registry.js'
 import { WORK_TOOL_FACTORIES } from 'tool-workprocess'
 import type { WorkToolDeps } from 'tool-workprocess'
-import type { WorkRecordLike } from 'workprocess'
-import { startWorkStage } from 'workprocess'
+import type { WorkRecordLike } from 'workprocess-core'
+import { startWorkStage } from 'workprocess-core'
 
 interface ToolLike {
   execute: (args: Record<string, unknown>, exec?: unknown) => Promise<Record<string, unknown>>

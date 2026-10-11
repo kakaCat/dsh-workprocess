@@ -22,6 +22,6 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "workprocess": "workspace:*"
+    "workprocess-core": "workspace:*"
   }
 }

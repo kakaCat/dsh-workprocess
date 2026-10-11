@@ -23,9 +23,9 @@ importers:
       dsh-workprocess:
         specifier: workspace:*
         version: link:../dsh-workprocess
-      workprocess:
+      workprocess-core:
         specifier: workspace:*
-        version: link:../workprocess
+        version: link:../workprocess-core
 
   dsh-workprocess:
     dependencies:
@@ -38,9 +38,9 @@ importers:
       tool-workprocess:
         specifier: workspace:*
         version: link:../tool-workprocess
-      workprocess:
+      workprocess-core:
         specifier: workspace:*
-        version: link:../workprocess
+        version: link:../workprocess-core
       workprocess-round-driver:
         specifier: workspace:*
         version: link:../workprocess-round-driver
@@ -53,17 +53,17 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 0.2.0-rc.1
         version: 0.2.0-rc.1(36940444868c3bdd7187eceb3e076533)
-      workprocess:
+      workprocess-core:
         specifier: workspace:*
-        version: link:../workprocess
+        version: link:../workprocess-core
 
-  workprocess: {}
+  workprocess-core: {}
 
   workprocess-round-driver:
     dependencies:
-      workprocess:
+      workprocess-core:
         specifier: workspace:*
-        version: link:../workprocess
+        version: link:../workprocess-core
 
 packages:
 

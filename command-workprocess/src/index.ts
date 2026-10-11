@@ -14,7 +14,7 @@
  * @module dsh-command-workprocess
  */
 import type { WorkprocessService, WorkprocessStatus } from 'dsh-workprocess'
-import type { WorkStage, WorkTask } from 'workprocess'
+import type { WorkStage, WorkTask } from 'workprocess-core'
 
 /** 插件名（装载行 id 同源）。 */
 export const name = 'command-workprocess'

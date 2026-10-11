@@ -16,7 +16,7 @@
  *
  * @module workprocess/round/decide
  */
-import { stageClosePolicyOf } from 'workprocess'
+import { stageClosePolicyOf } from 'workprocess-core'
 import type { DecideInput, RoundDecision, StageFacts, TaskFacts } from './types.js'
 
 const hold = (reason: string, processId?: string): RoundDecision =>

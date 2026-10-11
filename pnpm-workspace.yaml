@@ -1,5 +1,5 @@
 packages:
-  - 'workprocess'
+  - 'workprocess-core'
   - 'workprocess-round-driver'
   - 'tool-workprocess'
   - 'dsh-workprocess'

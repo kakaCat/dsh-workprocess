@@ -7,8 +7,8 @@ const at = (p: string): string => fileURLToPath(new URL(p, import.meta.url))
 export default defineConfig({
   resolve: {
     alias: {
-      'workprocess/': at('./workprocess/src/'),
-      'workprocess': at('./workprocess/src/index.ts'),
+      'workprocess-core/': at('./workprocess-core/src/'),
+      'workprocess-core': at('./workprocess-core/src/index.ts'),
       'workprocess-round-driver/': at('./workprocess-round-driver/src/'),
       'workprocess-round-driver': at('./workprocess-round-driver/src/index.ts'),
       'tool-workprocess/': at('./tool-workprocess/src/'),

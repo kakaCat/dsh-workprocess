@@ -40,11 +40,11 @@ workProcess  id=wp:<scope>   revision（两层的写共用同一个 CAS）
 
 | 包 | 作用 | 依赖 |
 |---|---|---|
-| `workprocess` | 内核：两层快照 / 事件表 / 折叠 / 六条不变量 / 严格解码 / 服务（CAS + 幂等 + 身份分配） | 无 |
-| `workprocess-round-driver` | 回合驱动器：纯决策树（闸 → 串行门 → 相位机）+ 提示词渲染 | `workprocess` |
-| `tool-workprocess` | 工具面：`get_/create_/update_*` 六个工具 + 授权判据 + 独立插件入口 | `workprocess`、`@deepseek-ai/dsh-tools` |
+| `workprocess-core` | 内核：两层快照 / 事件表 / 折叠 / 六条不变量 / 严格解码 / 服务（CAS + 幂等 + 身份分配） | 无 |
+| `workprocess-round-driver` | 回合驱动器：纯决策树（闸 → 串行门 → 相位机）+ 提示词渲染 | `workprocess-core` |
+| `tool-workprocess` | 工具面：`get_/create_/update_*` 六个工具 + 授权判据 + 独立插件入口 | `workprocess-core`、`@deepseek-ai/dsh-tools` |
 | `dsh-workprocess` | **领域插件（组合根）**：归属记录落宿主存储域（`ctx.storageDomain`）/ 真人判定（会话事件切面）/ 回合边界驱动（开工 · auto 收口 · 落盘 block · **续跑投递**）/ 提供 **`ctx.workprocess`** 服务 + `apply(ctx, config)` | 上面三个、`@deepseek-ai/dsh-storage-domain`、`@deepseek-ai/dsh-llm`、`zod` |
-| `command-workprocess` | **命令行插件** `/work`（看 · pause · resume · discard）——独立包、独立装载行（对齐宿主 `dsh-command-goal`），只消费 `ctx.workprocess` | `workprocess`、`dsh-workprocess`（类型） |
+| `command-workprocess` | **命令行插件** `/work`（看 · pause · resume · discard）——独立包、独立装载行（对齐宿主 `dsh-command-goal`），只消费 `ctx.workprocess` | `workprocess-core`、`dsh-workprocess`（类型） |
 
 工具面命名与形状对齐宿主 dsh 的 `get_goal / create_goal / update_goal`：
 `get_workstage / create_workstage / update_workstage` 与 `get_worktask / create_worktask / update_worktask`，
@@ -55,7 +55,7 @@ workProcess  id=wp:<scope>   revision（两层的写共用同一个 CAS）
 ```bash
 pnpm install
 pnpm typecheck
-pnpm test          # 113 条：内核 41 / 驱动 24 / 工具 24 / 领域插件 16 / 命令行插件 8（含端到端）
+pnpm test          # 111 条：内核 39 / 驱动 24 / 工具 24 / 领域插件 16 / 命令行插件 8（含端到端）
 pnpm build         # 出 dist/（宿主加载的是 JS，不是 TS）
 ```
 

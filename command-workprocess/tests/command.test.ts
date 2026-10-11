@@ -13,8 +13,8 @@ import { createWorkprocessService } from 'dsh-workprocess'
 import type { WorkprocessService, WorkprocessStatus } from 'dsh-workprocess'
 import {
   createWorkProcess, createWorkTask, startWorkStage, workProcessOf,
-} from 'workprocess'
-import type { WorkRecordLike, WorkStoreLike } from 'workprocess'
+} from 'workprocess-core'
+import type { WorkRecordLike, WorkStoreLike } from 'workprocess-core'
 
 /** 内存归属记录（够服务面用）。 */
 function mapStore(): WorkStoreLike & { records: Map<string, WorkRecordLike> } {

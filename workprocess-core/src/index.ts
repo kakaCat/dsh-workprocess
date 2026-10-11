@@ -15,7 +15,7 @@
  *   ③ 阶段收口（`stage-done`）的**授权**由收口策略定（`human` = 只有人能落、agent 只提议；
  *      `auto` = 会话回合 / 驱动器也能落）——本包只管状态规则，不判"谁在调"（那是授权面的事）。
  *
- * @module workprocess
+ * @module workprocess-core
  */
 import {
   allTasksOf, applyWorkEvent, clearedTaskIdsOf, decodeWorkProcess, workProgressOf,

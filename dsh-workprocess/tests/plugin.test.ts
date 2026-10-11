@@ -13,7 +13,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { apply, name, inject, storageDomainStoreOf, workprocessDomain, tickAtBoundary } from 'dsh-workprocess'
 import { WORK_TOOL_REGISTRY } from 'tool-workprocess'
-import { applyWorkEvent } from 'workprocess'
+import { applyWorkEvent } from 'workprocess-core'
 
 interface ToolLike { execute(args: Record<string, unknown>, exec?: unknown): Promise<Record<string, unknown>> }
 interface HostEvent { type?: string; data?: { source?: { kind?: string; round?: number; taskId?: string; revision?: number } } }

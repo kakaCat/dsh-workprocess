@@ -14,7 +14,7 @@
  * INV-5 / INV-6 是本包相对宿主的**加层纪律**——两层模型里最容易出的错就是
  * "阶段态与任务态各说各话"（阶段标了 done 但任务还没完、后一阶段偷跑）。
  *
- * @module workprocess/invariant
+ * @module workprocess-core/invariant
  */
 import type { WorkEventKind } from './domain.js'
 import { sameProcess, sameTask, serialViolation, type WorkFoldResult } from './fold.js'

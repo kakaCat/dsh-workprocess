@@ -22,7 +22,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "workprocess": "workspace:*",
+    "workprocess-core": "workspace:*",
     "@deepseek-ai/dsh-tools": "0.2.0-rc.1"
   }
 }

@@ -12,8 +12,8 @@
  */
 import {
   currentStageOf, discardWorkProcess, pauseWorkTask, resumeWorkTask, workProcessOf,
-} from 'workprocess'
-import type { WorkStage, WorkStoreLike } from 'workprocess'
+} from 'workprocess-core'
+import type { WorkStage, WorkStoreLike } from 'workprocess-core'
 
 /** 会话的最小读取面（与 authority/message 同源的窄类型）。 */
 interface AgentLike { readonly session?: { readonly id?: string } }

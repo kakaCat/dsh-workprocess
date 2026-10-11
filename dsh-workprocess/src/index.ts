@@ -21,7 +21,7 @@
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 // 引入模块增强（MessageSourceMap 加 'work' 一格）：类型面的事，运行时不需要它。
 import type {} from './message.js'
-import { workProcessOf } from 'workprocess'
+import { workProcessOf } from 'workprocess-core'
 import { WORK_TOOL_FACTORIES, WORK_TOOL_REGISTRY, type WorkToolDeps } from 'tool-workprocess'
 import { agentOf, authorityResolverOf, type AuthorityHostCtx, type HostSession } from './authority.js'
 import { storageDomainStoreOf, type StorageDomainCtx } from './domain.js'

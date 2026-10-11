@@ -2,7 +2,7 @@
  * 运行时构造器与协议常量（对齐宿主 `@deepseek-ai/dsh-goal/src/runtime.ts`：
  * 宿主在这里放 `GOAL_CHANGE_VERSION` / `GoalId()` 品牌化 / `GoalError`）。
  *
- * @module workprocess/runtime
+ * @module workprocess-core/runtime
  */
 import type { WorkProcessId as WorkProcessIdType, WorkTaskId as WorkTaskIdType } from './types.js'
 

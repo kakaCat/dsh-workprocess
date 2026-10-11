@@ -8,8 +8,8 @@
  */
 import { describe, it, expect } from 'vitest'
 import { createWorkprocessService } from 'dsh-workprocess'
-import { createWorkProcess, createWorkTask, startWorkStage, workProcessOf } from 'workprocess'
-import type { WorkRecordLike, WorkStoreLike } from 'workprocess'
+import { createWorkProcess, createWorkTask, startWorkStage, workProcessOf } from 'workprocess-core'
+import type { WorkRecordLike, WorkStoreLike } from 'workprocess-core'
 
 function mapStore(): WorkStoreLike & { records: Map<string, WorkRecordLike> } {
   const records = new Map<string, WorkRecordLike>()

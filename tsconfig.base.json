@@ -23,11 +23,11 @@
       "vitest/globals"
     ],
     "paths": {
-      "workprocess": [
-        "./workprocess/src/index.ts"
+      "workprocess-core": [
+        "./workprocess-core/src/index.ts"
       ],
-      "workprocess/*": [
-        "./workprocess/src/*"
+      "workprocess-core/*": [
+        "./workprocess-core/src/*"
       ],
       "tool-workprocess": [
         "./tool-workprocess/src/index.ts"

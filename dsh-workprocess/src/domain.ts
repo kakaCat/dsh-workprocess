@@ -19,8 +19,8 @@
  */
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { z } from 'zod'
-import { decodeWorkProcess } from 'workprocess'
-import type { WorkRecordLike, WorkStoreLike } from 'workprocess'
+import { decodeWorkProcess } from 'workprocess-core'
+import type { WorkRecordLike, WorkStoreLike } from 'workprocess-core'
 
 /** 域身份（名字与版本是**持久化契约**：改名或降版本等于换一个域）。 */
 export const WORKPROCESS_DOMAIN = 'workprocess'

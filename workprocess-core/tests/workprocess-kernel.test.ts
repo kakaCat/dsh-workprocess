@@ -9,16 +9,16 @@
  *   ⑤ 聚合 CAS：两层的写共用一个 revision；记录的快照必须与事件重算逐字段一致。
  */
 import { describe, it, expect } from 'vitest'
-import type { WorkChange, WorkEvent } from 'workprocess/domain.js'
-import { applyWorkEvent, decodeWorkProcess, foldWorkProcess, processAllowsClose, sameProcess, workProgressOf } from 'workprocess/fold.js'
-import { WorkError } from 'workprocess/runtime.js'
-import type { WorkProcess, WorkStageDraft } from 'workprocess/types.js'
+import type { WorkChange, WorkEvent } from 'workprocess-core/domain.js'
+import { applyWorkEvent, decodeWorkProcess, foldWorkProcess, processAllowsClose, sameProcess, workProgressOf } from 'workprocess-core/fold.js'
+import { WorkError } from 'workprocess-core/runtime.js'
+import type { WorkProcess, WorkStageDraft } from 'workprocess-core/types.js'
 import {
   clearWorkTask, completeWorkStage, completeWorkTask, createWorkProcess, createWorkTask,
   defineWorkStages, discardWorkProcess, progressOf, stageClosePolicyOf, startWorkStage,
   workProcessOf, workProcessViewOf, workTaskOf,
   type WorkRecordLike,
-} from 'workprocess'
+} from 'workprocess-core'
 
 const STAGES: readonly WorkStageDraft[] = [
   { key: 'prep', statement: '准备数据', doneCriteria: ['数据可用'] },
@@ -454,37 +454,6 @@ describe('阶段收口策略（human 人工确认 / auto 自动收口）', () =>
       ...p, stages: p.stages.map((s, i) => (i === 0 ? { ...s, closePolicy: 'always' } : s)),
     })).toThrowError(WorkError)
   })
-
-describe('丢弃流程（连根拔掉，不是状态迁移）', () => {
-  it('丢弃后读不到流程、回合计数归零、再建是 revision 1 的新流程；重放幂等', async () => {
-    const st = storeOf({ 'ws-a': { updatedAt: 1, rounds: { started: 7, activation: 'armed' } } })
-    const deps = { store: st as never, now: () => 1_000 }
-    await createWorkProcess(deps, 'ws-a', { objective: 'x', stages: STAGES })
-    await startWorkStage(deps, 'ws-a', 'prep')
-    const before = st.writes
-    expect(await discardWorkProcess(deps, 'ws-a')).toBe(true)
-    expect(st.writes).toBe(before + 1)
-    expect(await workProcessOf(deps, 'ws-a')).toBeUndefined()
-    // 记录还在（归属没变），但流程没了、回合计数归零
-    expect(st.records['ws-a'].workProcess).toBeUndefined()
-    expect(st.records['ws-a'].rounds?.started).toBe(0)
-    // 幂等：没有流程 ⇒ 零写入
-    const after = st.writes
-    expect(await discardWorkProcess(deps, 'ws-a')).toBe(false)
-    expect(st.writes).toBe(after)
-    // 再建 = **新**流程（revision 1），不是"复活"旧流程
-    expect(await createWorkProcess(deps, 'ws-a', { objective: 'y', stages: STAGES })).toBe(true)
-    expect((await workProcessOf(deps, 'ws-a'))?.revision).toBe(1)
-  })
-
-  it('CAS：拿旧 revision 丢弃 → WORK_CONFLICT（写前拒，流程还在）', async () => {
-    const st = storeOf({ 'ws-a': { updatedAt: 1 } })
-    const deps = { store: st as never, now: () => 1_000 }
-    await createWorkProcess(deps, 'ws-a', { objective: 'x', stages: STAGES })
-    await expect(discardWorkProcess(deps, 'ws-a', 9)).rejects.toMatchObject({ code: 'WORK_CONFLICT' })
-    expect(await workProcessOf(deps, 'ws-a')).toBeDefined()
-  })
-})
 
   it('迁移链：记录的快照必须与事件重算逐字段一致（收口策略也在内）', () => {
     const p = initPolicy()

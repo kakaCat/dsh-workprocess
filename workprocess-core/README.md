@@ -1,4 +1,4 @@
-# workprocess
+# workprocess-core
 
 **两层工作模型的纯内核**：零依赖、纯函数、可被 core 引用（反向禁止）。
 
@@ -56,7 +56,7 @@ WorkProcess（聚合根：一次完整流程，一个归属对象一条）
 ## 依赖方向
 
 ```
-workprocess  ←  workprocess-round-driver（决策/提示词）
+workprocess-core ←  workprocess-round-driver（决策/提示词）
              ←  tool-workprocess（工具面）
              ←  dsh-workprocess（领域插件：存储域 / 真人判定 / 回合驱动 / ctx.workprocess 服务）
              ←  command-workprocess（/work 命令行，只消费 ctx.workprocess）
@@ -68,5 +68,5 @@ workprocess  ←  workprocess-round-driver（决策/提示词）
 ## 测试
 
 ```bash
-cd workprocess/workprocess && pnpm test      # 41 条：两层结构 / 串行门 / 收口策略 / 丢弃流程 / 相位机 / 身份不复用 / CAS / 值域
+cd workprocess/workprocess-core && pnpm test      # 41 条：两层结构 / 串行门 / 收口策略 / 丢弃流程 / 相位机 / 身份不复用 / CAS / 值域
 ```
