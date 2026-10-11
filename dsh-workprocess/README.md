@@ -40,11 +40,16 @@ apply(ctx, config) ⇒
 
 ## 续跑是怎么跑的（刹车在哪）
 
-1. **空闲边界**才动手（`turnBoundary.openTurnStartSeq === null`）：活动轮次里改流程会与模型正在做的事打架。
-2. 一拍只做一件事：该开工就开工、该收口就收口、该跑任务就**投一轮**（`agent.followup`，source 自署 `work`）。
-3. 同一轮（`taskId:revision:round`）**只投一次**；回合被接手（会话里出现该 source 的 `user/message`）才把
+1. **空闲边界**才动手：信号取自宿主的 **`agent/status === 'idle'`**（与宿主 `goal-round-driver` 同款）。
+   活动轮次里改流程会与模型正在做的事打架。
+   *为什么不用 `turnBoundary`*：那要等一条会话事件到达才能读，而 `turn/end` 那一拍投影可能还没翻成空闲、
+   翻完之后又不再有事件——驱动器会**一枪不放**（真机踩过；会话事件到达时若 agent 已空闲，另有一拍兜底）。
+2. **一次空闲边界要把该做的做完**：开工（`start-stage`）与投第一轮是两拍，而边界只来一次，
+   故一拍推进完**立刻再拍**，直到得出 `drive`（投递）或非推进结论（`hold` / `wait-human` / `ask-*`）为止。
+3. 该跑任务就**投一轮**（`agent.followup`，source 自署 `work`）。
+4. 同一轮（`taskId:revision:round`）**只投一次**；回合被接手（会话里出现该 source 的 `user/message`）才把
    `rounds.started` **耐久**前进一格。
-4. **刹车**：任务写了 `max_rounds` 用它，没写用 `defaultMaxRounds`；到顶 ⇒ 驱动器 `block-task` **落盘**
+5. **刹车**：任务写了 `max_rounds` 用它，没写用 `defaultMaxRounds`；到顶 ⇒ 驱动器 `block-task` **落盘**
    （重启不失忆、人可见可裁），不再投——不会无限自动续跑。
 
 ## 状态放在哪（为什么不是会话日志）

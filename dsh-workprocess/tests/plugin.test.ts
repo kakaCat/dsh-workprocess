@@ -11,7 +11,7 @@
  *      接手后计数耐久前进、到上限落盘 block 并停止投递。
  */
 import { describe, it, expect, beforeEach } from 'vitest'
-import { apply, name, inject, storageDomainStoreOf, workprocessDomain, tickAtBoundary } from 'dsh-workprocess'
+import { apply, name, inject, storageDomainStoreOf, workprocessDomain } from 'dsh-workprocess'
 import { WORK_TOOL_REGISTRY } from 'tool-workprocess'
 import { applyWorkEvent } from 'workprocess-core'
 
@@ -56,6 +56,9 @@ interface FakeHost {
   domain: ReturnType<typeof fakeDomainFacility>
   /** 投一条会话事件（走插件真挂上的 handler，等它跑完）。 */
   emit(event: unknown): Promise<void>
+  /** 投一条 `agent/status`（宿主空闲边界的真信号），并把 agent 状态设成它。 */
+  emitStatus(status: string): Promise<void>
+  setStatus(status: string): void
   setEvents(events: readonly HostEvent[]): void
   setOpenTurn(start: number | null): void
   record(scope?: string): { workProcess?: unknown; rounds?: { started?: number } } | undefined
@@ -65,11 +68,14 @@ interface FakeHost {
 function fakeHost(): FakeHost {
   let events: readonly HostEvent[] = []
   let openTurnStartSeq: number | null = null
+  let status = 'running'
   const sent: Sent[] = []
-  const handlers: Array<(s: unknown, e: unknown) => void | Promise<void>> = []
+  const handlers = new Map<string, Array<(a: unknown, b?: unknown) => void | Promise<void>>>()
   const session = { id: 'session-1', snapshotEvents: () => events }
   const agent = {
-    id: 'session-1', status: 'running', session,
+    id: 'session-1',
+    get status(): string { return status },
+    session,
     // 语义等价于宿主的 `agent.followup(message)`：留住投出去的那条，供断言。
     followup: (message: unknown): void => { sent.push(message as Sent) },
   }
@@ -81,14 +87,22 @@ function fakeHost(): FakeHost {
     sessionProjections: { stateOf: () => ({ openTurnStartSeq }) },
     storageDomain: domain.facility,
     tools: { register: (t: unknown) => { const tool = t as { name: string } & ToolLike; tools[tool.name] = tool; return (): void => {} } },
-    on: (event: string, cb: (s: unknown, e: unknown) => void | Promise<void>) => { hooks.push(event); handlers.push(cb) },
+    on: (event: string, cb: (a: unknown, b: unknown) => void | Promise<void>) => {
+      hooks.push(event)
+      handlers.set(event, [...(handlers.get(event) ?? []), cb])
+    },
     // 宿主 cordis 的服务注册口（本插件把 `ctx.workprocess` 提供出去，命令行包消费它）。
     provide: (serviceName: string, value: unknown) => { (ctx as Record<string, unknown>)[serviceName] = value; return undefined },
   }
   return {
     ctx: ctx as never, tools, hooks, sent, session, domain,
     store: storageDomainStoreOf(ctx as never),
-    emit: async (event: unknown) => { for (const h of handlers) await h(session, event) },
+    emit: async (event: unknown) => { for (const h of handlers.get('session/event') ?? []) await h(session, event) },
+    emitStatus: async (next: string) => {
+      status = next
+      for (const h of handlers.get('agent/status') ?? []) await h({ agent, status: next })
+    },
+    setStatus: (next: string) => { status = next },
     setEvents: (next) => { events = next },
     setOpenTurn: (start) => { openTurnStartSeq = start },
     record: (scope = 'session-1') => domain.recordsOf('processes').get(scope) as never,
@@ -104,17 +118,26 @@ beforeEach(() => {
 })
 
 const call = (tool: string, args: Record<string, unknown> = {}) => host.tools[tool].execute(args, host.exec())
-const idle = { type: 'session/start' }
 const roundAccepted = (round: number): HostEvent => ({
   type: 'user/message', data: { source: { kind: 'work', round, taskId: 'wt:prep:1', revision: 1 } },
 })
+
+/**
+ * 走**真路径**把当前阶段开工：空闲边界一拍（宿主信号 = `agent/status → idle`），
+ * 然后回到 running（模型接着干活）。旧写法是直接调 `tickAtBoundary` 读 turnBoundary——
+ * 那正是真机上"驱动器一枪不放"的病根，故这里也按真信号驱动。
+ */
+async function idleTick(h: FakeHost = host): Promise<void> {
+  await h.emitStatus('idle')
+  h.setStatus('running')
+}
 
 describe('插件装配面', () => {
   it('声明 name / inject，并按登记表注册六个工具（名字逐字一致）', () => {
     expect(name).toBe('workprocess')
     expect(inject).toEqual(['agents', 'tools', 'sessionProjections', 'storageDomain'])
     expect(Object.keys(host.tools).sort()).toEqual(WORK_TOOL_REGISTRY.map((e) => e.toolName).sort())
-    expect(host.hooks).toEqual(['session/event'])
+    expect(host.hooks).toEqual(['session/event', 'agent/status'])
   })
 
   it('归属记录域：声明合法，且快照的严格性由**内核解码器**在耐久边界把住', () => {
@@ -159,7 +182,7 @@ describe('真人判定（组合根接线之后）', () => {
   it('本回合没有人的发言 ⇒ human 策略的收口被拒（agent 只提议）', async () => {
     await call('create_workstage', { objective: 'x', stages: [{ key: 'prep', statement: '准备' }] })
     await call('create_worktask', { stage_key: 'prep', objective: '清洗数据' })
-    await tickAtBoundary(host.ctx, host.store, host.session)
+    await idleTick()
     await call('update_worktask', { task_id: 'wt:prep:1', action: 'complete' })
     expect((await call('update_workstage', { stage_key: 'prep', action: 'done' })).code).toBe('WORK_NO_PERMISSION')
   })
@@ -167,7 +190,7 @@ describe('真人判定（组合根接线之后）', () => {
   it('本回合有人的消息 ⇒ 授权为 direct-human，收口落章', async () => {
     await call('create_workstage', { objective: 'x', stages: [{ key: 'prep', statement: '准备' }] })
     await call('create_worktask', { stage_key: 'prep', objective: '清洗数据' })
-    await tickAtBoundary(host.ctx, host.store, host.session)
+    await idleTick()
     await call('update_worktask', { task_id: 'wt:prep:1', action: 'complete' })
     host.setOpenTurn(0)
     host.setEvents([{}, { type: 'user/message', data: { source: { kind: 'user' } } }])
@@ -176,25 +199,33 @@ describe('真人判定（组合根接线之后）', () => {
   })
 })
 
-describe('回合边界驱动（开工 / auto 收口 / 空闲才动手）', () => {
-  it('pending 阶段在边界上自动开工；auto 阶段任务齐了自动收口', async () => {
+describe('空闲边界驱动（开工 / auto 收口 / 只在 agent 空闲时动手）', () => {
+  it('pending 阶段在空闲边界自动开工；auto 阶段任务齐了自动收口', async () => {
     await call('create_workstage', {
       objective: 'x', stages: [{ key: 'prep', statement: '准备', close_policy: 'auto' }],
     })
     await call('create_worktask', { stage_key: 'prep', objective: '清洗数据' })
-    host.setOpenTurn(null)
-    await tickAtBoundary(host.ctx, host.store, host.session)
+    await host.emitStatus('idle')
     expect((await call('get_workstage')).stages).toMatchObject([{ state: 'active', close_policy: 'auto' }])
     await call('update_worktask', { task_id: 'wt:prep:1', action: 'complete' })
-    await tickAtBoundary(host.ctx, host.store, host.session)
+    await host.emitStatus('idle')
     expect((await call('get_workstage')).stages).toMatchObject([{ state: 'done' }])
   })
 
-  it('活动轮次（有开放回合）不动手：改流程会和模型正在做的事打架', async () => {
+  it('agent 不空闲（running）⇒ 一拍都不动：改流程会和模型正在做的事打架', async () => {
     await call('create_workstage', { objective: 'x', stages: [{ key: 'prep', statement: '准备' }] })
-    host.setOpenTurn(7)
-    await tickAtBoundary(host.ctx, host.store, host.session)
+    await host.emitStatus('running')
     expect((await call('get_workstage')).stages).toMatchObject([{ state: 'pending' }])
+    // 会话事件兜底那条路也按 agent 状态判：running 时不动手
+    await host.emit({ type: 'session/start' })
+    expect((await call('get_workstage')).stages).toMatchObject([{ state: 'pending' }])
+  })
+
+  it('兜底：`agent/status` 那一拍错过时，会话事件到达且 agent 空闲 → 补一拍', async () => {
+    await call('create_workstage', { objective: 'x', stages: [{ key: 'prep', statement: '准备' }] })
+    host.setStatus('idle')
+    await host.emit({ type: 'session/start' })
+    expect((await call('get_workstage')).stages).toMatchObject([{ state: 'active' }])
   })
 })
 
@@ -210,35 +241,34 @@ describe('续跑投递（drive）', () => {
     return local
   }
 
-  it('空闲边界投一轮：source 自署 work（绝不冒充人）、同一轮不重复投', async () => {
+  it('一个空闲边界内 **开工 + 投一轮**（source 自署 work，绝不冒充人）；同一轮不重复投', async () => {
     const h = await seeded()
-    await h.emit(idle)                     // 第一拍：开工（没有可投的轮）
-    expect(h.sent).toHaveLength(0)
-    await h.emit(idle)                     // 第二拍：该跑了 → 投一轮
+    await h.emitStatus('idle')
+    // 一拍只推进一件事，但空闲边界只来一次：开工之后必须接着投，否则流程停在那儿（真机症状）。
     expect(h.sent).toHaveLength(1)
     expect(h.sent[0].source).toMatchObject({ kind: 'work', processId: 'wp:session-1', taskId: 'wt:prep:1', revision: 1, round: 1 })
     const text = JSON.stringify(h.sent[0].content)
     expect(text).toContain('清洗数据')      // 提示词里带着本轮任务
     expect(text).toContain('不越阶段开工')   // 边界也在
-    await h.emit(idle)                     // 还没接手：同一轮不重复投
+    await h.emitStatus('idle')             // 还没接手：同一轮不重复投
     expect(h.sent).toHaveLength(1)
   })
 
-  it('drive 关着（缺省）⇒ 一拍都不投，只做开工/收口', async () => {
+  it('drive 关着（缺省）⇒ 一轮都不投，但开工/收口照做', async () => {
     const h = await seeded({})
-    await h.emit(idle)
-    await h.emit(idle)
+    await h.emitStatus('idle')
     expect(h.sent).toHaveLength(0)
+    const stages = await h.tools.get_workstage.execute({}, h.exec())
+    expect(stages.stages).toMatchObject([{ state: 'active' }])
   })
 
   it('回合被接手 ⇒ 计数耐久前进；到上限落盘 block 并停止投递', async () => {
     const h = await seeded({ drive: true, defaultMaxRounds: 1 })
-    await h.emit(idle)                      // 开工
-    await h.emit(idle)                      // 投第 1 轮
+    await h.emitStatus('idle')              // 开工 + 投第 1 轮
     expect(h.sent).toHaveLength(1)
     await h.emit(roundAccepted(1))          // 宿主侧：这条回合消息被接受
     expect(h.record()?.rounds?.started).toBe(1)
-    await h.emit(idle)                      // 到上限 ⇒ 落盘 block（不再投第 2 轮）
+    await h.emitStatus('idle')              // 到上限 ⇒ 落盘 block（不再投第 2 轮）
     expect(h.sent).toHaveLength(1)
     const tasks = await h.tools.get_worktask.execute({ stage_key: 'prep' }, h.exec())
     expect(tasks.tasks).toMatchObject([{ id: 'wt:prep:1', phase: 'blocked' }])

@@ -23,7 +23,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from './message.js'
 import { workProcessOf } from 'workprocess-core'
 import { WORK_TOOL_FACTORIES, WORK_TOOL_REGISTRY, type WorkToolDeps } from 'tool-workprocess'
-import { agentOf, authorityResolverOf, type AuthorityHostCtx, type HostSession } from './authority.js'
+import { agentOf, authorityResolverOf, type AuthorityHostCtx, type HostAgent, type HostSession } from './authority.js'
 import { storageDomainStoreOf, type StorageDomainCtx } from './domain.js'
 import { createWorkprocessService } from './service.js'
 import {
@@ -77,6 +77,8 @@ interface PluginCtx extends AuthorityHostCtx, StorageDomainCtx {
   readonly agents: AuthorityHostCtx['agents'] & { get(id: string): unknown }
   readonly tools: { register(tool: unknown): () => void }
   on(event: 'session/event', cb: (session: HostSession, event: unknown) => void | Promise<void>): unknown
+  /** agent 生命周期事件（宿主 `agent/status`：`{ agent, status }`）——空闲边界的权威信号。 */
+  on(event: 'agent/status', cb: (payload: { agent?: HostAgent; status?: string }) => void | Promise<void>): unknown
   /** 提供服务面（宿主 cordis：`ctx.provide(name, value)`；消费方按名注入）。 */
   provide(name: string, value: unknown): unknown
 }
@@ -104,25 +106,68 @@ export function apply(ctx: PluginCtx, config?: WorkprocessConfig): void {
       defaultMaxRounds: config?.defaultMaxRounds ?? DEFAULT_MAX_ROUNDS,
       pending: new Set<string>(),
     }
+    // ① 回合事实：只有我们自署来源的回合才算数（人的消息不是回合）。
     ctx.on('session/event', (session: HostSession, event: unknown) => {
       // 返回 promise 供宿主/测试等待（cordis 不看返回值，等不到也不影响宿主）。
       return onSessionEvent(ctx, store, session, event, driveCtx)
     })
+    // ② **空闲边界驱动**（对齐宿主 `goal-round-driver` 的 `agent/status === 'idle'`）：
+    //    "agent 空闲了"这件事的权威信号是 agent 状态事件，不是会话事件里读 turnBoundary——
+    //    后者的时序靠不住（`turn/end` 那一拍投影可能还没翻成空闲，翻完之后又不再有事件，
+    //    于是驱动器一枪不放；真机踩过）。返回 promise 供测试等待。
+    ctx.on('agent/status', (payload: { agent?: HostAgent; status?: string }) => {
+      if (payload?.status !== 'idle') return undefined
+      const session = payload.agent?.session
+      return session === undefined ? undefined : driveAtIdle(ctx, store, session, driveCtx)
+    })
   }
 }
 
-/** 一个会话事件的处理：先记回合，再（空闲时）驱动一拍，必要时投递续跑。 */
+/** 一个会话事件的处理：只记回合事实（驱动放在空闲边界上，见 `agent/status` 那条）。 */
 async function onSessionEvent(
   ctx: PluginCtx, store: WorkToolDeps['store'], session: HostSession, event: unknown, drive: DriveCtx,
 ): Promise<void> {
   try {
     await observeWorkRound(store, session.id, event)
-    const decision = await tickAtBoundary(ctx, store, session, drive)
-    if (decision?.kind !== 'drive' || !drive.drive) return
-    await deliverRound(ctx, store, session, decision.taskId, drive)
+    // 兜底：万一 `agent/status` 的那一拍错过了（事件竞争），会话事件到达时若 agent 已空闲，补一拍。
+    if ((ctx.agents.get(session.id) as { status?: string } | undefined)?.status !== 'idle') return
+    await driveAtIdle(ctx, store, session, drive)
   } catch (err) {
     // 驱动失败不许冒泡进宿主的事件总线（那会带崩本轮会话）：如实记一行，下个边界再试。
     console.warn('[workprocess] 回合边界驱动失败（不影响本轮会话）：' + String((err as Error)?.message ?? err))
+  }
+}
+
+/**
+ * **空闲边界上把该做的做完**：一拍只推进一件事，但推进完**立刻再拍**——
+ * 因为"阶段开工"与"投第一轮"是两拍（开工改状态，投递才让 agent 真的动起来），
+ * 而空闲边界只会来一次：只拍一下的话，开工之后没人再拍，流程就停在那儿了（真机症状）。
+ *
+ * 终止条件：得出 `drive`（投递后 agent 会醒，由下一轮空闲边界接着驱动）、
+ * 或得出任何**不推进状态**的结论（hold / wait-human / ask-* / 没流程）。
+ */
+async function driveAtIdle(
+  ctx: PluginCtx, store: WorkToolDeps['store'], session: HostSession, drive: DriveCtx,
+): Promise<void> {
+  try {
+    // 上界只是兜底（每拍推进都会 bump revision，正常两拍内就到 drive）：防规则改坏时打转。
+    for (let tick = 0; tick < 4; tick += 1) {
+      const decision = await tickWorkprocess({
+        store,
+        now: () => Date.now(),
+        roundsStartedOf: async (scope) => (await store.get(scope))?.rounds?.started,
+        defaultMaxRounds: drive.defaultMaxRounds,
+      }, session.id, session.id)
+      if (decision === undefined) return
+      if (decision.kind === 'drive') {
+        if (drive.drive) await deliverRound(ctx, store, session, decision.taskId, drive)
+        return
+      }
+      // 只有**确实改了状态**的三种结论才值得再拍一次；其余（hold / wait-human / ask-*）停手。
+      if (decision.kind !== 'start-stage' && decision.kind !== 'close-stage' && decision.kind !== 'block-task') return
+    }
+  } catch (err) {
+    console.warn('[workprocess] 空闲边界驱动失败（不影响本轮会话）：' + String((err as Error)?.message ?? err))
   }
 }
 
@@ -148,8 +193,11 @@ export async function observeWorkRound(
 }
 
 /**
- * 回合边界上的**一拍驱动**：只在"没有开放回合"（agent 空闲）时动手——
- * 活动轮次里改流程会和模型正在做的事打架。判不出边界 ⇒ 不动（保守侧：不猜）。
+ * 回合边界上的**一拍驱动**（给"已知当前空闲"的调用方用：命令行、测试、一次性补拍）。
+ *
+ * 【为什么不再由插件内部的会话事件调它】空闲边界的权威信号是 `agent/status → idle`
+ * （宿主 `goal-round-driver` 同款）。曾经在 `session/event` 里读 `turnBoundary` 判空闲：
+ * `turn/end` 那一拍投影可能还没翻成空闲，翻完之后又不再有事件——驱动器一枪不放（真机踩过）。
  */
 export async function tickAtBoundary(
   ctx: AuthorityHostCtx, store: WorkToolDeps['store'], session: HostSession, drive?: DriveCtx,
