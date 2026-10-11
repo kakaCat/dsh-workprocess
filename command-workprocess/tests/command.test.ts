@@ -173,6 +173,22 @@ describe('\`/work\` · handler 分派（假服务）', () => {
     expect(out.text).toContain('不支持 followup')
   })
 
+  it('回归：followup 必须**以方法调用**发出（宿主 AgentLoop.followup 内部走 this.send）', async () => {
+    // 宿主的 followup 是原型方法（内部用 this）：把方法摘进变量再调会让 this 变 undefined，
+    // 真机症状 = "Cannot read properties of undefined (reading 'send')"。
+    class ProtoAgent {
+      readonly session = { id: 'session-1' }
+      readonly sent: unknown[] = []
+      followup(message: unknown): void {
+        this.sent.push(message)
+      }
+    }
+    const agent = new ProtoAgent()
+    const out = await workCommandHandler(stub())(invocation('把登录 500 修掉', agent))
+    expect(out.kind).toBe('success')
+    expect(agent.sent).toHaveLength(1)
+  })
+
   it('clear / pause / resume 如实回报（含"无事可做"）', async () => {
     const handler = workCommandHandler(stub({
       view: async () => view, discard: async () => true, pauseActive: async () => ['wt:a:1'],

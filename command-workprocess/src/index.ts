@@ -171,17 +171,23 @@ export function editInstruction(objective: string): string {
   ].join('\n')
 }
 
-/** 把一条指令投给会话（命令**不自己建流程**：结构由 agent 拆）。 */
+/**
+ * 把一条指令投给会话（命令**不自己建流程**：结构由 agent 拆）。
+ *
+ * 【必须保持方法调用】`agent.followup(...)`——**不能**把方法摘进变量再调：
+ * 宿主 `AgentLoop.followup` 内部走 `this.send(...)`，脱离接收者调用会让 `this` 变 undefined，
+ * 症状是 `Cannot read properties of undefined (reading 'send')`（真机踩过）。
+ */
 function deliver(invocation: WorkCommandInvocation, text: string, receipt: string): WorkCommandResult {
-  const followup = (invocation.agent as FollowupAgent | undefined)?.followup
-  if (typeof followup !== 'function') {
+  const agent = invocation.agent as FollowupAgent | undefined
+  if (typeof agent?.followup !== 'function') {
     return {
       kind: 'error',
       text: '这个宿主 agent 不支持 followup，没法把这条指令交给它（命令面不替它建流程）。'
         + '请直接在会话里说一句"用 workprocess 建一条流程：…"。',
     }
   }
-  followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
+  agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
   return { kind: 'success', text: receipt }
 }
 
