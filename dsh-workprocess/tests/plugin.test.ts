@@ -13,7 +13,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { apply, name, inject, storageDomainStoreOf, workprocessDomain } from 'dsh-workprocess'
 import { WORK_TOOL_REGISTRY } from 'tool-workprocess'
-import { applyWorkEvent } from 'workprocess-core'
+import { applyWorkEvent, startWorkStage } from 'workprocess-core'
 
 interface ToolLike { execute(args: Record<string, unknown>, exec?: unknown): Promise<Record<string, unknown>> }
 interface HostEvent { type?: string; data?: { source?: { kind?: string; round?: number; taskId?: string; revision?: number } } }
@@ -63,6 +63,8 @@ interface FakeHost {
   /** 投一条 `agent/status`（宿主空闲边界的真信号），并把 agent 状态设成它。 */
   emitStatus(status: string): Promise<void>
   setStatus(status: string): void
+  /** 让 `ctx.get('userQuestions')` 返回一个假服务，按队列回答（`undefined` = 没有通道）。 */
+  setUserAnswers(answers: Array<{ id: string; selected: string[]; custom?: string } | 'ASK_CANCELLED' | 'NO_PROVIDER'>): void
   setEvents(events: readonly HostEvent[]): void
   setOpenTurn(start: number | null): void
   record(scope?: string): { workProcess?: unknown; rounds?: { started?: number } } | undefined
@@ -87,6 +89,17 @@ function fakeHost(): FakeHost {
   const hooks: string[] = []
   const deferred: unknown[] = []
   const policySections: Array<{ name: string; order: number; text: string }> = []
+  let userAnswers: Array<{ id: string; selected: string[]; custom?: string } | 'ASK_CANCELLED' | 'NO_PROVIDER'> = []
+  const questionsService = {
+    ask: async (): Promise<{ answers: Array<{ id: string; selected: string[]; custom?: string }> }> => {
+      const next = userAnswers.shift()
+      // 没排队 = 没有 answerer 接下这一问（真宿主此时抛 NO_PROVIDER，ask 会一直等人答）。
+      if (next === undefined) throw Object.assign(new Error('no provider'), { code: 'NO_PROVIDER' })
+      if (next === 'ASK_CANCELLED') throw Object.assign(new Error('cancelled'), { code: 'ASK_CANCELLED' })
+      if (next === 'NO_PROVIDER') throw Object.assign(new Error('no provider'), { code: 'NO_PROVIDER' })
+      return { answers: [next] }
+    },
+  }
   const domain = fakeDomainFacility()
   const ctx = {
     agents: { get: (id: string) => (id === agent.id ? agent : undefined), currentInitiator: () => agent },
@@ -99,6 +112,8 @@ function fakeHost(): FakeHost {
     },
     // 宿主 cordis 的服务注册口（本插件把 `ctx.workprocess` 提供出去，命令行包消费它）。
     provide: (serviceName: string, value: unknown) => { (ctx as Record<string, unknown>)[serviceName] = value; return undefined },
+    // 宿主的问题服务（`ctx.get('userQuestions')`）：策略 human 的收口确认走它。
+    get: (name: string) => (name === 'userQuestions' ? questionsService : undefined),
     // 系统提示词面（策略段）：槽位数与宿主 SECTION_ORDERS.TOOL_GOAL 一致。
     systemPrompt: {
       section: (section: { name: string; order: number; text: string }) => { policySections.push(section); return (): void => {} },
@@ -114,6 +129,7 @@ function fakeHost(): FakeHost {
       for (const h of handlers.get('agent/status') ?? []) await h({ agent, status: next })
     },
     setStatus: (next: string) => { status = next },
+    setUserAnswers: (answers) => { userAnswers = [...answers] },
     setEvents: (next) => { events = next },
     setOpenTurn: (start) => { openTurnStartSeq = start },
     record: (scope = 'session-1') => domain.recordsOf('processes').get(scope) as never,
@@ -426,5 +442,55 @@ describe('模型面指令（对齐宿主 tool-goal：策略段 + 工具回执之
     host.deferred.length = 0
     await call('update_worktask', { task_id: 'wt:prep:1', action: 'complete' })
     expect(host.deferred).toHaveLength(0)
+  })
+})
+
+describe('人机确认接线（工具自己问人：宿主 userQuestions）', () => {
+  /** 建一条流程 + 一个任务并做完（策略 human，agent 自治）。 */
+  async function readyToClose() {
+    const local = fakeHost()
+    apply(local.ctx, {})
+    await local.tools.create_workstage.execute(
+      { objective: 'x', stages: [{ key: 'prep', statement: '准备' }] }, local.exec(),
+    )
+    await startWorkStage({ store: local.store, now: () => 1_000 }, 'session-1', 'prep')
+    await local.tools.create_worktask.execute({ stage_key: 'prep', objective: '清洗数据' }, local.exec())
+    await local.tools.update_worktask.execute({ task_id: 'wt:prep:1', action: 'complete' }, local.exec())
+    return local
+  }
+
+  it('agent 提请收口 ⇒ 工具弹框；人确认才落章（不靠模型转述人的答复）', async () => {
+    const h = await readyToClose()
+    h.setUserAnswers([{ id: 'workprocess-stage-done:prep', selected: ['确认收口'] }])
+    const out = await h.tools.update_workstage.execute({ stage_key: 'prep', action: 'done' }, h.exec())
+    expect(out).toMatchObject({ success: true, changed: true })
+    expect((await h.tools.get_workstage.execute({}, h.exec())).stages)
+      .toMatchObject([{ key: 'prep', state: 'done' }])
+  })
+
+  it('人选择「还要补做」⇒ 不收口，人的话原样转达', async () => {
+    const h = await readyToClose()
+    h.setUserAnswers([{ id: 'workprocess-stage-done:prep', selected: ['还要补做'], custom: '再加个暂停' }])
+    const out = await h.tools.update_workstage.execute({ stage_key: 'prep', action: 'done' }, h.exec())
+    expect(out).toMatchObject({ success: false, code: 'WORK_HUMAN_DECLINED' })
+    expect(String(out.error)).toContain('再加个暂停')
+    expect((await h.tools.get_workstage.execute({}, h.exec())).stages)
+      .toMatchObject([{ key: 'prep', state: 'active' }])
+  })
+
+  it('人打断去说话（ASK_CANCELLED）⇒ 不收口、也不当成同意', async () => {
+    const h = await readyToClose()
+    h.setUserAnswers(['ASK_CANCELLED'])
+    const out = await h.tools.update_workstage.execute({ stage_key: 'prep', action: 'done' }, h.exec())
+    expect(out).toMatchObject({ success: false, code: 'WORK_HUMAN_UNAVAILABLE' })
+    expect((await h.tools.get_workstage.execute({}, h.exec())).stages)
+      .toMatchObject([{ key: 'prep', state: 'active' }])
+  })
+
+  it('没有 answerer（NO_PROVIDER）⇒ 退回"拒绝并指路"，不假装问过', async () => {
+    const h = await readyToClose()
+    h.setUserAnswers(['NO_PROVIDER'])
+    const out = await h.tools.update_workstage.execute({ stage_key: 'prep', action: 'done' }, h.exec())
+    expect(out).toMatchObject({ success: false, code: 'WORK_NO_PERMISSION' })
   })
 })

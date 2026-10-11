@@ -24,6 +24,22 @@ workprocess 的**工具面**：两层各三工具（登记表 `src/registry.ts` 
    其余口径一致：`edit` / `resume` 需人直接发起，`pause` / `block` / `complete` 可由 agent 发起；
    阶段收口 `stage_done` 多一条**按阶段策略分流**（`human` 人工确认 / `auto` 自动收口）。
 
+## 人机确认（工具自己问人）
+
+`update_workstage { action: 'done' }` 在**缺授权**（策略 `human` 且本轮不是人发起的）时，
+不再直接拒：经 `WorkToolDeps.askHuman` 端口调宿主的 `ctx.userQuestions.ask(...)` **自己弹框问人**
+（与宿主 `plan-mode` 的 `exit_plan_mode` 同款）。四种裁决，**只有 `approved` 算同意**：
+
+| 裁决 | 工具回什么 | 效果 |
+|---|---|---|
+| `approved` | 正常落章 | 阶段 done（与"人直接在会话里说一句"等价） |
+| `declined`（选了别的 / 自定义输入） | `WORK_HUMAN_DECLINED` + 人的原话 | 不收口，模型按人说的补任务 |
+| `cancelled`（打断去说话 / 中止） | `WORK_HUMAN_UNAVAILABLE` | 不收口，停手等人开口 |
+| `no-channel`（没弹框通道 / 没人接这一问） | 退回 `WORK_NO_PERMISSION`（带指路） | CLI / 无头 / 子 agent 场景的原口径 |
+
+**顺序纪律**：先判权、再判状态——越权者不会因为"阶段没做完"拿到另一个口径；而"确实做得成"
+（active 且任务全达成）才会去打扰人。
+
 ## 模型面指令（对齐宿主 `dsh-tool-goal` 的另两种提示词）
 
 宿主 goal 有三处模型面文本：**回合投递**（驱动包）、**常驻策略段**（工具包 `ctx.systemPrompt.section`）、
@@ -71,5 +87,5 @@ workprocess 的**工具面**：两层各三工具（登记表 `src/registry.ts` 
 ## 测试
 
 ```bash
-cd workprocess/tool-workprocess && pnpm test   # 29 条：登记表自洽 / 授权口径（含收口策略与 process_edit）/ 六工具行为 / 工具通告（deferContext 适配）
+cd workprocess/tool-workprocess && pnpm test   # 34 条：登记表自洽 / 授权口径（含收口策略与 process_edit）/ 六工具行为 / 人机确认（userQuestions）/ 工具通告（deferContext 适配）
 ```

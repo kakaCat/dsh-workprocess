@@ -22,7 +22,10 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 // 引入模块增强（MessageSourceMap 加 'work' 一格）：类型面的事，运行时不需要它。
 import type {} from './message.js'
 import { workProcessOf } from 'workprocess-core'
-import { WORK_TOOL_FACTORIES, WORK_TOOL_REGISTRY, type WorkToolDeps } from 'tool-workprocess'
+import {
+  WORK_TOOL_FACTORIES, WORK_TOOL_REGISTRY,
+  type WorkHumanAsk, type WorkHumanVerdict, type WorkToolDeps,
+} from 'tool-workprocess'
 import { agentOf, authorityResolverOf, type AuthorityHostCtx, type HostAgent, type HostSession } from './authority.js'
 import { storageDomainStoreOf, type StorageDomainCtx } from './domain.js'
 import { createWorkprocessService } from './service.js'
@@ -85,6 +88,8 @@ interface PluginCtx extends AuthorityHostCtx, StorageDomainCtx {
   on(event: 'agent/status', cb: (payload: { agent?: HostAgent; status?: string }) => void | Promise<void>): unknown
   /** 提供服务面（宿主 cordis：`ctx.provide(name, value)`；消费方按名注入）。 */
   provide(name: string, value: unknown): unknown
+  /** 按名取服务（cordis：`ctx.get('userQuestions')` 等）。 */
+  get?(name: string): unknown
   /** 系统提示词面（注册常驻策略段；缺省 = 不注册，插件其余面照常）。 */
   readonly systemPrompt?: {
     section(section: { name: string; order: number; text: string }): unknown
@@ -104,6 +109,10 @@ export function apply(ctx: PluginCtx, config?: WorkprocessConfig): void {
     // 工具回执之后的**通告**（宿主 `exec.deferContext`）：落成一条自署 `work-tool` 的消息，
     // 附在该次 tool/result 之后（离决策点最近）。
     deferNotice: (exec, n) => deferNoticeOf(exec, n),
+    // **人机确认口**（宿主 `ctx.userQuestions`）：策略 human 的阶段收口由**工具自己问人**——
+    // 宿主把人的答复只记成 `ask_user_question` 的工具结果（没有 user/message 事件），
+    // 靠"模型问完再自己落章"是落不了的；`plan-mode` 的 exit 工具也是这个路子。
+    askHuman: (exec, request) => askHumanOf(ctx, exec, request),
   }
   for (const entry of WORK_TOOL_REGISTRY) {
     const build = WORK_TOOL_FACTORIES[entry.handler as keyof typeof WORK_TOOL_FACTORIES]
@@ -364,4 +373,62 @@ export function deferNoticeOf(exec: unknown, notice: { summary: string; text: st
     content: [{ type: 'text', text: notice.text }],
     source: { kind: 'work-tool', form: 'notice', summary: notice.summary },
   }))
+}
+
+/** 宿主 `ctx.userQuestions` 的**最小读取面**（`ask` 是唯一用到的入口）。 */
+interface UserQuestionsLike {
+  ask(request: {
+    readonly questions: readonly {
+      readonly id: string
+      readonly header?: string
+      readonly question: string
+      readonly detail?: string
+      readonly options?: readonly { readonly label: string; readonly description?: string }[]
+    }[]
+    readonly agent?: unknown
+    readonly signal?: unknown
+  }): Promise<{ readonly answers: readonly { readonly id: string; readonly selected: readonly string[]; readonly custom?: string }[] }>
+}
+
+/**
+ * 把工具面的人机确认请求接到宿主的问题服务上（对齐宿主 `plan-mode` 的 `exit_plan_mode`）。
+ *
+ * 【四种结局都要如实回收】同意 = `approved`；选了别的 / 自定义输入 = `declined`（带反馈）；
+ * 人打断去说话（`ASK_CANCELLED`）、没有弹框通道（`NO_PROVIDER`）、调用者不是活跃根
+ * （`CALLER_NOT_LIVE` / `DELEGATED_CALLER`，子 agent 问不了人）——一律 `cancelled`，
+ * **绝不把"没问成"当成"同意"**（那才是真正危险的默认值）。
+ */
+export async function askHumanOf(
+  ctx: PluginCtx, exec: unknown, request: WorkHumanAsk,
+): Promise<WorkHumanVerdict> {
+  const service = ctx.get?.('userQuestions') as UserQuestionsLike | undefined
+  if (typeof service?.ask !== 'function') return { kind: 'no-channel' }
+  const agent = agentOf(exec)
+  const signal = (exec as { signal?: unknown } | undefined)?.signal
+  try {
+    const answer = await service.ask({
+      questions: [{
+        id: request.id,
+        header: request.header,
+        question: request.question,
+        ...(request.detail === undefined ? {} : { detail: request.detail }),
+        options: request.options.map((o) => (
+          o.description === undefined ? { label: o.label } : { label: o.label, description: o.description }
+        )),
+      }],
+      ...(agent === undefined ? {} : { agent }),
+      ...(signal === undefined ? {} : { signal }),
+    })
+    const item = answer.answers.find((a) => a.id === request.id)
+    if (item === undefined) return { kind: 'cancelled', reason: 'no-answer' }
+    if (item.selected.includes(request.approve) && item.custom === undefined) return { kind: 'approved' }
+    return item.custom === undefined || item.custom === ''
+      ? { kind: 'declined' }
+      : { kind: 'declined', feedback: item.custom }
+  } catch (err) {
+    const code = (err as { code?: unknown } | undefined)?.code
+    const reason = typeof code === 'string' ? code : 'ask-failed'
+    // 有服务但没人接这一问 ⇒ 等价于"没有通道"（退回拒绝并指路）；其余（打断 / 中止 / 非活跃根）才是 cancelled。
+    return reason === 'NO_PROVIDER' ? { kind: 'no-channel' } : { kind: 'cancelled', reason }
+  }
 }

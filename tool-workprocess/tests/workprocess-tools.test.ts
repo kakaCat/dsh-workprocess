@@ -13,7 +13,7 @@ import * as tools from 'tool-workprocess'
 import {
   WORK_TOOL_REGISTRY, authorityFromEvents, isActionAuthorized, requireActionAuthority,
   createWorkstage, createWorktask, getWorkstage, getWorktask, updateWorkstage, updateWorktask,
-  type WorkToolDeps,
+  type WorkToolDeps, type WorkHumanVerdict,
 } from 'tool-workprocess'
 import type { WorkRecordLike } from 'workprocess-core'
 import { startWorkStage } from 'workprocess-core'
@@ -276,6 +276,70 @@ describe('层1 处理器 · 阶段', () => {
     expect(String((await updateWorkstage(deps, { scope: 'ws-a', stage_key: 'prep', action: 'start' })).error))
       .toContain('阶段开工是驱动器的动作')
     expect(String((await updateWorkstage(deps, { scope: 'ws-a', action: 'done' })).error)).toContain('缺少 stage_key')
+  })
+})
+
+describe('人机确认（工具自己问人：对齐宿主 plan-mode 的 exit 工具）', () => {
+  /** 造一条"任务全达成、策略 human、且本轮不是人发起"的流程，并挂上假弹框。 */
+  async function seededAsk(verdict: WorkHumanVerdict) {
+    const base = depsOf({ 'ws-a': { updatedAt: 1 } })          // human=false ⇒ 本轮自治
+    const asks: Array<{ id: string; detail?: string; approve: string }> = []
+    const deps = {
+      ...base,
+      askHuman: async (_e: unknown, request: { id: string; detail?: string; approve: string }) => {
+        asks.push(request)
+        return verdict
+      },
+    }
+    await createWorkstage(deps, { scope: 'ws-a', objective: 'x', stages: STAGES })
+    await startWorkStage(deps, 'ws-a', 'prep')
+    await createWorktask(deps, { scope: 'ws-a', stage_key: 'prep', objective: '清洗数据' })
+    await updateWorktask(deps, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'complete' })
+    return { deps, asks }
+  }
+
+  it('人确认 ⇒ 落章（弹框里问清阶段与判据；不靠模型转述）', async () => {
+    const { deps, asks } = await seededAsk({ kind: 'approved' })
+    const out = await updateWorkstage(deps, { scope: 'ws-a', stage_key: 'prep', action: 'done' })
+    expect(out).toMatchObject({ success: true, changed: true, close_policy: 'human' })
+    expect(asks).toHaveLength(1)
+    expect(asks[0]).toMatchObject({ id: 'workprocess-stage-done:prep', approve: '确认收口' })
+    expect(String(asks[0].detail)).toContain('清洗数据')          // 给人复核的是任务清单
+    expect(((await getWorkstage(deps, { scope: 'ws-a' })).stages as Array<{ state: string }>)[0]).toMatchObject({ state: 'done' })
+  })
+
+  it('人选「还要补做」⇒ 不收口，把人的话转达给模型', async () => {
+    const { deps } = await seededAsk({ kind: 'declined', feedback: '还要加触控' })
+    const out = await updateWorkstage(deps, { scope: 'ws-a', stage_key: 'prep', action: 'done' })
+    expect(out.code).toBe('WORK_HUMAN_DECLINED')
+    expect(String(out.error)).toContain('还要加触控')
+    expect(((await getWorkstage(deps, { scope: 'ws-a' })).stages as Array<{ state: string }>)[0]).toMatchObject({ state: 'active' })
+  })
+
+  it('人打断了去说话 ⇒ 不收口，也不当成同意', async () => {
+    const { deps } = await seededAsk({ kind: 'cancelled', reason: 'ASK_CANCELLED' })
+    const out = await updateWorkstage(deps, { scope: 'ws-a', stage_key: 'prep', action: 'done' })
+    expect(out.code).toBe('WORK_HUMAN_UNAVAILABLE')
+    expect(((await getWorkstage(deps, { scope: 'ws-a' })).stages as Array<{ state: string }>)[0]).toMatchObject({ state: 'active' })
+  })
+
+  it('没弹框通道 ⇒ 退回原来的"拒绝并指路"（不假装问过）', async () => {
+    const { deps } = await seededAsk({ kind: 'no-channel' })
+    const out = await updateWorkstage(deps, { scope: 'ws-a', stage_key: 'prep', action: 'done' })
+    expect(out.code).toBe('WORK_NO_PERMISSION')
+    expect(String(out.error)).toContain('close_policy')
+  })
+
+  it('阶段还不能收口（任务没做完）⇒ 不去打扰人，直接说清原因', async () => {
+    const base = depsOf({ 'ws-a': { updatedAt: 1 } })
+    let asked = 0
+    const deps = { ...base, askHuman: async (): Promise<WorkHumanVerdict> => { asked += 1; return { kind: 'approved' } } }
+    await createWorkstage(deps, { scope: 'ws-a', objective: 'x', stages: STAGES })
+    await startWorkStage(deps, 'ws-a', 'prep')
+    await createWorktask(deps, { scope: 'ws-a', stage_key: 'prep', objective: '清洗数据' })
+    const out = await updateWorkstage(deps, { scope: 'ws-a', stage_key: 'prep', action: 'done' })
+    expect(out.code).toBe('WORK_NO_PERMISSION')      // 先判权：越权者不因为"没做完"拿到别的口径
+    expect(asked).toBe(0)
   })
 })
 

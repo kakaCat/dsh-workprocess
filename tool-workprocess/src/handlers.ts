@@ -19,9 +19,9 @@ import {
   editWorkTask, pauseWorkTask, processAllowsClose, resumeWorkTask, stageAllowsStart, stageClosePolicyOf,
   stageIsFinishable, workProcessOf,
 } from 'workprocess-core'
-import type { WorkStageClosePolicy, WorkStageDraft, WorkStoreLike, WorkTask } from 'workprocess-core'
+import type { WorkStage, WorkStageClosePolicy, WorkStageDraft, WorkStoreLike, WorkTask } from 'workprocess-core'
 import {
-  requireActionAuthority, workToolExecution,
+  isActionAuthorized, requireActionAuthority, workToolExecution,
   type WorkAuthorityAction, type WorkAuthorityContext, type WorkRoundRef, type WorkToolAuthority,
 } from './authority.js'
 
@@ -50,7 +50,45 @@ export interface WorkToolDeps {
    * （本面不 import 宿主 llm 包，端口保持结构化）。
    */
   readonly deferNotice?: (exec: unknown, notice: WorkToolNotice) => void
+  /**
+   * **工具自己问人**（宿主 `ctx.userQuestions.ask` 的适配口；缺省 = 没弹框通道）。
+   *
+   * 【为什么要这一口，而不是"让模型用 ask_user_question 问完再自己落章"】宿主把人的答复
+   * **只记成 `ask_user_question` 的工具结果**，不产生 `user/message` 事件 ⇒ 授权面看不见，
+   * 模型拿到"确认收口"后仍然落不了章（真机踩过）。宿主自己的做法是 **工具内部直接问人**：
+   * `plan-mode` 的 `exit_plan_mode` 就是 `ctx.get('userQuestions').ask(...)`，
+   * 人同意才动作。本口照此办理：**§人机确认的裁决由工具拿，不由模型转述§**。
+   */
+  readonly askHuman?: (exec: unknown, request: WorkHumanAsk) => Promise<WorkHumanVerdict>
 }
+
+/** 一条人机确认请求（工具问人时给弹框的内容）。 */
+export interface WorkHumanAsk {
+  /** 问题 id（答案按它回收）。 */
+  readonly id: string
+  /** 弹框标题。 */
+  readonly header: string
+  /** 一句话问题。 */
+  readonly question: string
+  /** 供人复核的细节（阶段陈述 / 达成判据 / 任务清单）。 */
+  readonly detail?: string
+  /** 选项（第一个之外的顺序由调用方定；`approve` 指向哪个算同意）。 */
+  readonly options: readonly { readonly label: string; readonly description?: string }[]
+  /** 哪个选项算"同意"。 */
+  readonly approve: string
+}
+
+/** 人机确认的裁决（四种；**只有 `approved` 算同意**）。 */
+export type WorkHumanVerdict =
+  | { readonly kind: 'approved' }
+  | { readonly kind: 'declined'; readonly feedback?: string }
+  /** 人打断了（要去说话）/ 请求被中止 —— 停手等人开口。 */
+  | { readonly kind: 'cancelled'; readonly reason: string }
+  /**
+   * 宿主**没有**弹框通道（或没有 answerer 接下这一问）⇒ 调用方退回原来的"拒绝并指路"路径
+   * （CLI / 无头 / 子 agent 场景仍靠它），而不是把"没问成"报成人拒绝了。
+   */
+  | { readonly kind: 'no-channel' }
 
 /** 一条工具通告（自署来源的模型面指令；形状由组合根落成一条消息）。 */
 export interface WorkToolNotice {
@@ -85,6 +123,23 @@ function callerRejection(deps: WorkToolDeps, exec: unknown): string | undefined 
 function authorityOf(deps: WorkToolDeps, exec: unknown, expected?: WorkRoundRef): WorkToolAuthority {
   if (deps.resolveAuthority === undefined) return { kind: 'autonomous' }
   return workToolExecution(exec, deps.resolveAuthority, expected).authority
+}
+
+/** 收口确认弹框里给人复核的细节（阶段陈述 + 达成判据 + 任务清单）。 */
+function stageDetailOf(stage: WorkStage): string {
+  const criteria = stage.doneCriteria.length === 0 ? ['（未登记达成判据）'] : stage.doneCriteria.map((c) => '- ' + c)
+  const tasks = stage.tasks.length === 0
+    ? ['（本阶段没有任务）']
+    : stage.tasks.map((t) => '- ' + t.id + ' [' + t.phase + '] ' + t.objective)
+  return [
+    stage.statement,
+    '',
+    '达成判据：',
+    ...criteria,
+    '',
+    '本阶段任务：',
+    ...tasks,
+  ].join('\n')
 }
 
 /** 授权门（唯一一份在 `authority.ts`）。 */
@@ -299,7 +354,50 @@ export async function updateWorkstage(
     const stage = process?.stages.find((s) => s.key === stageKey)
     if (stage === undefined) return { success: false, scope, stage_key: stageKey, error: '阶段不存在' }
     const closePolicy = stageClosePolicyOf(stage)
-    authorize('stage_done', authorityOf(deps, exec), { stageClosePolicy: closePolicy })
+    // 授权：**先判权，再判状态**（越权者不该从回执里读出阶段处于什么态）；
+    // 策略 human 且本轮不是人发起的 ⇒ **工具自己问人**（宿主 userQuestions 弹框）。
+    const authority = authorityOf(deps, exec)
+    if (!isActionAuthorized('stage_done', authority, { stageClosePolicy: closePolicy })) {
+      // 能弹框、且这件事**确实做得成**（active 且任务全达成）时才去打扰人——
+      // 做不到的事不拿去问人，直接把内核给的原因说清楚。
+      const askable = deps.askHuman !== undefined && closePolicy === 'human'
+        && stage.state === 'active' && stageIsFinishable(stage)
+      if (!askable) {
+        requireActionAuthority('stage_done', authority, { stageClosePolicy: closePolicy })
+      } else {
+        const verdict = await deps.askHuman!(exec, {
+          id: 'workprocess-stage-done:' + stageKey,
+          header: '阶段收口确认',
+          question: '阶段 `' + stageKey + '` 的任务已全部达成，是否收口？',
+          detail: stageDetailOf(stage),
+          options: [
+            { label: '确认收口', description: '本阶段落 done；下一阶段由驱动器开工与规划。' },
+            { label: '还要补做', description: '不收口——在自定义输入里写清还差什么，我会建成新任务继续做。' },
+          ],
+          approve: '确认收口',
+        })
+        if (verdict.kind === 'declined') {
+          return {
+            success: false, scope, stage_key: stageKey, action, code: 'WORK_HUMAN_DECLINED',
+            error: '人在弹框里选了「还要补做」，本阶段不收口'
+              + (verdict.feedback === undefined || verdict.feedback === '' ? '' : '；人的补充：' + verdict.feedback)
+              + '——请按人说的用 create_worktask 补任务，做完再提请收口。',
+          }
+        }
+        if (verdict.kind === 'cancelled') {
+          return {
+            success: false, scope, stage_key: stageKey, action, code: 'WORK_HUMAN_UNAVAILABLE',
+            error: '收口确认没问成人（' + verdict.reason + '）：本阶段不收口。'
+              + '若人顺手回了话，先按人说的办；否则请人在会话里回一句。',
+          }
+        }
+        if (verdict.kind === 'no-channel') {
+          // 没弹框通道：退回原来的拒绝（带指路），不假装问过。
+          requireActionAuthority('stage_done', authority, { stageClosePolicy: closePolicy })
+        }
+        // approved：人已确认 ⇒ 继续落章（与"人直接在会话里说一句"等价，只是路径更短）。
+      }
+    }
     // 收口条件用内核判据先说清楚（`changed:false` 不能只有"没变"三个字）。
     if (stage.state !== 'active') {
       return {

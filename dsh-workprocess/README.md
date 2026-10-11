@@ -102,8 +102,11 @@ ln -sfn <repo>/dsh-workprocess ~/.dsh/profiles/desktop/node_modules/dsh-workproc
 
 ## 还没接的部分
 
-- **`ask-*`（宿主弹框通道）**：收口确认目前是**投一轮让 agent 开口问**（`ask_user_question`
-  或直接说明），不是宿主的原生弹框；接原生弹框是后续可换的实现，判据不变。
+- **`ask-*`（宿主弹框通道）已接**：`human` 策略的阶段收口由**工具自己问人**——
+  `update_workstage action=done` 在缺授权时调 `ctx.get('userQuestions').ask(...)`（对齐宿主
+  `plan-mode` 的 `exit_plan_mode`）。为什么必须这样：宿主把 `ask_user_question` 的答复**只记成
+  工具结果**，不产生 `user/message` 事件 ⇒ 授权面看不见，"模型问完再自己落章"必然被拒（真机踩过）。
+  没弹框通道（CLI / 无头 / 子 agent）时退回原来的"拒绝并指路"。
 
 ## 工具面上与流程相关的三个动词（在 `tool-workprocess`）
 
@@ -117,7 +120,7 @@ ln -sfn <repo>/dsh-workprocess ~/.dsh/profiles/desktop/node_modules/dsh-workproc
 ## 测试
 
 ```bash
-pnpm test   # 全仓 139 条；本包 26 条：装配面 / 域声明与内核校验 / 归属缺省 / 真人判定 /
+pnpm test   # 全仓 148 条；本包 30 条：装配面 / 域声明与内核校验 / 归属缺省 / 真人判定 /
             #   空闲边界（开工·auto 收口·running 不动手）/ 续跑投递（自署来源·去重·上限刹车）/ **阶段规划轮** / **收口确认轮** /
             #   服务面 ctx.workprocess（view / pauseActive / resumePaused / discard 幂等）
 ```
