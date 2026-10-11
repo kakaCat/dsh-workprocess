@@ -61,8 +61,8 @@ describe('登记表自洽（两层 × get/create/update，命名对齐宿主 dsh
 })
 
 describe('授权口径（对齐宿主 update 政策）', () => {
-  it('缺省策略（human）下：stage_done（收口确认）+ task_edit（改目标）+ task_resume（改人的意图）都是真人专属', () => {
-    for (const action of ['stage_done', 'task_edit', 'task_resume'] as const) {
+  it('缺省策略（human）下：stage_done（收口确认）+ task_edit / process_edit（改目标）+ task_resume（改人的意图）+ process_discard（撤流程）都是真人专属', () => {
+    for (const action of ['stage_done', 'task_edit', 'process_edit', 'task_resume', 'process_discard'] as const) {
       expect(isActionAuthorized(action, { kind: 'autonomous' })).toBe(false)
       expect(isActionAuthorized(action, { kind: 'direct-human' })).toBe(true)
     }
@@ -89,8 +89,8 @@ describe('授权口径（对齐宿主 update 政策）', () => {
     // 策略缺省 = human：拿不准就别放行自治（与内核的缺省口径同源）。
     expect(isActionAuthorized('stage_done', { kind: 'autonomous' })).toBe(false)
     expect(isActionAuthorized('stage_done', { kind: 'autonomous' }, {})).toBe(false)
-    // 收口策略不改变其余真人专属动作：edit / resume 永远要人直接发起。
-    for (const action of ['task_edit', 'task_resume'] as const) {
+    // 收口策略不改变其余真人专属动作：edit / resume / 丢流程永远要人直接发起。
+    for (const action of ['task_edit', 'process_edit', 'task_resume', 'process_discard'] as const) {
       expect(isActionAuthorized(action, { kind: 'autonomous' }, { stageClosePolicy: 'auto' })).toBe(false)
     }
   })
@@ -238,7 +238,36 @@ describe('层1 处理器 · 阶段', () => {
     expect((await getWorkstage(agent, { scope: 'ws-a' })).revision).toBe(1)
   })
 
-  it('action 非法 / done 缺 stage_key：当场拒并说明（discard 不需要 stage_key）', async () => {
+  it('action=edit：改流程目标（真人专属；阶段与任务原样保留；幂等；要 objective）', async () => {
+    const records = { 'ws-a': { updatedAt: 1 } }
+    const agent = depsOf(records)
+    const human = depsOf(records, true)
+    await createWorkstage(agent, { scope: 'ws-a', objective: '把模型发上线', stages: STAGES })
+    await createWorktask(agent, { scope: 'ws-a', stage_key: 'prep', objective: '清洗数据' })
+
+    // agent 自行改目标 = 越权：改的是"这条流程要达成什么"
+    const denied = await updateWorkstage(agent, { scope: 'ws-a', action: 'edit', objective: '顺手改成别的' })
+    expect(denied.code).toBe('WORK_NO_PERMISSION')
+    expect(String(denied.error)).toContain('改流程目标')
+
+    // 缺 objective 当场拒（不静默当"没变"）
+    expect(String((await updateWorkstage(human, { scope: 'ws-a', action: 'edit' })).error))
+      .toContain('edit 需要 objective')
+
+    // 人改：目标换掉，阶段与任务原样保留（不是丢弃重来）
+    expect(await updateWorkstage(human, { scope: 'ws-a', action: 'edit', objective: '把模型发上线（v2）' }))
+      .toEqual({ success: true, scope: 'ws-a', action: 'edit', objective: '把模型发上线（v2）', changed: true })
+    const after = await getWorkstage(agent, { scope: 'ws-a' })
+    expect(after.objective).toBe('把模型发上线（v2）')
+    expect((after.stages as Array<{ key: string }>).map((s) => s.key)).toEqual(['prep', 'train'])
+    expect((await getWorktask(agent, { scope: 'ws-a', stage_key: 'prep' })).tasks).toHaveLength(1)
+
+    // 幂等：同值重放零写入，且不需要 stage_key
+    expect(await updateWorkstage(human, { scope: 'ws-a', action: 'edit', objective: '把模型发上线（v2）' }))
+      .toEqual({ success: true, scope: 'ws-a', action: 'edit', objective: '把模型发上线（v2）', changed: false })
+  })
+
+  it('action 非法 / done 缺 stage_key：当场拒并说明（edit / discard 不需要 stage_key）', async () => {
     const deps = depsOf({ 'ws-a': { updatedAt: 1 } }, true)
     await createWorkstage(deps, { scope: 'ws-a', objective: 'x', stages: STAGES })
     expect(String((await updateWorkstage(deps, { scope: 'ws-a', stage_key: 'prep', action: 'start' })).error))

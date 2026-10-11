@@ -7,7 +7,7 @@
  *   INV-2 revision 单调：有效变更恰好 +1（`init` 为 1），无效变更**零变化**（幂等）；
  *   INV-3 blocked 必带非空结构化原因（code + message）；
  *   INV-4 身份稳定：流程 id 不变；存活的阶段键与任务 id / stageKey 不变；
- *         `objective` 只在 `init` 下确立（没有任何事件能改它）；
+ *         `objective` 只由 `init`（确立）与 `objective-edit`（人改目标）两个动词改写；
  *   INV-5 **串行门**：任一阶段非 `pending` 时，其前序阶段必须全 `done`（至多一个 active）；
  *   INV-6 **阶段收口自洽**：阶段 `done` ⇒ 其任务非空且全部 `complete`。
  *
@@ -71,8 +71,10 @@ export function checkWorkInvariants(
   const after = tasksById(next)
 
   if (next.id !== prev.id) out.push({ inv: 'INV-4', message: '流程身份被改写（' + prev.id + ' → ' + next.id + '）' })
-  if (eventKind !== 'init' && next.objective !== prev.objective) {
-    out.push({ inv: 'INV-4', message: 'objective 被非 init 事件改写（应当稳定）' })
+  // objective 只能由两个**明说的**动词改写：`init`（确立）与 `objective-edit`（人改目标）。
+  // 其余任何事件顺手改 objective 都是规则实现坏了——目标漂移会让"跑的是不是同一件事"无从判定。
+  if (eventKind !== 'init' && eventKind !== 'objective-edit' && next.objective !== prev.objective) {
+    out.push({ inv: 'INV-4', message: 'objective 被非 init / objective-edit 事件改写（应当稳定）' })
   }
 
   // INV-1：已完成的任务只能原样保留，或被 clear 掉（不在 after 里）。

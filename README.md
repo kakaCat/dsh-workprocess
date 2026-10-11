@@ -44,7 +44,7 @@ workProcess  id=wp:<scope>   revision（两层的写共用同一个 CAS）
 | `workprocess-round-driver` | 回合驱动器：纯决策树（闸 → 串行门 → 相位机）+ 提示词渲染 | `workprocess-core` |
 | `tool-workprocess` | 工具面：`get_/create_/update_*` 六个工具 + 授权判据 + 独立插件入口 | `workprocess-core`、`@deepseek-ai/dsh-tools` |
 | `dsh-workprocess` | **领域插件（组合根）**：归属记录落宿主存储域（`ctx.storageDomain`）/ 真人判定（会话事件切面）/ 回合边界驱动（开工 · auto 收口 · 落盘 block · **续跑投递**）/ 提供 **`ctx.workprocess`** 服务 + `apply(ctx, config)` | 上面三个、`@deepseek-ai/dsh-storage-domain`、`@deepseek-ai/dsh-llm`、`zod` |
-| `command-workprocess` | **命令行插件** `/work`（看 · pause · resume · discard）——独立包、独立装载行（对齐宿主 `dsh-command-goal`），只消费 `ctx.workprocess` | `workprocess-core`、`dsh-workprocess`（类型） |
+| `command-workprocess` | **命令行插件** `/work`（`<目标>` 让 agent 拆阶段建流程 · `edit <目标>` 改目标 · `pause` / `resume` / `clear`）——独立包、独立装载行（对齐宿主 `dsh-command-goal`），只消费 `ctx.workprocess`，**结构化动作投话给 agent 做** | `workprocess-core`、`dsh-workprocess`（类型）、`@deepseek-ai/dsh-llm` |
 
 工具面命名与形状对齐宿主 dsh 的 `get_goal / create_goal / update_goal`：
 `get_workstage / create_workstage / update_workstage` 与 `get_worktask / create_worktask / update_worktask`，
@@ -55,7 +55,7 @@ workProcess  id=wp:<scope>   revision（两层的写共用同一个 CAS）
 ```bash
 pnpm install
 pnpm typecheck
-pnpm test          # 111 条：内核 39 / 驱动 24 / 工具 24 / 领域插件 16 / 命令行插件 8（含端到端）
+pnpm test          # 122 条：内核 45 / 驱动 24 / 工具 25 / 领域插件 16 / 命令行插件 12（含端到端）
 pnpm build         # 出 dist/（宿主加载的是 JS，不是 TS）
 ```
 
@@ -86,7 +86,12 @@ pnpm build         # 出 dist/（宿主加载的是 JS，不是 TS）
   两条路都要过**同一条判据**（任务非空且全 complete）：策略只决定"谁有权落"，不决定"够不够格落"
   （否则 `auto` 就是绕过判据的后门）。策略属于**定义**，故改它走 `create_workstage` 替换阶段表，
   不新增状态动词。
-- **要人确认的动作**：任务 `edit`（改目标）/ `resume`（改人的意图）、阶段 `done`（收口——**仅 `human` 策略的阶段**）。
+- **要人确认的动作**：流程 `edit`（改整条流程的目标）/ 任务 `edit`（改目标）/ `resume`（改人的意图）、
+  阶段 `done`（收口——**仅 `human` 策略的阶段**）、`discard`（丢整条流程）。
   `pause` / `block` / `complete` / `clear` 可由 agent 发起。
+- **目标可改但不是随手改**：`objective-edit` 是**真人专属**状态动词（阶段与任务原样保留，
+  不靠"丢弃重来"换目标）；INV-4 只放行 `init` 与它两个动词改写 `objective`。
 - **阶段开工不是工具动词**：串行门放行后由**驱动器**开工（`decideWorkRound` 的 `start-stage` 决策）。
+- **命令行的两条路**：结构化动作（`/work <目标>`、`/work edit <目标>`）**投话给 agent** 做
+  （拆阶段是判断）；机械控制（`pause` / `resume` / `clear`）命令**直接落**领域。
 - **幂等 + CAS**：`changed:false` 的调用零写入；写路径带 `revision` 时旧值即拒。

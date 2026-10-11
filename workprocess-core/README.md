@@ -49,7 +49,7 @@ WorkProcess（聚合根：一次完整流程，一个归属对象一条）
 | INV-1 | 层2 终态：`complete` 的任务只能原样保留或被 `clear`，不得再被改写 |
 | INV-2 | 有效变更 revision 恰好 +1（建流程为 1）；无效变更**零变化**（幂等是硬语义） |
 | INV-3 | `blocked` 必带非空结构化原因（`code` 必须 lower-kebab-case + `message`） |
-| INV-4 | 身份稳定：流程 id 不变；存活任务的 id / `stageKey` 不变；`objective` 只在 `init` 下确立 |
+| INV-4 | 身份稳定：流程 id 不变；存活任务的 id / `stageKey` 不变；`objective` 只由 `init`（确立）与 `objective-edit`（人改目标）两个动词改写 |
 | INV-5 | **串行门**：任一阶段非 `pending` 时其前序阶段必须全 `done`（最多一个 `active`） |
 | INV-6 | **阶段收口自洽**：阶段 `done` ⇒ 其任务非空且全部 `complete` |
 

@@ -9,12 +9,12 @@ workprocess 的**工具面**：两层各三工具（登记表 `src/registry.ts` 
 |---|---|---|
 | `get_workstage` | 层1 | 读阶段表（顺序即串行顺序）+ 当前阶段 + 串行门 + 收口条件 + 每阶段的收口策略（`close_policy`） |
 | `create_workstage` | 层1 | 建流程（带阶段表：`key / statement / done_criteria? / close_policy?`）或整体替换阶段表；会丢掉**非空**阶段的一律被内核拒 |
-| `update_workstage` | 层1 | `action=done`：阶段收口落定——按**本阶段收口策略**判谁来落（`human` = **真人专属**；`auto` = 驱动器/自治回合可落）；任务须非空且全部 complete。`action=discard`：**丢弃整条流程**（不需要 `stage_key`，不可逆，**真人专属**） |
+| `update_workstage` | 层1 | `action=done`：阶段收口落定——按**本阶段收口策略**判谁来落（`human` = **真人专属**；`auto` = 驱动器/自治回合可落）；任务须非空且全部 complete。`action=edit`：**改流程目标**（要 `objective`；阶段与任务原样保留；**真人专属**）。`action=discard`：**丢弃整条流程**（不需要 `stage_key`，不可逆，**真人专属**） |
 | `get_worktask` | 层2 | 读任务（给 `task_id` 读一条 / 给 `stage_key` 读一阶段 / 都不给读全部） |
 | `create_worktask` | 层2 | 在某阶段建任务；身份由内核分配 `wt:<阶段键>:<序号>`，回执直接给 `task_id` |
 | `update_worktask` | 层2 | `action` 六动词：`edit / pause / resume / block / complete / clear`（`edit`、`resume` = **真人专属**，`block` 必须给原因） |
 
-**阶段开工没有动词**（有意）：`update_workstage` 只认 `done` / `discard`——开工是**驱动器的动作**
+**阶段开工没有动词**（有意）：`update_workstage` 只认 `done` / `edit` / `discard`——开工是**驱动器的动作**
 （`workprocess-round-driver` 的 `start-stage` 决策，串行门放行才开工），避免两条开工入口。
 
 ### 与宿主 dsh 的两处必然差异
@@ -27,6 +27,7 @@ workprocess 的**工具面**：两层各三工具（登记表 `src/registry.ts` 
 ## 授权口径（对齐宿主 dsh 的 update 政策）
 
 - **真人专属**：`task_edit`（改目标——对齐宿主 dsh「edit, pause, and resume require a direct top-level human request」）、
+  `process_edit`（改**整条流程**的目标——agent 自行改会让流程悄悄跑偏到另一件事上）、
   `task_resume`（改人的意图——agent 自行 continue 会推翻人的暂停）、
   `process_discard`（丢整条流程——agent 自撤会抹掉"这里曾经有一条流程"这段历史；误建流程的补救口只给人）。
 - **按阶段的收口策略判**：`stage_done` 的目标阶段 `close_policy=human`（缺省）时是**人工确认**（真人专属）；
@@ -55,5 +56,5 @@ workprocess 的**工具面**：两层各三工具（登记表 `src/registry.ts` 
 ## 测试
 
 ```bash
-cd workprocess/tool-workprocess && pnpm test   # 21 条：登记表自洽 / 授权口径（含收口策略）/ 六工具行为
+cd workprocess/tool-workprocess && pnpm test   # 25 条：登记表自洽 / 授权口径（含收口策略与 process_edit）/ 六工具行为
 ```

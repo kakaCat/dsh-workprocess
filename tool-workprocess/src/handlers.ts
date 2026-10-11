@@ -15,9 +15,9 @@
  */
 import {
   WorkError, allTasksOf, applyWorkEvent, blockWorkTask, clearWorkTask, completeWorkStage, completeWorkTask,
-  createWorkProcess, createWorkTask, currentStageOf, defineWorkStages, discardWorkProcess, editWorkTask,
-  pauseWorkTask, processAllowsClose, resumeWorkTask, stageAllowsStart, stageClosePolicyOf, stageIsFinishable,
-  workProcessOf,
+  createWorkProcess, createWorkTask, currentStageOf, defineWorkStages, discardWorkProcess, editWorkObjective,
+  editWorkTask, pauseWorkTask, processAllowsClose, resumeWorkTask, stageAllowsStart, stageClosePolicyOf,
+  stageIsFinishable, workProcessOf,
 } from 'workprocess-core'
 import type { WorkStageClosePolicy, WorkStageDraft, WorkStoreLike, WorkTask } from 'workprocess-core'
 import {
@@ -195,10 +195,11 @@ export async function createWorkstage(
 /**
  * `update_workstage` 认的动词：
  *   · `done` —— 阶段收口（要 stage_key）；
+ *   · `edit` —— **改流程目标**（要 objective；对齐宿主 `update_goal` 的 `edit`）；
  *   · `discard` —— **丢弃整条流程**（不要 stage_key；误建流程的补救口，见下）。
  * 阶段开工不是本工具的动词：串行门放行后由驱动器开工。
  */
-const STAGE_ACTIONS = ['done', 'discard'] as const
+const STAGE_ACTIONS = ['done', 'edit', 'discard'] as const
 
 /**
  * `update_workstage`：阶段态变更（对齐宿主 `update_goal` 的 `action` 形状）。
@@ -218,9 +219,13 @@ export async function updateWorkstage(
   if (scope === undefined) return { success: false, error: '缺少 scope（归属域键：这条流程挂在谁名下；未接默认归属时请显式给）' }
   const stageKey = args.stage_key === undefined ? '' : String(args.stage_key)
   const action = String(args.action ?? '')
-  // stage_key 只对 done 必需：discard 是"整条流程"，没有"哪个阶段"可言。
+  const objective = args.objective === undefined ? '' : String(args.objective)
+  // stage_key 只对 done 必需：edit 改的是整条流程的目标，discard 丢的是整条流程。
   if (action === 'done' && stageKey.trim() === '') {
-    return { success: false, scope, error: '缺少 stage_key（收口哪个阶段；discard 才不需要）' }
+    return { success: false, scope, error: '缺少 stage_key（收口哪个阶段；edit / discard 才不需要）' }
+  }
+  if (action === 'edit' && objective.trim() === '') {
+    return { success: false, scope, action, error: 'edit 需要 objective（这条流程改成要达成什么）' }
   }
   if (!(STAGE_ACTIONS as readonly string[]).includes(action)) {
     return {
@@ -238,6 +243,12 @@ export async function updateWorkstage(
       authorize('process_discard', authorityOf(deps, exec))
       const changed = await discardWorkProcess(deps, scope, revision)
       return { success: true, scope, action, changed }
+    }
+    if (action === 'edit') {
+      // 真人专属（改的是"这条流程要达成什么"——同宿主 `update_goal` 的 edit 口径）。
+      authorize('process_edit', authorityOf(deps, exec))
+      const changed = await editWorkObjective(deps, scope, objective, revision)
+      return { success: true, scope, action, objective, changed }
     }
     // 先读目标阶段：授权判据要按它的收口策略判（策略不在参数里，在流程里）。
     const process = await workProcessOf(deps, scope)

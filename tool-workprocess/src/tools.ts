@@ -100,19 +100,21 @@ export function defineCreateWorkstageTool(deps: WorkToolDeps) {
   })
 }
 
-/** `update_workstage`：阶段态变更（action=done 收口落定 / action=discard 丢弃整条流程）。 */
+/** `update_workstage`：阶段态变更（action=done 收口落定 / action=edit 改流程目标 / action=discard 丢弃整条流程）。 */
 export function defineUpdateWorkstageTool(deps: WorkToolDeps) {
   return buildTool(deps, 'updateWorkstage', {
     scope: SCOPE_PARAM,
     stage_key: STAGE_KEY_PARAM,
     action: {
       type: 'string',
-      enum: ['done', 'discard'],
+      enum: ['done', 'edit', 'discard'],
       description: 'done = 阶段收口落定，按**本阶段的收口策略**判谁来落：human（缺省）= **真人专属**（人工确认）；'
         + 'auto = 本回合（驱动器决策）可自动落 done。两条路都必须任务非空且全部 complete。'
+        + 'edit = **改流程目标**（要 objective；对齐宿主 update_goal 的 edit；**真人专属**——阶段与任务原样保留）。'
         + 'discard = **丢弃整条流程**（不需要 stage_key；不可逆：流程与任务墓碑一起消失、回合计数归零；**真人专属**）。'
         + '注意**阶段开工不是本工具的动词**——串行门放行后由驱动器开工。',
     },
+    objective: { type: 'string', description: 'edit 用：这条流程改成要达成什么（替换原目标）。' },
     revision: REVISION_PARAM,
   })
 }

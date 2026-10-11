@@ -10,12 +10,13 @@
  */
 import { describe, it, expect } from 'vitest'
 import type { WorkChange, WorkEvent } from 'workprocess-core/domain.js'
-import { applyWorkEvent, decodeWorkProcess, foldWorkProcess, processAllowsClose, sameProcess, workProgressOf } from 'workprocess-core/fold.js'
+import { applyWorkEvent, decodeWorkEvent, decodeWorkProcess, foldWorkProcess, processAllowsClose, sameProcess, workProgressOf } from 'workprocess-core/fold.js'
+import { checkWorkInvariants } from 'workprocess-core/invariant.js'
 import { WorkError } from 'workprocess-core/runtime.js'
 import type { WorkProcess, WorkStageDraft } from 'workprocess-core/types.js'
 import {
   clearWorkTask, completeWorkStage, completeWorkTask, createWorkProcess, createWorkTask,
-  defineWorkStages, discardWorkProcess, progressOf, stageClosePolicyOf, startWorkStage,
+  defineWorkStages, discardWorkProcess, editWorkObjective, progressOf, stageClosePolicyOf, startWorkStage,
   workProcessOf, workProcessViewOf, workTaskOf,
   type WorkRecordLike,
 } from 'workprocess-core'
@@ -496,5 +497,68 @@ describe('丢弃流程（连根拔掉，不是状态迁移）', () => {
     await createWorkProcess(deps, 'ws-a', { objective: 'x', stages: STAGES })
     await expect(discardWorkProcess(deps, 'ws-a', 9)).rejects.toMatchObject({ code: 'WORK_CONFLICT' })
     expect(await workProcessOf(deps, 'ws-a')).toBeDefined()
+  })
+})
+
+describe('改流程目标（objective-edit：人改目标，不丢历史）', () => {
+  it('折进新目标：revision +1、阶段与任务原样保留', () => {
+    let p = apply(initProcess(), { kind: 'stage-start', stageKey: 'prep' })
+    p = apply(p, { kind: 'task-create', task: { id: 'wt:prep:1', stageKey: 'prep', objective: '清洗数据' } })
+    const before = p.revision
+    const edited = apply(p, { kind: 'objective-edit', objective: '把模型发上线（v2）' })
+    expect(edited.objective).toBe('把模型发上线（v2）')
+    expect(edited.revision).toBe(before + 1)
+    expect(edited.stages.map((s) => [s.key, s.state, s.tasks.length]))
+      .toEqual([['prep', 'active', 1], ['train', 'pending', 0], ['release', 'pending', 0]])
+    expect(edited.stages[0].tasks[0].objective).toBe('清洗数据')
+  })
+
+  it('幂等与非法输入：同值重放零写入；空目标零写入；没有流程零写入', () => {
+    const p = initProcess()
+    const same = applyWorkEvent(p, { kind: 'objective-edit', objective: p.objective })
+    expect(same.changed).toBe(false)
+    expect(same.reason).toBe('objective-edit:idempotent-replay')
+    const blank = applyWorkEvent(p, { kind: 'objective-edit', objective: '   ' })
+    expect(blank.changed).toBe(false)
+    expect(blank.reason).toBe('objective-edit:objective-required')
+    const orphan = applyWorkEvent(undefined, { kind: 'objective-edit', objective: 'x' })
+    expect(orphan.changed).toBe(false)
+    expect(orphan.reason).toBe('objective-edit:no-process')
+  })
+
+  it('严格解码：字段集精确（多一个字段即拒）；空目标拒', () => {
+    expect(decodeWorkEvent({ kind: 'objective-edit', objective: 'x' })).toEqual({ kind: 'objective-edit', objective: 'x' })
+    expect(() => decodeWorkEvent({ kind: 'objective-edit', objective: 'x', extra: 1 })).toThrowError(WorkError)
+    expect(() => decodeWorkEvent({ kind: 'objective-edit', objective: '  ' })).toThrowError(WorkError)
+  })
+
+  it('迁移链：改目标也走"事件重算 = 记录快照"（伪造目标即拒）', () => {
+    const p = initProcess()
+    const event: WorkEvent = { kind: 'objective-edit', objective: '换一个目标' }
+    const right = apply(p, event)
+    expect(foldWorkProcess([change(INIT, p), change(event, right)]).process?.objective).toBe('换一个目标')
+    const forged = { ...right, objective: '偷偷换的' }
+    expect(() => foldWorkProcess([change(INIT, p), change(event, forged)])).toThrowError(WorkError)
+  })
+
+  it('不变量：非 init / objective-edit 的事件顺手改 objective 会被 INV-4 拦下', () => {
+    const p = initProcess()
+    const event: WorkEvent = { kind: 'stage-start', stageKey: 'prep' }
+    const tampered = { ...apply(p, event), objective: '被顺手改掉的' }
+    const violations = checkWorkInvariants(p, { changed: true, next: tampered }, 'stage-start')
+    expect(violations.map((v) => v.inv)).toContain('INV-4')
+  })
+
+  it('服务层：改目标 +1 且幂等零写入；空目标抛 WORK_OBJECTIVE_REQUIRED；CAS 旧值即拒', async () => {
+    const st = storeOf({ 'ws-a': { updatedAt: 1 } })
+    const deps = { store: st as never, now: () => 1_000 }
+    await createWorkProcess(deps, 'ws-a', { objective: 'x', stages: STAGES })
+    expect(await editWorkObjective(deps, 'ws-a', 'y')).toBe(true)
+    expect((await workProcessOf(deps, 'ws-a'))?.objective).toBe('y')
+    const writes = st.writes
+    expect(await editWorkObjective(deps, 'ws-a', 'y')).toBe(false)
+    expect(st.writes).toBe(writes)
+    await expect(editWorkObjective(deps, 'ws-a', '  ')).rejects.toMatchObject({ code: 'WORK_OBJECTIVE_REQUIRED' })
+    await expect(editWorkObjective(deps, 'ws-a', 'z', 9)).rejects.toMatchObject({ code: 'WORK_CONFLICT' })
   })
 })

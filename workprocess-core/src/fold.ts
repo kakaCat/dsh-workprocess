@@ -264,6 +264,13 @@ export function applyWorkEvent(current: WorkProcess | undefined, event: WorkEven
         && sameStagesShape(current.stages, built)
       return no(current, replay ? 'init:idempotent-replay' : 'init:identity-conflict')
     }
+    case 'objective-edit': {
+      if (current === undefined) return no(undefined, 'objective-edit:no-process')
+      if (event.objective.trim() === '') return no(current, 'objective-edit:objective-required')
+      // 同值重放零写入（幂等是硬语义）；真改了才 +1 revision。
+      if (current.objective === event.objective) return no(current, 'objective-edit:idempotent-replay')
+      return yes({ ...current, objective: event.objective, revision: current.revision + 1 })
+    }
     case 'stage-define': {
       if (current === undefined) return no(undefined, 'stage-define:no-process')
       const built = buildStages(event.stages)
@@ -591,6 +598,10 @@ export function decodeWorkEvent(raw: unknown): WorkEvent {
         objective: requireNonEmptyString(o.objective, 'init.objective'),
         stages: (o.stages as unknown[]).map(decodeStageDraft),
       }
+    }
+    case 'objective-edit': {
+      requireKeys(o, ['kind', 'objective'], 'objective-edit 事件')
+      return { kind: 'objective-edit', objective: requireNonEmptyString(o.objective, 'objective-edit.objective') }
     }
     case 'stage-define': {
       requireKeys(o, ['kind', 'stages'], 'stage-define 事件')

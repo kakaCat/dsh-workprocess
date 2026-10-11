@@ -46,7 +46,7 @@ export const WORK_TOOL_REGISTRY: readonly WorkToolRegistryEntry[] = [
     handler: 'updateWorkstage',
     toolName: 'update_workstage',
     layer: 'stage',
-    description: '阶段态变更：action=done（阶段收口，本阶段任务须非空且全部 complete）——策略 human 时**真人专属**，策略 auto 时可由驱动器自动落；action=discard（丢弃整条流程，不可逆，**真人专属**）',
+    description: '阶段态变更：action=done（阶段收口，本阶段任务须非空且全部 complete）——策略 human 时**真人专属**，策略 auto 时可由驱动器自动落；action=edit（**改流程目标**，要 objective，真人专属）；action=discard（丢弃整条流程，不可逆，**真人专属**）',
   },
   {
     handler: 'getWorktask',

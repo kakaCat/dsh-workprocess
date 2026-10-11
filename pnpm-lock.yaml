@@ -20,6 +20,9 @@ importers:
 
   command-workprocess:
     dependencies:
+      '@deepseek-ai/dsh-llm':
+        specifier: 0.2.0-rc.1
+        version: 0.2.0-rc.1(@deepseek-ai/cordis@4.0.4)
       dsh-workprocess:
         specifier: workspace:*
         version: link:../dsh-workprocess

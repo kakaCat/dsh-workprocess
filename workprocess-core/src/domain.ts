@@ -19,7 +19,7 @@ import type {
 } from './types.js'
 
 /** 层0（流程）与层1（阶段）的动词。 */
-export type WorkProcessOperation = 'init' | 'stage-define' | 'stage-start' | 'stage-done'
+export type WorkProcessOperation = 'init' | 'objective-edit' | 'stage-define' | 'stage-start' | 'stage-done'
 
 /** 层2（任务）的动词（逐条对齐宿主 `GoalOperation`：create/edit/pause/resume/block/complete/clear）。 */
 export type WorkTaskOperation =
@@ -37,6 +37,14 @@ export type WorkOperation = WorkProcessOperation | WorkTaskOperation
 export type WorkEvent =
   /** 建流程：把阶段表一起定下来（没有阶段的流程没有意义）。 */
   | { readonly kind: 'init'; readonly id: WorkProcessId; readonly objective: string; readonly stages: readonly WorkStageDraft[] }
+  /**
+   * **改流程目标**（对齐宿主 `update_goal` 的 `edit`）：换掉整条流程要达成什么。
+   *
+   * 【为什么必须有它】目标变了而阶段表还是按旧目标拆的，流程就成了"名义上在跑、实际跑偏"——
+   * 而在此之前 `objective` 只在 `init` 确立，改目标的唯一办法是丢弃重来（那会连着任务与墓碑一起没）。
+   * 授权面把它判成**真人专属**（同宿主口径）：改人的意图只有人能发起。
+   */
+  | { readonly kind: 'objective-edit'; readonly objective: string }
   /** 整体替换阶段表（同名阶段保留其任务与态；会被丢掉的非空阶段一律拒，见 `WORK_STAGE_HAS_TASKS`）。 */
   | { readonly kind: 'stage-define'; readonly stages: readonly WorkStageDraft[] }
   /** 阶段开工（串行门：前序阶段必须全 `done`）。 */

@@ -22,8 +22,9 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@deepseek-ai/dsh-llm": "0.2.0-rc.1",
     "dsh-workprocess": "workspace:*",
     "workprocess-core": "workspace:*"
   },
-  "description": "/work 命令行：查看与干预 workprocess 流程（与 @deepseek-ai/dsh-command-goal 同形）"
+  "description": "/work 命令行：给目标即让 agent 拆阶段建流程，另可查看与干预（与 @deepseek-ai/dsh-command-goal 同形）"
 }

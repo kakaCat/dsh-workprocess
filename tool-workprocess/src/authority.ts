@@ -89,7 +89,7 @@ export function authorityFromEvents(
 /** 需要真人授权的**全部**动作（唯一一份：改这里即改全部调用点）。 */
 export type WorkAuthorityAction =
   | 'task_edit' | 'task_pause' | 'task_resume' | 'task_block' | 'task_complete' | 'task_clear'
-  | 'stage_done' | 'process_discard'
+  | 'stage_done' | 'process_edit' | 'process_discard'
 
 /** 调用者解析结果（对齐宿主 `GoalToolExecution` 的最小面）。 */
 export interface WorkToolExecution {
@@ -117,11 +117,12 @@ export function workToolExecution(
 }
 
 /**
- * 真人专属动作：改目标（`edit`）、继续（`resume`）、**丢弃流程**（`process_discard`）。
- * 前两个是"改人的意图"，第三个是"撤掉整条流程"——都是 agent 自行发起就会推翻人的决定的那类。
+ * 真人专属动作：改目标（`task_edit` / `process_edit`）、继续（`resume`）、**丢弃流程**（`process_discard`）。
+ * 前三个是"改人的意图"（改的是要达成什么 / 要不要继续），第四个是"撤掉整条流程"——
+ * 都是 agent 自行发起就会推翻人的决定的那类。
  */
 const HUMAN_ONLY: ReadonlySet<WorkAuthorityAction> = new Set<WorkAuthorityAction>(
-  ['task_edit', 'task_resume', 'process_discard'],
+  ['task_edit', 'task_resume', 'process_edit', 'process_discard'],
 )
 
 /**
@@ -155,8 +156,11 @@ export function requireActionAuthority(
       : action === 'process_discard'
         ? '丢弃流程是不可逆的（流程与任务墓碑一起消失、回合计数归零）：只能由人直接发起'
           + '——agent 自撤流程会抹掉"这里曾经有一条流程"这段历史'
-        : '`' + action + '` 需要人显式发起（agent 自行 ' + action + ' 会推翻人的意图或越权确认）'
-          + '——请由人在宿主界面上确认，或由人直接调本工具',
+        : action === 'process_edit'
+          ? '改流程目标是"改人的意图"：agent 自行改目标会让流程悄悄跑偏到另一件事上'
+            + '——请由人直接发起（如 `/work edit <目标>`，命令行会以人的名义把这句交给 agent）'
+          : '`' + action + '` 需要人显式发起（agent 自行 ' + action + ' 会推翻人的意图或越权确认）'
+            + '——请由人在宿主界面上确认，或由人直接调本工具',
     'WORK_NO_PERMISSION',
   )
 }

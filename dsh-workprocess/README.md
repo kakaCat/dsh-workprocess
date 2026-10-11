@@ -72,13 +72,18 @@ ln -sfn <repo>/dsh-workprocess ~/.dsh/profiles/desktop/node_modules/dsh-workproc
 
 ## 命令行：`/work`（**独立包** `dsh-command-workprocess`）
 
-与宿主的 `/goal` 同构：**命令行也是一个独立包、独立装载行**，不塞在领域插件里。
+与宿主的 `/goal` 同构：**命令行也是一个独立包、独立装载行**，不塞在领域插件里；
+语法也逐字同形 —— `/work [<目标>|edit <目标>|pause|resume|clear]`。
 
 - 装载：本包的 `cordis.patch.yml` 插两行——`dsh-workprocess`（本包）+ `dsh-command-workprocess`（命令行包），
   与宿主 base bundle 里 `dsh-goal` / `dsh-command-goal` 的关系一致。
 - 数据来源：命令行只消费 **`ctx.workprocess`**（本包 `ctx.provide` 出去的领域服务：view / discard /
   pauseActive / resumePaused），不自己开存储域（同名域重复 `open` 会被响亮拒绝），也不绕内核改状态。
-- 命令天然的授权：由人敲出来，所以 `discard` / `resume` 这类真人专属动作在那一层合法（与工具面同源）。
+- **`/work <目标>` 不由命令建流程**：流程必须带阶段表，而"该拆成哪几段"是判断——命令只把目标转成一条
+  指令投给会话（`agent.followup`，source 自署 `user`），由 agent 用 `create_workstage` 自己拆。
+  `pause` / `resume` / `clear` 反过来是机械动作，命令直接落领域（模型不在也能用）。
+- 命令天然的授权：由人敲出来（投出去的指令也自署 `user`），所以 `edit` / `resume` / `clear` 这类真人专属
+  动作在那一层合法（与工具面同源，不是开后门）。
 - 没装命令行包 = 只少一条命令行，六个工具照旧（两者是两条独立装载行）。
 
 
@@ -87,16 +92,19 @@ ln -sfn <repo>/dsh-workprocess ~/.dsh/profiles/desktop/node_modules/dsh-workproc
 - **`ask-*`（人机弹框确认）**：`human` 策略的收口目前靠人在会话里说一句 → 模型调
   `update_workstage(action=done)` 落章；没有弹框通道的接线。
 
-## 工具面上与流程相关的两个动词（在 `tool-workprocess`）
+## 工具面上与流程相关的三个动词（在 `tool-workprocess`）
 
 - `update_workstage { action: 'done' }` —— 阶段收口（策略 human 时真人专属）。
+- `update_workstage { action: 'edit', objective }` —— **改流程目标**（阶段与任务原样保留；**真人专属**：
+  改的是"这条流程要达成什么"）。幂等：同值 ⇒ `changed:false`；没有流程 ⇒ 内核拒
+  （`objective-edit:no-process`）。
 - `update_workstage { action: 'discard' }` —— **丢弃整条流程**（不需要 stage_key；不可逆：流程与任务墓碑
   一起消失、回合计数归零；**真人专属**——误建流程的补救口）。幂等：没有流程 ⇒ `changed:false`。
 
 ## 测试
 
 ```bash
-pnpm test   # 全仓 113 条；本包 16 条：装配面 / 域声明与内核校验 / 归属缺省 / 真人判定 /
+pnpm test   # 全仓 122 条；本包 16 条：装配面 / 域声明与内核校验 / 归属缺省 / 真人判定 /
             #   回合边界（开工·auto 收口·活动轮次不动手）/ 续跑投递（自署来源·去重·上限刹车）/
             #   服务面 ctx.workprocess（view / pauseActive / resumePaused / discard 幂等）
 ```

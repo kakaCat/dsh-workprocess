@@ -162,6 +162,22 @@ export async function createWorkProcess(
 }
 
 /**
+ * **改流程目标**（对齐宿主 `update_goal` 的 `edit`；授权面把它判成**真人专属**）。
+ *
+ * 为什么它是状态动作而不是"丢弃重来"：丢弃会连着任务与墓碑一起没（历史被抹掉），
+ * 而改目标只是把"这条流程现在要达成什么"换掉——阶段与任务该保留就保留。
+ * 幂等：同值重放零写入；给 `expectedRevision` 时旧值即拒（CAS 同款）。
+ */
+export async function editWorkObjective(
+  deps: WorkDeps, scope: string, objective: string, expectedRevision?: number,
+): Promise<boolean> {
+  if (objective.trim() === '') {
+    throw new WorkError('改目标需要非空 objective（写清这条流程现在要达成什么）', 'WORK_OBJECTIVE_REQUIRED')
+  }
+  return mutateWork(deps, scope, () => ({ kind: 'objective-edit', objective }), expectedRevision)
+}
+
+/**
  * 整体替换阶段表（同名阶段保留其任务与态；会被丢掉的非空阶段一律拒）。
  * 幂等：同值零写入。
  */
