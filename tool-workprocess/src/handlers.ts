@@ -40,6 +40,24 @@ export interface WorkToolDeps {
    * 缺省不接 = 调用方必须显式给 `scope`（工具面不替调用方猜归属）。
    */
   readonly defaultScope?: (exec: unknown) => string | undefined
+  /**
+   * 把一条**通告**追加到本次工具回执之后（宿主 `exec.deferContext` 的适配口；缺省 = 不发）。
+   *
+   * 【为什么需要它（对齐宿主 `dsh-tool-goal`）】宿主 goal 在模型刚落完 `complete` / `blocked`
+   * 的那一拍，用 `deferContext` 塞一条 `<goal_complete>` 指令——**收尾消息怎么写、别再调工具**。
+   * 位置很关键：通告紧跟在 `tool/result` 之后，**离决策点最近**；写进下一轮的投递提示词就晚了
+   * （模型已经多做了好几步）。本面只产出"摘要 + 文本"，**消息形状与来源由组合根定**
+   * （本面不 import 宿主 llm 包，端口保持结构化）。
+   */
+  readonly deferNotice?: (exec: unknown, notice: WorkToolNotice) => void
+}
+
+/** 一条工具通告（自署来源的模型面指令；形状由组合根落成一条消息）。 */
+export interface WorkToolNotice {
+  /** 一行摘要（宿主侧进来源的 `summary`，供日志与投影辨认）。 */
+  readonly summary: string
+  /** 给模型看的话（人话指令；不带宿主专有 API）。 */
+  readonly text: string
 }
 
 /** 工具回执（普通对象；`success:false` 时带 `code`/`error`）。 */
@@ -72,6 +90,16 @@ function authorityOf(deps: WorkToolDeps, exec: unknown, expected?: WorkRoundRef)
 /** 授权门（唯一一份在 `authority.ts`）。 */
 function authorize(action: WorkAuthorityAction, authority: WorkToolAuthority, ctx?: WorkAuthorityContext): void {
   requireActionAuthority(action, authority, ctx)
+}
+
+/**
+ * 记一条**通告**（宿主 `exec.deferContext` 的适配口；没接就静默不发——工具本身照常成功）。
+ *
+ * 与 `agent.followup` 同款的坑：必须以**方法调用**发出（`exec.deferContext(...)`），
+ * 摘成变量再调会让 `this` 变 undefined。故这里只把 exec 原样传给组合根，本面不自己取方法。
+ */
+function notice(deps: WorkToolDeps, exec: unknown, summary: string, text: string): void {
+  deps.deferNotice?.(exec, { summary, text })
 }
 
 /** 内核错误 → 结构化回执（不吞不编）。 */
@@ -181,7 +209,17 @@ export async function createWorkstage(
         return { success: false, scope, error: '建流程需要 objective（写清这条流程要达成什么）' }
       }
       const changed = await createWorkProcess(deps, scope, { objective, stages })
-      return { success: true, scope, created: true, changed }
+      const built = await workProcessOf(deps, scope)
+      const first = built === undefined ? undefined : currentStageOf(built)
+      return {
+        success: true, scope, created: true, changed,
+        ...(built === undefined ? {} : { process_id: built.id, revision: built.revision }),
+        current_stage: first?.key ?? null,
+        allows_start: built !== undefined && first !== undefined && stageAllowsStart(built, first.key),
+        // 下一步归谁：**开工不是模型的动词**（驱动器在空闲边界落）。
+        next_step: '阶段开工由驱动器在空闲边界自动落（不要自己找开工动词）；'
+          + '开工后驱动器会提醒你给该阶段建任务（create_worktask）。',
+      }
     }
     // 先干跑一次拿到**内核给的原因**（规则的唯一权威在 fold，本层不另写一份判据）：
     // `changed:false` 的幂等重放与"会被拒"（丢非空阶段 / 串行门被破）在回执里必须分得清。
@@ -242,6 +280,12 @@ export async function updateWorkstage(
       // 真人专属（删掉的是整条流程，不可逆）；内核负责"没有流程就零写入"的幂等。
       authorize('process_discard', authorityOf(deps, exec))
       const changed = await discardWorkProcess(deps, scope, revision)
+      if (changed) {
+        notice(deps, exec, 'process-discard',
+          '<workprocess_discarded>\n整条流程已丢弃（不可逆：阶段、任务与任务编号墓碑一并消失，回合计数归零）。\n'
+          + '不要再引用原来的阶段键或任务 id；需要重来就用 create_workstage 新起一条。\n'
+          + '</workprocess_discarded>')
+      }
       return { success: true, scope, action, changed }
     }
     if (action === 'edit') {
@@ -270,6 +314,13 @@ export async function updateWorkstage(
       }
     }
     const changed = await completeWorkStage(deps, scope, stageKey, revision)
+    if (changed) {
+      notice(deps, exec, 'stage-done: ' + stageKey,
+        '<workprocess_stage_done>\n阶段 ' + stageKey + ' 已收口。\n'
+        + '下一阶段由驱动器在空闲边界开工，并在需要时提醒你规划它的任务——'
+        + '你不要越阶段开工，也不要提前给后续阶段建任务。\n'
+        + '</workprocess_stage_done>')
+    }
     return { success: true, scope, stage_key: stageKey, action, close_policy: closePolicy, changed }
   })
 }
@@ -324,6 +375,7 @@ export async function createWorktask(
     return {
       success: true, scope, stage_key: stageKey, changed,
       ...(changed && created !== undefined ? { task_id: created.id, revision: created.revision } : {}),
+      next_step: '直接动手做这个任务；做完调 update_worktask(action: "complete")。不要顺手把后续阶段的任务也建满。',
     }
   })
 }
@@ -382,6 +434,15 @@ export async function updateWorktask(
           : act === 'complete' ? await completeWorkTask(deps, scope, taskId, revision)
             : act === 'clear' ? await clearWorkTask(deps, scope, taskId, revision)
               : await blockWorkTask(deps, scope, taskId, { code: reasonCode, message: reason }, revision)
+    // **收尾通告**（对齐宿主 goal 的 `<goal_complete>`）：任务刚达成的那一拍就说清"到此为止"。
+    if (act === 'complete' && changed) {
+      notice(deps, exec, 'task-complete: ' + taskId,
+        '<workprocess_task_complete>\n任务 ' + taskId + ' 已达成（终态，不可逆）。\n'
+        + '本轮到此为止：不要顺手开新任务、不要替后续阶段建任务，也不要自己给阶段落 done'
+        + '（收口由人确认或由驱动器按策略自动落）。\n'
+        + '需要继续的话，驱动器会在空闲边界投下一轮；先把这一步的结果说清楚给用户。\n'
+        + '</workprocess_task_complete>')
+    }
     return { ...base, success: true, changed }
   })
 }

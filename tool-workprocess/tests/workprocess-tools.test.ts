@@ -119,7 +119,10 @@ describe('层1 处理器 · 阶段', () => {
     })
 
     const created = await createWorkstage(deps, { scope: 'ws-a', objective: '把模型发上线', stages: STAGES })
-    expect(created).toEqual({ success: true, scope: 'ws-a', created: true, changed: true })
+    expect(created).toMatchObject({ success: true, scope: 'ws-a', created: true, changed: true })
+    // 回执自带"下一步归谁"：开工是驱动器的动作（模型不该去找开工动词）
+    expect(created).toMatchObject({ current_stage: 'prep', allows_start: true })
+    expect(String(created.next_step)).toContain('驱动器')
 
     const got = await getWorkstage(deps, { scope: 'ws-a' })
     expect(got.success).toBe(true)
@@ -273,6 +276,59 @@ describe('层1 处理器 · 阶段', () => {
     expect(String((await updateWorkstage(deps, { scope: 'ws-a', stage_key: 'prep', action: 'start' })).error))
       .toContain('阶段开工是驱动器的动作')
     expect(String((await updateWorkstage(deps, { scope: 'ws-a', action: 'done' })).error)).toContain('缺少 stage_key')
+  })
+})
+
+describe('工具通告（deferContext 适配：把"下一步"说在决策点上）', () => {
+  /** 收集通告的 deps（模拟组合根接上的 deferNotice）。 */
+  function noticedDeps(human = false) {
+    const notices: Array<{ summary: string; text: string }> = []
+    const deps = { ...depsOf({ 'ws-a': { updatedAt: 1 } }, human), deferNotice: (_e: unknown, n: { summary: string; text: string }) => { notices.push(n) } }
+    return { deps, notices }
+  }
+
+  it('task-complete 发出收尾通告（到此为止 / 别开新任务 / 别自己收口）', async () => {
+    const { deps, notices } = noticedDeps()
+    await createWorkstage(deps, { scope: 'ws-a', objective: 'x', stages: STAGES })
+    await createWorktask(deps, { scope: 'ws-a', stage_key: 'prep', objective: '清洗数据' })
+    expect(notices).toHaveLength(0)                       // 建任务不发通告
+    await updateWorktask(deps, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'complete' })
+    expect(notices).toHaveLength(1)
+    expect(notices[0].summary).toContain('task-complete: wt:prep:1')
+    expect(notices[0].text).toContain('到此为止')
+    expect(notices[0].text).toContain('不要顺手开新任务')
+  })
+
+  it('幂等重放（changed:false）不发通告：没发生的事不该被说成发生了', async () => {
+    const { deps, notices } = noticedDeps()
+    await createWorkstage(deps, { scope: 'ws-a', objective: 'x', stages: STAGES })
+    await createWorktask(deps, { scope: 'ws-a', stage_key: 'prep', objective: '清洗数据' })
+    await updateWorktask(deps, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'complete' })
+    notices.length = 0
+    await updateWorktask(deps, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'complete' })
+    expect(notices).toHaveLength(0)
+  })
+
+  it('stage-done / discard 各有收尾通告（说清"下一段归驱动器"与"不可逆"）', async () => {
+    const { deps, notices } = noticedDeps(true)
+    await createWorkstage(deps, { scope: 'ws-a', objective: 'x', stages: STAGES })
+    await startWorkStage(deps, 'ws-a', 'prep')            // 开工是驱动器的动作，测试里直接落
+    await createWorktask(deps, { scope: 'ws-a', stage_key: 'prep', objective: '清洗数据' })
+    await updateWorktask(deps, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'complete' })
+    notices.length = 0
+    await updateWorkstage(deps, { scope: 'ws-a', stage_key: 'prep', action: 'done' })
+    expect(notices[0].text).toContain('下一阶段由驱动器')
+    notices.length = 0
+    await updateWorkstage(deps, { scope: 'ws-a', action: 'discard' })
+    expect(notices[0].text).toContain('不可逆')
+  })
+
+  it('没接通告口（缺省）⇒ 一个字节都不发，工具照常成功', async () => {
+    const deps = depsOf({ 'ws-a': { updatedAt: 1 } })
+    await createWorkstage(deps, { scope: 'ws-a', objective: 'x', stages: STAGES })
+    await createWorktask(deps, { scope: 'ws-a', stage_key: 'prep', objective: '清洗数据' })
+    expect(await updateWorktask(deps, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'complete' }))
+      .toMatchObject({ success: true, changed: true })
   })
 })
 

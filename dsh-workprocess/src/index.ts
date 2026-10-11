@@ -43,7 +43,7 @@ export type { RoundDelivery } from './driver.js'
 export const name = 'workprocess'
 
 /** 装配依赖：会话/agent 面（授权 + 投递）、工具注册面、会话投影（回合边界）、存储域（归属记录）。 */
-export const inject = ['agents', 'tools', 'sessionProjections', 'storageDomain']
+export const inject = ['agents', 'tools', 'sessionProjections', 'storageDomain', 'systemPrompt']
 
 /** 装载层配置（`cordis.patch.yml` 的 config 段）。 */
 export interface WorkprocessConfig {
@@ -85,6 +85,11 @@ interface PluginCtx extends AuthorityHostCtx, StorageDomainCtx {
   on(event: 'agent/status', cb: (payload: { agent?: HostAgent; status?: string }) => void | Promise<void>): unknown
   /** 提供服务面（宿主 cordis：`ctx.provide(name, value)`；消费方按名注入）。 */
   provide(name: string, value: unknown): unknown
+  /** 系统提示词面（注册常驻策略段；缺省 = 不注册，插件其余面照常）。 */
+  readonly systemPrompt?: {
+    section(section: { name: string; order: number; text: string }): unknown
+    getSectionOrder(name: string): number
+  }
 }
 
 /** 装配：打开归属记录域 + 注册六个工具 + 挂回合边界驱动（含续跑投递）。 */
@@ -96,6 +101,9 @@ export function apply(ctx: PluginCtx, config?: WorkprocessConfig): void {
     // 归属缺省 = **本会话**（一个会话一条流程；多流程并存时要显式给 scope）。
     defaultScope: (exec) => agentOf(exec)?.session?.id,
     resolveAuthority: authorityResolverOf(ctx),
+    // 工具回执之后的**通告**（宿主 `exec.deferContext`）：落成一条自署 `work-tool` 的消息，
+    // 附在该次 tool/result 之后（离决策点最近）。
+    deferNotice: (exec, n) => deferNoticeOf(exec, n),
   }
   for (const entry of WORK_TOOL_REGISTRY) {
     const build = WORK_TOOL_FACTORIES[entry.handler as keyof typeof WORK_TOOL_FACTORIES]
@@ -104,6 +112,18 @@ export function apply(ctx: PluginCtx, config?: WorkprocessConfig): void {
   // 把"读 + 人可做的三种干预"提供成服务：命令行包（dsh-command-workprocess）只消费它，
   // 不自己再开一次存储域（同名域重复 open 是响亮拒绝），也不绕内核改状态。
   ctx.provide('workprocess', createWorkprocessService(store))
+  // **常驻策略段**（对齐宿主 `dsh-tool-goal` 的 `ctx.systemPrompt.section`）：
+  // 工具自述只在模型"打算调工具"时被读到，而"阶段串行 / 谁能落 done / 回合预算"这些纪律
+  // 得在每轮都在场。槽位紧跟 TOOL_GOAL（同族工具，顺序数相同由名字定先后）。
+  try {
+    ctx.systemPrompt?.section({
+      name: 'tool:workprocess',
+      order: ctx.systemPrompt.getSectionOrder('TOOL_GOAL'),
+      text: WORK_POLICY_TEXT,
+    })
+  } catch (err) {
+    console.warn('[workprocess] 策略段注册失败（工具面照常）：' + String((err as Error)?.message ?? err))
+  }
   if (config?.tick !== false) {
     const driveCtx: DriveCtx = {
       drive: config?.drive === true,
@@ -315,4 +335,33 @@ export async function deliverAskRound(
     },
   }))
   return delivery
+}
+
+/** 常驻策略段（模型面）：工具自述读不到的那几条纪律，放这里每轮都在场。 */
+export const WORK_POLICY_TEXT = [
+  '## workprocess（两层工作模型：流程 → 阶段 → 任务）',
+  '- **阶段严格串行**：前序阶段全部收口后才轮到下一阶段；不要越阶段开工，也不要提前给后续阶段建任务。',
+  '- **阶段开工不是你的动作**：串行门放行后由驱动器在空闲边界落；你只管任务（`create_worktask` / `update_worktask`）。',
+  '- **每个阶段开始时驱动器会提醒你规划**该阶段的任务（1–3 个、写成可核验的陈述）。',
+  '- **收口策略决定谁落 done**：`human`（缺省）——你**只提议**，由人确认（agent 自写会被拒）；',
+  '  `auto`——任务全达成后由驱动器自动收口，你不要自己写。',
+  '- **任务有回合预算**（`max_rounds`，缺省由配置兜底）：到顶会落盘 block，等人裁；不要靠反复重试绕过它。',
+  '- 自动续跑回合会以一条带 `<workprocess_round>` / `<workprocess_plan>` / `<workprocess_ask>` 语义的',
+  '  指令出现（来源自署 `work`）：只做那一轮说的事，做完停手，下一轮由驱动器投递。',
+].join('\n')
+
+/**
+ * 把工具通告落成一条**自署来源**的消息，附在该次工具回执之后（宿主 `exec.deferContext`）。
+ *
+ * 【必须方法调用】`exec.deferContext(...)`——摘成变量再调会让 `this` 丢（与 `followup` 同款的坑）。
+ * 【来源自署】`kind: 'work-tool'`：既不是人（`user`）也不是自动回合（`work`），
+ * 授权面据此不授任何权限——通告只是说明，不是授权凭据。
+ */
+export function deferNoticeOf(exec: unknown, notice: { summary: string; text: string }): void {
+  const surface = exec as { deferContext?: (message: unknown) => void } | undefined
+  if (typeof surface?.deferContext !== 'function') return
+  surface.deferContext(createUserMessage({
+    content: [{ type: 'text', text: notice.text }],
+    source: { kind: 'work-tool', form: 'notice', summary: notice.summary },
+  }))
 }

@@ -24,6 +24,21 @@ workprocess 的**工具面**：两层各三工具（登记表 `src/registry.ts` 
    其余口径一致：`edit` / `resume` 需人直接发起，`pause` / `block` / `complete` 可由 agent 发起；
    阶段收口 `stage_done` 多一条**按阶段策略分流**（`human` 人工确认 / `auto` 自动收口）。
 
+## 模型面指令（对齐宿主 `dsh-tool-goal` 的另两种提示词）
+
+宿主 goal 有三处模型面文本：**回合投递**（驱动包）、**常驻策略段**（工具包 `ctx.systemPrompt.section`）、
+**工具回执之后的通告**（工具包 `exec.deferContext`，如 `<goal_complete>`）。本仓对齐后两处：
+
+| 位置 | 给模型什么 |
+|---|---|
+| `create_workstage` / `create_worktask` 回执 | 下一步归谁：**开工是驱动器的动作**；任务建完直接做 |
+| `update_worktask complete` ⇒ 通告 | `<workprocess_task_complete>`：本轮到此为止、不要顺手开新任务、不要替阶段收口 |
+| `update_workstage done` ⇒ 通告 | `<workprocess_stage_done>`：下一阶段由驱动器开工与规划，不许越阶段 |
+| `update_workstage discard` ⇒ 通告 | `<workprocess_discarded>`：不可逆，别再引用旧阶段键 / 任务 id |
+
+通告经 `WorkToolDeps.deferNotice` 端口发出：本面**只产出「摘要 + 文本」**，消息形状与来源由组合根落成
+（本面不 import 宿主 llm 包）。幂等重放（`changed:false`）**不发**通告——没发生的事不说成发生了。
+
 ## 授权口径（对齐宿主 dsh 的 update 政策）
 
 - **真人专属**：`task_edit`（改目标——对齐宿主 dsh「edit, pause, and resume require a direct top-level human request」）、
@@ -56,5 +71,5 @@ workprocess 的**工具面**：两层各三工具（登记表 `src/registry.ts` 
 ## 测试
 
 ```bash
-cd workprocess/tool-workprocess && pnpm test   # 25 条：登记表自洽 / 授权口径（含收口策略与 process_edit）/ 六工具行为
+cd workprocess/tool-workprocess && pnpm test   # 29 条：登记表自洽 / 授权口径（含收口策略与 process_edit）/ 六工具行为 / 工具通告（deferContext 适配）
 ```

@@ -52,6 +52,10 @@ interface FakeHost {
   store: ReturnType<typeof storageDomainStoreOf>
   hooks: string[]
   sent: Sent[]
+  /** `exec.deferContext` 收下的通告（工具回执之后的那条消息）。 */
+  deferred: unknown[]
+  /** 注册进 systemPrompt 的策略段。 */
+  policySections: Array<{ name: string; order: number; text: string }>
   session: { id: string; snapshotEvents(): readonly HostEvent[] }
   domain: ReturnType<typeof fakeDomainFacility>
   /** 投一条会话事件（走插件真挂上的 handler，等它跑完）。 */
@@ -81,6 +85,8 @@ function fakeHost(): FakeHost {
   }
   const tools: Record<string, ToolLike> = {}
   const hooks: string[] = []
+  const deferred: unknown[] = []
+  const policySections: Array<{ name: string; order: number; text: string }> = []
   const domain = fakeDomainFacility()
   const ctx = {
     agents: { get: (id: string) => (id === agent.id ? agent : undefined), currentInitiator: () => agent },
@@ -93,9 +99,14 @@ function fakeHost(): FakeHost {
     },
     // 宿主 cordis 的服务注册口（本插件把 `ctx.workprocess` 提供出去，命令行包消费它）。
     provide: (serviceName: string, value: unknown) => { (ctx as Record<string, unknown>)[serviceName] = value; return undefined },
+    // 系统提示词面（策略段）：槽位数与宿主 SECTION_ORDERS.TOOL_GOAL 一致。
+    systemPrompt: {
+      section: (section: { name: string; order: number; text: string }) => { policySections.push(section); return (): void => {} },
+      getSectionOrder: (name: string) => (name === 'TOOL_GOAL' ? 2400 : 0),
+    },
   }
   return {
-    ctx: ctx as never, tools, hooks, sent, session, domain,
+    ctx: ctx as never, tools, hooks, sent, deferred, policySections, session, domain,
     store: storageDomainStoreOf(ctx as never),
     emit: async (event: unknown) => { for (const h of handlers.get('session/event') ?? []) await h(session, event) },
     emitStatus: async (next: string) => {
@@ -106,7 +117,8 @@ function fakeHost(): FakeHost {
     setEvents: (next) => { events = next },
     setOpenTurn: (start) => { openTurnStartSeq = start },
     record: (scope = 'session-1') => domain.recordsOf('processes').get(scope) as never,
-    exec: () => ({ agent }),
+    // 宿主 `ToolRunContext.deferContext`：把通告收在这里（真宿主会附到 tool/result 之后）。
+    exec: () => ({ agent, deferContext: (message: unknown) => { deferred.push(message) } }),
   }
 }
 
@@ -135,7 +147,7 @@ async function idleTick(h: FakeHost = host): Promise<void> {
 describe('插件装配面', () => {
   it('声明 name / inject，并按登记表注册六个工具（名字逐字一致）', () => {
     expect(name).toBe('workprocess')
-    expect(inject).toEqual(['agents', 'tools', 'sessionProjections', 'storageDomain'])
+    expect(inject).toEqual(['agents', 'tools', 'sessionProjections', 'storageDomain', 'systemPrompt'])
     expect(Object.keys(host.tools).sort()).toEqual(WORK_TOOL_REGISTRY.map((e) => e.toolName).sort())
     expect(host.hooks).toEqual(['session/event', 'agent/status'])
   })
@@ -379,5 +391,40 @@ describe('收口确认轮（任务全达成 + 策略 human ⇒ 请人拍板，�
     const text = JSON.stringify(h.sent[0].content)
     expect(text).toContain('流程收口待人工判断')
     expect(text).not.toContain('阶段收口待人工确认')
+  })
+})
+
+describe('模型面指令（对齐宿主 tool-goal：策略段 + 工具回执之后的通告）', () => {
+  it('注册常驻策略段（tool:workprocess，槽位紧随 TOOL_GOAL）——工具自述之外的那几条纪律', () => {
+    expect(host.policySections).toHaveLength(1)
+    expect(host.policySections[0].name).toBe('tool:workprocess')
+    expect(host.policySections[0].order).toBe(2400)
+    expect(host.policySections[0].text).toContain('阶段严格串行')
+    expect(host.policySections[0].text).toContain('只提议')
+    expect(host.policySections[0].text).toContain('max_rounds')
+  })
+
+  it('任务达成 ⇒ 把收尾通告附在回执之后（自署 work-tool：**不是人**，不冒领授权）', async () => {
+    await call('create_workstage', { objective: 'x', stages: [{ key: 'prep', statement: '准备' }] })
+    await call('create_worktask', { stage_key: 'prep', objective: '清洗数据' })
+    await call('update_worktask', { task_id: 'wt:prep:1', action: 'complete' })
+
+    expect(host.deferred).toHaveLength(1)
+    const message = host.deferred[0] as { content: Array<{ text: string }>; source: Record<string, unknown> }
+    expect(message.content[0].text).toContain('到此为止')
+    expect(message.source).toMatchObject({ kind: 'work-tool', form: 'notice' })
+    expect(String(message.source.summary)).toContain('wt:prep:1')
+    // 授权面只认 `user`（人）与 `work`（自动回合）：这条通告两边都不是 ⇒ 不授任何权限。
+    expect(message.source.kind).not.toBe('user')
+    expect(message.source.kind).not.toBe('work')
+  })
+
+  it('幂等重放不发通告：没发生的事不被说成发生了', async () => {
+    await call('create_workstage', { objective: 'x', stages: [{ key: 'prep', statement: '准备' }] })
+    await call('create_worktask', { stage_key: 'prep', objective: '清洗数据' })
+    await call('update_worktask', { task_id: 'wt:prep:1', action: 'complete' })
+    host.deferred.length = 0
+    await call('update_worktask', { task_id: 'wt:prep:1', action: 'complete' })
+    expect(host.deferred).toHaveLength(0)
   })
 })

@@ -24,7 +24,7 @@
 | `decideWorkRound(input)` | 纯决策树（零 I/O，可穷举单测）；结论穷尽十态 |
 | `renderWorkRoundPrompt(input)` | 纯提示词渲染：流程目标 / 当前阶段与判据 / 本轮任务 / 边界（含"不越阶段开工"与**收口策略**写的"请人确认 / 自动收口"）/ 停手条件 |
 | `renderWorkPlanPrompt(input)` | **阶段规划轮**提示词：本阶段开工了却没任务 ⇒ 请 agent 用 `create_worktask` 给本阶段建任务并直接动手 |
-| `renderWorkAskPrompt(input)` | **收口确认轮**提示词：任务全达成（策略 `human`）或全阶段 done ⇒ 请 agent 向人拍板（`ask_user_question`），并给回落章路径 |
+| `renderWorkAskPrompt(input)` | **收口确认轮**提示词（三种投递都包在 `<workprocess_round>` / `<workprocess_plan>` / `<workprocess_ask>` 标签里，与宿主 `<goal_round>` 同款：便于模型分清「自动回合」与「人说的话」）：任务全达成（策略 `human`）或全阶段 done ⇒ 请 agent 向人拍板（`ask_user_question`），并给回落章路径 |
 | 契约类型 | `RoundScopeFacts` / `GateFacts` / `WorkFacts` / `StageFacts` / `TaskFacts` / `DecideInput` / `RoundDecision` |
 
 ## 决策顺序（顺序即纪律）

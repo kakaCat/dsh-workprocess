@@ -55,7 +55,7 @@ workProcess  id=wp:<scope>   revision（两层的写共用同一个 CAS）
 ```bash
 pnpm install
 pnpm typecheck
-pnpm test          # 132 条：内核 45 / 驱动 26 / 工具 25 / 领域插件 23 / 命令行插件 13（含端到端）
+pnpm test          # 139 条：内核 45 / 驱动 26 / 工具 29 / 领域插件 26 / 命令行插件 13（含端到端）
 pnpm build         # 出 dist/（宿主加载的是 JS，不是 TS）
 ```
 

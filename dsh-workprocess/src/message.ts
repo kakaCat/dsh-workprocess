@@ -28,9 +28,24 @@ export interface WorkRoundMessageSource {
   readonly round?: number
 }
 
+/**
+ * **工具通告**的来源载荷（对齐宿主 `dsh-tool-goal` 的 `{ kind: 'tool-goal', form: 'notice', summary }`）。
+ *
+ * 与 `work` 分开是**有意的**：`work` 是"自动续跑回合"（授权面据此判自治），
+ * 而工具通告只是挂在某次工具回执之后的说明——**它不该授予任何人任何权限**
+ * （`kind` 既不是 `user` 也不是 `work`，授权面解析结果保持保守侧）。
+ */
+export interface WorkToolNoticeSource {
+  readonly kind: 'work-tool'
+  readonly form: 'notice'
+  readonly summary: string
+}
+
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
     /** workprocess 的自动续跑回合（**不是人**）。 */
     work: WorkRoundMessageSource
+    /** workprocess 工具回执之后的通告（附在 tool/result 之后；不授任何权限）。 */
+    'work-tool': WorkToolNoticeSource
   }
 }

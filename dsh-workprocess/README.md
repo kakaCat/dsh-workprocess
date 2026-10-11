@@ -15,10 +15,12 @@ workprocess 的**插件入口**（组合根）：把「内核 + 驱动 + 工具�
 ## 装配
 
 ```
-inject = ['agents', 'tools', 'sessionProjections', 'storageDomain']
+inject = ['agents', 'tools', 'sessionProjections', 'storageDomain', 'systemPrompt']
 apply(ctx, config) ⇒
   · 打开归属记录域（storage domain `workprocess`）
   · 六个工具进 ctx.tools.register（get_/create_/update_ × workstage/worktask）
+  · 注册**常驻策略段**（`ctx.systemPrompt.section('tool:workprocess')`：阶段串行 / 谁能落 done / 回合预算）
+  · 给工具面接上**通告口**（`deferNotice` ⇒ 宿主 `exec.deferContext`：把"下一步"说在决策点上）
   · 归属缺省 = **本会话**（不传 scope 时用 agent.session.id；多流程并存仍可显式给 scope）
   · ctx.on('session/event') ⇒ 空闲边界一拍：记回合 → 驱动 → （可选）投递下一轮
 ```
@@ -115,7 +117,7 @@ ln -sfn <repo>/dsh-workprocess ~/.dsh/profiles/desktop/node_modules/dsh-workproc
 ## 测试
 
 ```bash
-pnpm test   # 全仓 132 条；本包 23 条：装配面 / 域声明与内核校验 / 归属缺省 / 真人判定 /
+pnpm test   # 全仓 139 条；本包 26 条：装配面 / 域声明与内核校验 / 归属缺省 / 真人判定 /
             #   空闲边界（开工·auto 收口·running 不动手）/ 续跑投递（自署来源·去重·上限刹车）/ **阶段规划轮** / **收口确认轮** /
             #   服务面 ctx.workprocess（view / pauseActive / resumePaused / discard 幂等）
 ```

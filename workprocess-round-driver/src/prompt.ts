@@ -44,7 +44,7 @@ export function renderWorkRoundPrompt(input: WorkRoundPromptInput): string {  co
   const closeLine = stageClosePolicyOf(input.stage) === 'auto'
     ? '2. 本阶段收口（stage-done）策略是 `auto`：任务全达成后**由驱动器自动收口**，你不要自写完成。'
     : '2. 本阶段收口（stage-done）是**人工确认**（策略 `human`）：判据齐了请人确认，不要自写完成。'
-  return [
+  return wrap('workprocess_round', [
     '# 工作轮次（workprocess）',
     '',
     '流程目标：' + input.processObjective,
@@ -66,7 +66,7 @@ export function renderWorkRoundPrompt(input: WorkRoundPromptInput): string {  co
     '## 停手条件',
     '- 判据未齐又推不动：block 任务并说明被什么挡住（等人/等上游）。',
     '- 任务已达成：task-complete 后停手，不要顺手开新任务。',
-  ].join('\n')
+  ])
 }
 
 /** 阶段规划轮的输入（本阶段已开工但还没有任务）。 */
@@ -95,7 +95,7 @@ export function renderWorkPlanPrompt(input: WorkPlanPromptInput): string {
   const criteria = input.stage.doneCriteria.length === 0
     ? ['（本阶段未登记达成判据——按阶段陈述拆任务）']
     : input.stage.doneCriteria.map((c) => '- ' + c)
-  return [
+  return wrap('workprocess_plan', [
     '# 阶段规划轮（workprocess）',
     '',
     '流程目标：' + input.processObjective,
@@ -115,7 +115,7 @@ export function renderWorkPlanPrompt(input: WorkPlanPromptInput): string {
     '## 边界',
     '1. 不越阶段开工（前一阶段全部达成后才轮到下一阶段）。',
     '2. 规划是第 ' + String(input.round) + ' 轮：若本阶段确实无事可做，请明确说明并停手等人（不要反复空转）。',
-  ].join('\n')
+  ])
 }
 
 /** **收口确认轮**的输入（阶段级 / 流程级两种）。 */
@@ -143,7 +143,7 @@ export interface WorkAskPromptInput {
  */
 export function renderWorkAskPrompt(input: WorkAskPromptInput): string {
   if (input.kind === 'close' || input.stage === undefined) {
-    return [
+    return wrap('workprocess_ask', [
       '# 流程收口待人工判断（workprocess）',
       '',
       '流程目标：' + input.processObjective,
@@ -153,13 +153,13 @@ export function renderWorkAskPrompt(input: WorkAskPromptInput): string {
       '请把这件事摆到人面前并等他回答（用 `ask_user_question` 问一句，或直接开口说清）：',
       '- 目标达成了没有？还有没有要补做的事？',
       '人要说还要做：用 `create_workstage` 替换阶段表（或新起一条流程），别自己宣布完成。',
-    ].join('\n')
+    ])
   }
   const stage = input.stage
   const criteria = stage.doneCriteria.length === 0
     ? ['（本阶段未登记达成判据——按阶段陈述与人核对）']
     : stage.doneCriteria.map((c) => '- ' + c)
-  return [
+  return wrap('workprocess_ask', [
     '# 阶段收口待人工确认（workprocess）',
     '',
     '流程目标：' + input.processObjective,
@@ -181,5 +181,15 @@ export function renderWorkAskPrompt(input: WorkAskPromptInput): string {
     '## 边界',
     '- 不要在这一轮里直接调 `update_workstage done`：这一轮不是人发起的，落了也会被拒。',
     '- 人也可能改主意（把该阶段改成 `close_policy: auto`，由驱动器自动收口）——按人说的办。',
-  ].join('\n')
+  ])
+}
+
+/**
+ * 把一段提示词包进标签（对齐宿主 `goal-round-driver` 的 `<goal_round>`）。
+ *
+ * 【为什么值得包】三条投递（轮次 / 规划 / 收口确认）**都不是人打的字**——标签让模型一眼分清
+ * "这是我被自动投递的一轮"与"人在跟我说话"，也让常驻策略段能按标签名引用它们。
+ */
+function wrap(tag: string, lines: readonly string[]): string {
+  return '<' + tag + '>\n' + lines.join('\n') + '\n</' + tag + '>'
 }
