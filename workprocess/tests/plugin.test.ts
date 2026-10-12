@@ -357,8 +357,11 @@ describe('续跑投递（drive）', () => {
     expect(h.sent).toHaveLength(1)
     await h.emit(roundAccepted(1))          // 宿主侧：这条回合消息被接受
     expect(h.record()?.rounds?.started).toBe(1)
-    await h.emitStatus('idle')              // 到上限 ⇒ 落盘 block（不再投第 2 轮）
-    expect(h.sent).toHaveLength(1)
+    await h.emitStatus('idle')              // 到上限 ⇒ 落盘 block（不再投第 2 轮任务）
+    // 但**多投一条终局收束轮**：机器停住了要人说一句（goal 的 `<goal_blocked>` 同款）。
+    expect(h.sent).toHaveLength(2)
+    expect(JSON.stringify(h.sent[1])).toContain('workprocess_blocked')
+    expect(JSON.stringify(h.sent[1])).toContain('round-limit')
     const tasks = await h.tools.get_worktask.execute({ stage_key: 'prep' }, h.exec())
     expect(tasks.tasks).toMatchObject([{ id: 'wt:prep:1', phase: 'blocked' }])
     expect(String((tasks.tasks as Array<{ blocked_message?: string }>)[0].blocked_message)).toContain('达到上限')
@@ -462,13 +465,16 @@ describe('收口确认轮（任务全达成 + 策略 human ⇒ 请人拍板，�
     expect(h.sent).toHaveLength(1)
   })
 
-  it('策略 auto：驱动器自己收口，**不**投阶段确认轮；缺省 close:auto ⇒ 流程顺手收口', async () => {
+  it('策略 auto：驱动器自己收口，**不**投阶段确认轮（只投一条终局收束轮）；缺省 close:auto ⇒ 流程顺手收口', async () => {
     const h = await seededDone('auto')
     await h.emitStatus('idle')
     // 阶段被驱动器自动收口（没问人）
     expect((await h.tools.get_workstage.execute({}, h.exec())).stages).toMatchObject([{ state: 'done' }])
-    // 缺省 close:'auto'：全阶段 done ⇒ 驱动器直接落 process-close——**不投**"流程级请判轮"
-    expect(h.sent).toHaveLength(0)
+    // 缺省 close:'auto'：全阶段 done ⇒ 驱动器直接落 process-close——**不投**"流程级请判轮"。
+    // 但终局收束轮要有（收口是静默写；不投这一轮，人在对话里分不清"跑完"与"卡死"）。
+    expect(h.sent).toHaveLength(1)
+    expect(JSON.stringify(h.sent[0])).toContain('workprocess_done')
+    expect(JSON.stringify(h.sent[0])).not.toContain('workprocess_ask')
     expect((h.record()?.workProcess as { closedAt?: number }).closedAt).toBeDefined()
   })
 })
@@ -582,16 +588,17 @@ describe('流程收口（close: auto 缺省 / human 显式）', () => {
     return local
   }
 
-  it('close: auto（缺省）：最后一段 done ⇒ 一个空闲边界内收口 stage + 落 process-close，不再投任何轮', async () => {
+  it('close: auto（缺省）：最后一段 done ⇒ 收口 stage + 落 process-close + 投一条收束轮（把"跑完了"说出口）', async () => {
     const h = await seededFinished()
     await h.emitStatus('idle')
-    expect(h.sent).toHaveLength(0)                        // 不问人、不投请判轮
+    expect(h.sent).toHaveLength(1)                        // 不问人；但投一条终局收束轮
+    expect(JSON.stringify(h.sent[0])).toContain('workprocess_done')
     expect(processOf(h).closedAt).toBeDefined()          // 终止水印落盘
     expect(processOf(h).stages[0].state).toBe('done')
     // 收口后再空闲：hold('process-closed')，零写入零投递
     const writes = h.domain.writes.length
     await h.emitStatus('idle')
-    expect(h.sent).toHaveLength(0)
+    expect(h.sent).toHaveLength(1)
     expect(h.domain.writes.length).toBe(writes)
   })
 

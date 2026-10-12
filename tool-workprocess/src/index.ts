@@ -39,6 +39,8 @@ export const WORK_POLICY_TEXT = [
   '  会被拒（真人直接发起不受此限）。到顶被内核落 block 之后，恢复要人来：`update_worktask action=resume`。',
   '- 自动续跑回合会以一条带 `<workprocess_round>` / `<workprocess_plan>` / `<workprocess_ask>` 语义的',
   '  指令出现（来源自署 `work`）：只做那一轮说的事，做完停手，下一轮由驱动器投递。',
+  '- **收口是写库、不投轮**：所以终局会专门投一条 `<workprocess_done>`（流程落幕）或',
+  '  `<workprocess_blocked>`（停住等人）让你**给用户说一句结束语**——那一轮只说话、不要再调工具。',
   '- **续跑许可是耐久的**（`get_workstage` 回执里的 `activation`）：会话从盘上恢复（宿主重启）后',
   '  驱动器会自动把它置为 `disarmed` 并停手；**人说"继续 / 接着跑"时**，你调',
   '  `update_workstage action=arm` 把许可放回去（真人专属，agent 不能自己放行自己）。',

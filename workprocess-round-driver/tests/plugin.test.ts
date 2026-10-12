@@ -186,6 +186,21 @@ describe('驱动器插件：宿主 goal-round-driver 同款设计', () => {
     expect(h.disarms).toEqual([])
   })
 
+  it('流程收口（全阶段 done）⇒ 投终局收束轮，让"跑完了"在对话里看得见', async () => {
+    const h = harness({
+      process: {
+        id: 'wp:session-1', revision: 9, objective: '把数据洗干净',
+        stages: [{ key: 'prep', statement: '准备', doneCriteria: ['就绪'], state: 'done', tasks: [] }],
+      },
+    })
+    apply(h.ctx, { drive: true })
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(1)                       // 收口是写库，但必须有一句话
+    const text = JSON.stringify(h.sent[0])
+    expect(text).toContain('workprocess_done')
+    expect(text).toContain('不要再调任何工具')
+  })
+
   it('tick:false ⇒ 一条监听都不挂（等于没装驱动器）', () => {
     const h = harness()
     apply(h.ctx, { tick: false })

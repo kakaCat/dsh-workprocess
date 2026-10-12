@@ -185,6 +185,64 @@ export function renderWorkAskPrompt(input: WorkAskPromptInput): string {
   ])
 }
 
+/** **终局收束轮**的输入：流程收口（complete）或停住等人（blocked）。 */
+export interface WorkWrapupPromptInput {
+  /** 层0：流程目标。 */
+  readonly processObjective: string
+  /** `complete` = 全阶段收口、流程落幕；`blocked` = 机器停住了，等人裁。 */
+  readonly kind: 'complete' | 'blocked'
+  /** 已收口的阶段（收束语里报账用）。 */
+  readonly doneStages?: readonly { readonly key: string; readonly statement: string }[]
+  /** `blocked` 的原因（`code: message`）。 */
+  readonly blockedReason?: string
+}
+
+/**
+ * **终局收束轮**：机器能做的都做完了（或停住了）⇒ 请 agent 给用户写结束语。
+ *
+ * 【为什么必须有这一轮】阶段收口与流程收口都是**静默写**：不投轮、对话里没有任何痕迹。
+ * 于是"流程跑完了"在人看来与"卡死了"一模一样（真机两次被误判成 bug）。
+ * 宿主 `dsh-goal-round-driver` 的 `wrapup` 模块解决的就是这件事（`<goal_complete>` /
+ * `<goal_blocked>`：替换原来的硬停轮，让模型在收尾前仍对用户说一句话）——本函数是它的同款。
+ *
+ * 【不消耗任务回合预算】它不带 `round`：这不是"再跑一轮任务"，是收尾。
+ */
+export function renderWorkWrapupPrompt(input: WorkWrapupPromptInput): string {
+  const done = (input.doneStages ?? []).map((s) => '- `' + s.key + '`：' + s.statement)
+  if (input.kind === 'complete') {
+    return wrap('workprocess_done', [
+      '# 流程收口（workprocess）',
+      '',
+      '流程目标：' + input.processObjective,
+      ...(done.length === 0 ? [] : ['', '已收口的阶段：', ...done]),
+      '',
+      '## 现在要做的唯一一件事',
+      '这条流程**已经全部收口落幕**，本次自动续跑到此结束。请给用户写一句结束语：',
+      '- 说清**做成了什么**（对着流程目标与各阶段判据说，不要复述过程）；',
+      '- 说清**怎么验的**（跑过什么、看到什么）；',
+      '- 指出**还需要人看什么**（若有）。',
+      '',
+      '## 边界',
+      '- **不要再调任何工具**：这一轮只说话，后续工作等人下一条指令。',
+      '- 只报这一会话里真正确立的事；细节不在会话里就如实说"不确定"。',
+    ])
+  }
+  return wrap('workprocess_blocked', [
+    '# 流程停住（workprocess）',
+    '',
+    '流程目标：' + input.processObjective,
+    ...(input.blockedReason === undefined ? [] : ['', '停住的原因：' + input.blockedReason]),
+    '',
+    '## 现在要做的唯一一件事',
+    '这条流程**停住了，需要人来裁**（回合预算到顶 / 卡在外部条件 / 需要人的决定）。',
+    '请给用户写一句说明：已经做到哪一步、**具体被什么挡住**、需要人做什么才能继续。',
+    '',
+    '## 边界',
+    '- **不要再调任何工具**，也不要自己"再试一次"绕过刹车：这一轮只说话，等人裁决。',
+    '- 只报这一会话里真正确立的事；不确定就说不确定。',
+  ])
+}
+
 /**
  * 把一段提示词包进标签（对齐宿主 `goal-round-driver` 的 `<goal_round>`）。
  *

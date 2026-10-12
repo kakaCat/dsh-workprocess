@@ -10,7 +10,7 @@
 |---|---|
 | `src/index.ts` | 插件壳 + 运行时（事实投影 · 一拍 · 投递）+ 消息来源声明（`kind: 'work'`） |
 | `src/decide.ts` | 契约类型 + 决策树（**纯层**：零 I/O、零宿主依赖，可穷举单测） |
-| `src/prompt.ts` | 三种轮次的提示词渲染（纯字符串函数） |
+| `src/prompt.ts` | 四种轮次的提示词渲染（纯字符串函数）：任务轮 / 规划轮 / 收口确认轮 / **终局收束轮** |
 
 宿主那个包源码也是三个模块（`index` / `prompt` / `invariant`）——粒度一致；我们的第二模块是**决策树**
 （goal 的规则简单到能内联进 `drive()`，我们的域有阶段 × 任务相位 × 收口策略 × 回合预算 × 规划/确认轮）。
@@ -25,6 +25,7 @@
 | `agent.followup(createUserMessage(...))` + `attempt` 预约（消息身份精确比对） | 同（来源自署 `work`，绝不冒充人） |
 | `goal.activation !== 'armed'` ⇒ 一拍不推进（会话 resume 自动 disarm） | 同（读归属记录的 `rounds.activation`；`agent/created` 的 `source === 'resume'` 时落 `disarmed`） |
 | `agent/inbox/inserted｜claimed｜discarded` 竞态围栏 | 同 |
+| `wrapup` 模块：终局（complete / blocked）投一轮让模型给用户写结束语 | 同（`wrapupDeliveryOf` → `<workprocess_done>` / `<workprocess_blocked>`；收口是静默写，没有这一轮人分不清"跑完"与"卡死"） |
 | `ctx.effect(function* () { ... })` 挂监听 + `ctx.logger.warn` | 同 |
 
 数据**只经 `ctx.workprocess`**（存储域由领域插件独占打开：`storageDomain.open` 对同名域是响亮拒绝）。

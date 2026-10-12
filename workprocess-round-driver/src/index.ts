@@ -36,7 +36,7 @@ import { currentStageOf, onWorkChanged, stageAllowsStart, workprocessOf } from '
 import type { WorkProcess, WorkprocessService, WorkTask } from 'workprocess'
 import { decideWorkRound } from './decide.js'
 import type { DecideInput, GateFacts, RoundDecision, StageFacts, WorkFacts } from './decide.js'
-import { renderWorkAskPrompt, renderWorkPlanPrompt, renderWorkRoundPrompt } from './prompt.js'
+import { renderWorkAskPrompt, renderWorkPlanPrompt, renderWorkRoundPrompt, renderWorkWrapupPrompt } from './prompt.js'
 
 //#region 消息来源（仓外插件必须自己声明这一格）
 /** 续跑回合的来源载荷（进程 / 阶段 / 任务 / 修订 / 回合号：授权面按它精确匹配）。 */
@@ -246,6 +246,34 @@ export function planDeliveryOf(
 }
 
 /**
+ * 造**终局收束轮**的载荷：流程已收口（complete）或停住等人（blocked）⇒ 请 agent 写结束语。
+ *
+ * 【为什么静默不行】阶段/流程收口都是写库、不投轮 —— 对话里毫无痕迹，"跑完了"与"卡死了"在人看来
+ * 一模一样（真机两次被误判）。宿主 goal 的 `wrapup` 模块就是为这件事存在的，本函数是它的同款。
+ */
+export function wrapupDeliveryOf(
+  process: WorkProcess, kind: 'complete' | 'blocked', blockedReason?: string,
+): RoundDelivery | undefined {
+  const doneStages = process.stages
+    .filter((stage) => stage.state === 'done')
+    .map((stage) => ({ key: stage.key, statement: stage.statement }))
+  if (kind === 'complete' && process.closedAt === undefined && process.stages.some((s) => s.state !== 'done')) {
+    return undefined   // 还没全收口：不是"落幕"，别报喜
+  }
+  return {
+    processId: process.id,
+    stageKey: '',
+    revision: process.revision,
+    prompt: renderWorkWrapupPrompt({
+      processObjective: process.objective,
+      kind,
+      ...(doneStages.length === 0 ? {} : { doneStages }),
+      ...(blockedReason === undefined ? {} : { blockedReason }),
+    }),
+  }
+}
+
+/**
  * 造**收口确认轮**的载荷：到这一步机器能做的都做完了，剩下的是人的判断。
  * 与规划轮同理：来源自署 `work`、**不带 `round`**（不消耗任务预算）。
  */
@@ -316,7 +344,7 @@ const FIBER_ACTIVE = 2
 
 /** 一次投递的**预约**：消息身份精确比对（竞态围栏靠它，绝不靠"内容差不多"）。 */
 interface Attempt {
-  readonly kind: 'drive' | 'plan' | 'ask'
+  readonly kind: 'drive' | 'plan' | 'ask' | 'wrap'
   readonly messageId: string
   readonly content: string
   readonly processId: string
@@ -514,10 +542,31 @@ export function apply(ctx: Context, config?: WorkRoundDriverConfig): void {
         reserveAndQueue(state, 'ask', delivery)
         return false
       }
+      case 'close-process': {
+        // 推进态结论已落盘（流程收口）。**收口是静默写**——不投一轮话说清楚，
+        // 人在对话里看到的"跑完了"与"卡死了"一模一样（真机两次误判）。投终局收束轮。
+        state.needsCheckpoint = true
+        if (!driveEnabled) return false
+        const process = await domain.process(scope)
+        if (process === undefined) return false
+        const delivery = wrapupDeliveryOf(process, 'complete')
+        if (delivery === undefined) return true
+        reserveAndQueue(state, 'wrap', delivery)
+        return false
+      }
+      case 'block-task': {
+        // 回合作顶落盘 block ⇒ 机器停住等人：同样要说出口（goal 的 `<goal_blocked>` 同款）。
+        state.needsCheckpoint = true
+        if (!driveEnabled) return false
+        const process = await domain.process(scope)
+        if (process === undefined) return false
+        const delivery = wrapupDeliveryOf(process, 'blocked', decision.reason?.code + ': ' + String(decision.reason?.message ?? ''))
+        if (delivery === undefined) return true
+        reserveAndQueue(state, 'wrap', delivery)
+        return false
+      }
       case 'start-stage':
       case 'close-stage':
-      case 'block-task':
-      case 'close-process':
         // 推进态结论（副作用已由 `tickWorkprocess` 经域服务落盘）⇒ 再拍一拍接着推进。
         state.needsCheckpoint = true
         return true

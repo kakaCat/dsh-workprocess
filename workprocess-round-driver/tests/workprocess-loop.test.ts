@@ -16,7 +16,7 @@ import {
   processAllowsClose, stageAllowsStart, startWorkStage, workProcessOf,
 } from 'workprocess'
 import type { WorkProcess, WorkRecordLike } from 'workprocess'
-import { decideWorkRound, renderWorkPlanPrompt, renderWorkRoundPrompt } from 'workprocess-round-driver'
+import { decideWorkRound, renderWorkPlanPrompt, renderWorkRoundPrompt, renderWorkWrapupPrompt } from 'workprocess-round-driver'
 import type { RoundDecision, WorkFacts, RoundScopeFacts } from 'workprocess-round-driver'
 
 function storeOf(records: Record<string, WorkRecordLike>) {
@@ -202,6 +202,22 @@ describe('两种轮次的分工口径（防"规划轮把活干完、回合预算
     expect(text).toContain('只建任务，不要在这一轮动手执行')
     expect(text).toContain('任务轮会由驱动器在空闲边界投给你')
     expect(text).toContain('max_rounds')          // 说清为什么
+  })
+
+  it('终局收束轮：收口/停住两种口径都要"只说话、不再调工具"', () => {
+    const done = renderWorkWrapupPrompt({
+      processObjective: 'x', kind: 'complete', doneStages: [{ key: 'v1', statement: '写文件' }],
+    })
+    expect(done).toContain('<workprocess_done>')
+    expect(done).toContain('已经全部收口落幕')
+    expect(done).toContain('不要再调任何工具')
+
+    const blocked = renderWorkWrapupPrompt({
+      processObjective: 'x', kind: 'blocked', blockedReason: 'round-limit: 到了回合上限',
+    })
+    expect(blocked).toContain('<workprocess_blocked>')
+    expect(blocked).toContain('round-limit')
+    expect(blocked).toContain('不要再调任何工具')
   })
 
   it('任务轮才是干活的那一轮（带任务、带轮号、说明做完停手）', () => {
