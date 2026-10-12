@@ -1,9 +1,9 @@
 {
-  "name": "dsh-workprocess",
+  "name": "workprocess",
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "workprocess 插件（组合根）：归属记录落宿主存储域 + 真人判定 + 回合边界驱动与续跑投递 + 提供 ctx.workprocess 服务",
+  "description": "workprocess 领域插件（组合根，已并入内核）：两层快照 / 事件表 / 折叠 / 不变量 / 严格解码 / 服务 + 归属记录落宿主存储域 + 真人判定 + 回合边界驱动与续跑投递 + apply(ctx, config)",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -24,6 +24,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "build:bootstrap": "tsc -p tsconfig.build.json --noEmitOnError false || true",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run"
   },
@@ -31,7 +32,6 @@
     "@deepseek-ai/dsh-llm": "0.2.0-rc.1",
     "@deepseek-ai/dsh-storage-domain": "0.2.0-rc.1",
     "tool-workprocess": "workspace:*",
-    "workprocess-core": "workspace:*",
     "workprocess-round-driver": "workspace:*"
   },
   "peerDependencies": {

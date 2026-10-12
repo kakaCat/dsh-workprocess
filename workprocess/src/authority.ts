@@ -8,7 +8,7 @@
  * 【口径对齐宿主 tool-goal】同款三重校验：agent 必须正是注册表里那个、状态 running、
  * 且正是本回合的发起者（`currentInitiator()`）——三个都不满足就**不授任何授权**。
  *
- * @module dsh-workprocess/authority
+ * @module workprocess/authority
  */
 import { authorityFromEvents, type WorkRoundRef, type WorkToolAuthority } from 'tool-workprocess'
 

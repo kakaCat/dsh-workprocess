@@ -13,7 +13,7 @@
  *   · 串行门（前序阶段全 done 才可开工）与"阶段收口要求任务全 complete"是**跨层判据**，
  *     由本模块的纯函数统一判定——两处各写一份必然漂移。
  *
- * @module workprocess-core/fold
+ * @module workprocess/fold
  */
 import type { WorkChange, WorkEvent } from './domain.js'
 import { WORK_CHANGE_VERSION, WorkError } from './runtime.js'

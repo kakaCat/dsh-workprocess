@@ -18,8 +18,8 @@
  *
  * @module tool-workprocess/authority
  */
-import { WorkError } from 'workprocess-core'
-import type { WorkStageClosePolicy } from 'workprocess-core'
+import { WorkError } from 'workprocess'
+import type { WorkStageClosePolicy } from 'workprocess'
 
 /** 一次状态变更调用获得的硬授权（对齐宿主 `GoalToolAuthority`）。 */
 export type WorkToolAuthority =

@@ -15,15 +15,15 @@
  * "装的确实是那几个字段"，快照本身的严格校验由 `superRefine` 调内核解码器完成——
  * 于是持久化边界与读边界用的是同一份规则，不会各写一套。
  *
- * @module dsh-workprocess/domain
+ * @module workprocess/domain
  */
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 // 【依赖口径】zod 由官方栈提供（peerDependencies）：`@deepseek-ai/dsh-storage-domain` 自己声明
 // `zod: ^4.4.3` 且其公开 API `domainTable(schema: ZodType<V>)` 的类型即 `import type { ZodType } from 'zod'`
 // ——存储域的 schema 语言是官方契约钦定的，不是我们自选的三方包。
 import { z, type ZodType } from 'zod'
-import { decodeWorkProcess } from 'workprocess-core'
-import type { WorkRecordLike, WorkStoreLike } from 'workprocess-core'
+import { decodeWorkProcess } from './kernel.js'
+import type { WorkRecordLike, WorkStoreLike } from './kernel.js'
 
 /** 域身份（名字与版本是**持久化契约**：改名或降版本等于换一个域）。 */
 export const WORKPROCESS_DOMAIN = 'workprocess'

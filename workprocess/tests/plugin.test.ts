@@ -1,5 +1,5 @@
 /**
- * dsh-workprocess 插件：**装配面**（六个工具真注册）+ 归属缺省（本会话）+ 真人判定 +
+** workprocess 插件（组合根，已并入内核）：**装配面**（六个工具真注册）+ 归属缺省（本会话）+ 真人判定 +
  * 回合边界驱动（开工 / auto 收口 / **续跑投递**）+ 归属记录落**宿主存储域**。
  *
  * 【守护什么】这层是组合根，测的是"三件库接起来之后**用真宿主形状的假 ctx 还能不能跑通**"：
@@ -11,9 +11,9 @@
  *      接手后计数耐久前进、到上限落盘 block 并停止投递。
  */
 import { describe, it, expect, beforeEach } from 'vitest'
-import { apply, name, inject, storageDomainStoreOf, workprocessDomain } from 'dsh-workprocess'
+import { apply, name, inject, storageDomainStoreOf, workprocessDomain } from 'workprocess'
 import { WORK_TOOL_REGISTRY } from 'tool-workprocess'
-import { applyWorkEvent, startWorkStage } from 'workprocess-core'
+import { applyWorkEvent, startWorkStage } from 'workprocess'
 
 interface ToolLike { execute(args: Record<string, unknown>, exec?: unknown): Promise<Record<string, unknown>> }
 interface HostEvent { type?: string; data?: { source?: { kind?: string; round?: number; taskId?: string; revision?: number } } }

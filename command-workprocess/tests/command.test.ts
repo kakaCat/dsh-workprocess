@@ -14,12 +14,12 @@ import { describe, it, expect } from 'vitest'
 import {
   apply, createInstruction, editInstruction, inject, name, parseWorkCommand, renderWorkStatus, workCommandHandler,
 } from 'dsh-command-workprocess'
-import { createWorkprocessService } from 'dsh-workprocess'
-import type { WorkprocessService, WorkprocessStatus } from 'dsh-workprocess'
+import { createWorkprocessService } from 'workprocess'
+import type { WorkprocessService, WorkprocessStatus } from 'workprocess'
 import {
   createWorkProcess, createWorkTask, startWorkStage, workProcessOf,
-} from 'workprocess-core'
-import type { WorkRecordLike, WorkStoreLike } from 'workprocess-core'
+} from 'workprocess'
+import type { WorkRecordLike, WorkStoreLike } from 'workprocess'
 
 /** 内存归属记录（够服务面用）。 */
 function mapStore(): WorkStoreLike & { records: Map<string, WorkRecordLike> } {

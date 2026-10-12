@@ -23,11 +23,11 @@
       "vitest/globals"
     ],
     "paths": {
-      "workprocess-core": [
-        "./workprocess-core/src/index.ts"
+      "workprocess": [
+        "./workprocess/src/index.ts"
       ],
-      "workprocess-core/*": [
-        "./workprocess-core/src/*"
+      "workprocess/*": [
+        "./workprocess/src/*"
       ],
       "tool-workprocess": [
         "./tool-workprocess/src/index.ts"
@@ -47,11 +47,11 @@
       "workprocess-round-driver/*": [
         "./workprocess-round-driver/src/*"
       ],
-      "dsh-workprocess": [
-        "./dsh-workprocess/src/index.ts"
+      "workprocess": [
+        "./workprocess/src/index.ts"
       ],
-      "dsh-workprocess/*": [
-        "./dsh-workprocess/src/*"
+      "workprocess/*": [
+        "./workprocess/src/*"
       ]
     }
   }

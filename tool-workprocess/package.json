@@ -18,11 +18,12 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "build:bootstrap": "tsc -p tsconfig.build.json --noEmitOnError false || true",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run"
   },
   "dependencies": {
-    "workprocess-core": "workspace:*",
+    "workprocess": "workspace:*",
     "@deepseek-ai/dsh-tools": "0.2.0-rc.1"
   }
 }

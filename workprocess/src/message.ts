@@ -9,7 +9,7 @@
  * 【模块增强】与宿主 `goal` 同款：往 `@deepseek-ai/dsh-llm` 的 `MessageSourceMap` 里加一格。
  * 运行时不查来源白名单（持久化只查 surface 内容），所以这只是类型面的事。
  *
- * @module dsh-workprocess/message
+ * @module workprocess/message
  */
 import type {} from '@deepseek-ai/dsh-llm'
 

@@ -12,8 +12,8 @@
  *
  * @module workprocess/round/prompt
  */
-import { stageClosePolicyOf } from 'workprocess-core'
-import type { WorkStageClosePolicy } from 'workprocess-core'
+import { stageClosePolicyOf } from 'workprocess'
+import type { WorkStageClosePolicy } from 'workprocess'
 
 /** 一轮提示词的输入（由适配器从归属记录投影成窄事实）。 */
 export interface WorkRoundPromptInput {

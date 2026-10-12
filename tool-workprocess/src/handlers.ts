@@ -6,7 +6,7 @@
  * 不再为单个动词各开一个工具。
  *
  * 【为什么处理器与工具壳分开】`defineTool` 外壳只做 schema/渲染；判据与状态规则全在内核
- * （`workprocess-core`）。把编排放这里的好处：**不需要宿主即可穷举单测**。
+ * （`workprocess`）。把编排放这里的好处：**不需要宿主即可穷举单测**。
  *
  * 【错误口径】内核抛 `WorkError`（结构化码）→ 这里如实转成 `{ success:false, code, error }`，
  * **不吞不编**；非 WorkError 继续冒泡（那是缺陷，不是业务拒绝）。
@@ -18,8 +18,8 @@ import {
   createWorkProcess, createWorkTask, currentStageOf, defineWorkStages, discardWorkProcess, editWorkObjective,
   editWorkTask, pauseWorkTask, processAllowsClose, resumeWorkTask, stageAllowsStart, stageClosePolicyOf,
   stageIsFinishable, workProcessOf,
-} from 'workprocess-core'
-import type { WorkStage, WorkStageClosePolicy, WorkStageDraft, WorkStoreLike, WorkTask } from 'workprocess-core'
+} from 'workprocess'
+import type { WorkStage, WorkStageClosePolicy, WorkStageDraft, WorkStoreLike, WorkTask } from 'workprocess'
 import {
   isActionAuthorized, requireActionAuthority, workToolExecution,
   type WorkAuthorityAction, type WorkAuthorityContext, type WorkRoundRef, type WorkToolAuthority,

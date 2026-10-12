@@ -9,17 +9,17 @@
  *   ⑤ 聚合 CAS：两层的写共用一个 revision；记录的快照必须与事件重算逐字段一致。
  */
 import { describe, it, expect } from 'vitest'
-import type { WorkChange, WorkEvent } from 'workprocess-core/domain.js'
-import { applyWorkEvent, decodeWorkEvent, decodeWorkProcess, foldWorkProcess, processAllowsClose, sameProcess, workProgressOf } from 'workprocess-core/fold.js'
-import { checkWorkInvariants } from 'workprocess-core/invariant.js'
-import { WorkError } from 'workprocess-core/runtime.js'
-import type { WorkProcess, WorkStageDraft } from 'workprocess-core/types.js'
+import type { WorkChange, WorkEvent } from 'workprocess/domain.js'
+import { applyWorkEvent, decodeWorkEvent, decodeWorkProcess, foldWorkProcess, processAllowsClose, sameProcess, workProgressOf } from 'workprocess/fold.js'
+import { checkWorkInvariants } from 'workprocess/invariant.js'
+import { WorkError } from 'workprocess/runtime.js'
+import type { WorkProcess, WorkStageDraft } from 'workprocess/types.js'
 import {
   clearWorkTask, closeWorkProcess, completeWorkStage, completeWorkTask, createWorkProcess, createWorkTask,
   defineWorkStages, discardWorkProcess, editWorkObjective, progressOf, stageClosePolicyOf, startWorkStage,
   workProcessOf, workProcessViewOf, workTaskOf,
   type WorkRecordLike,
-} from 'workprocess-core'
+} from 'workprocess'
 
 const STAGES: readonly WorkStageDraft[] = [
   { key: 'prep', statement: '准备数据', doneCriteria: ['数据可用'] },

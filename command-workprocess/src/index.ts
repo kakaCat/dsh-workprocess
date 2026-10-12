@@ -20,7 +20,7 @@
  * 授权面据此判"本回合由人发起"，`update_workstage action=edit` 这类**真人专属**动作才落得下章。
  * 若省略 source 会被当成 user（同样的判定），但显式自署是"这是人发起的一轮"的诚实声明。
  *
- * 【它怎么拿数据】只消费 `ctx.workprocess`（由 `dsh-workprocess` 提供）——不自己开存储域
+ * 【它怎么拿数据】只消费 `ctx.workprocess`（由 `workprocess` 提供）——不自己开存储域
  * （同名域重复 `open` 是响亮拒绝），也不绕内核改状态。动作按 `invocation.agent` 定位会话。
  *
  * 【命令天然的授权】命令由人敲出来，所以 `edit` / `resume` / `clear` 这类真人专属动作在这一层是合法的
@@ -29,13 +29,13 @@
  * @module dsh-command-workprocess
  */
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { WorkprocessService, WorkprocessStatus } from 'dsh-workprocess'
-import type { WorkStage, WorkTask } from 'workprocess-core'
+import type { WorkprocessService, WorkprocessStatus } from 'workprocess'
+import type { WorkStage, WorkTask } from 'workprocess'
 
 /** 插件名（装载行 id 同源）。 */
 export const name = 'command-workprocess'
 
-/** 装配依赖：命令注册面 + workprocess 领域服务（由 `dsh-workprocess` 提供）。 */
+/** 装配依赖：命令注册面 + workprocess 领域服务（由 `workprocess` 提供）。 */
 export const inject = ['commands', 'workprocess']
 
 const USAGE = '用法：/work [<目标>|edit <目标>|pause|resume|clear]'

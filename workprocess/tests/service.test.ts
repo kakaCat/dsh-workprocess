@@ -7,9 +7,9 @@
  *   ③ `discard`：幂等（没有流程 ⇒ false），丢了就读不到。
  */
 import { describe, it, expect } from 'vitest'
-import { createWorkprocessService } from 'dsh-workprocess'
-import { createWorkProcess, createWorkTask, startWorkStage, workProcessOf } from 'workprocess-core'
-import type { WorkRecordLike, WorkStoreLike } from 'workprocess-core'
+import { createWorkprocessService } from 'workprocess'
+import { createWorkProcess, createWorkTask, startWorkStage, workProcessOf } from 'workprocess'
+import type { WorkRecordLike, WorkStoreLike } from 'workprocess'
 
 function mapStore(): WorkStoreLike & { records: Map<string, WorkRecordLike> } {
   const records = new Map<string, WorkRecordLike>()

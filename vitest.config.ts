@@ -7,14 +7,14 @@ const at = (p: string): string => fileURLToPath(new URL(p, import.meta.url))
 export default defineConfig({
   resolve: {
     alias: {
-      'workprocess-core/': at('./workprocess-core/src/'),
-      'workprocess-core': at('./workprocess-core/src/index.ts'),
+      'workprocess/': at('./workprocess/src/'),
+      'workprocess': at('./workprocess/src/index.ts'),
       'workprocess-round-driver/': at('./workprocess-round-driver/src/'),
       'workprocess-round-driver': at('./workprocess-round-driver/src/index.ts'),
       'tool-workprocess/': at('./tool-workprocess/src/'),
       'tool-workprocess': at('./tool-workprocess/src/index.ts'),
-      'dsh-workprocess/': at('./dsh-workprocess/src/'),
-      'dsh-workprocess': at('./dsh-workprocess/src/index.ts'),
+      'workprocess/': at('./workprocess/src/'),
+      'workprocess': at('./workprocess/src/index.ts'),
       'dsh-command-workprocess/': at('./command-workprocess/src/'),
       'dsh-command-workprocess': at('./command-workprocess/src/index.ts'),
     },

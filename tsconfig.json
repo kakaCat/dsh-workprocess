@@ -1,14 +1,14 @@
 {
   "extends": "./tsconfig.base.json",
   "include": [
-    "workprocess-core/src/**/*.ts",
-    "workprocess-core/tests/**/*.ts",
+    "workprocess/src/**/*.ts",
+    "workprocess/tests/**/*.ts",
     "workprocess-round-driver/src/**/*.ts",
     "workprocess-round-driver/tests/**/*.ts",
     "tool-workprocess/src/**/*.ts",
     "tool-workprocess/tests/**/*.ts",
-    "dsh-workprocess/src/**/*.ts",
-    "dsh-workprocess/tests/**/*.ts",
+    "workprocess/src/**/*.ts",
+    "workprocess/tests/**/*.ts",
     "command-workprocess/src/**/*.ts",
     "command-workprocess/tests/**/*.ts"
   ]

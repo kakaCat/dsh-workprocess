@@ -12,13 +12,13 @@
  *
  * `ask-*`（弹框请人确认）**不在**本模块内：要接宿主的人机确认通道。
  *
- * @module dsh-workprocess/driver
+ * @module workprocess/driver
  */
 import {
   blockWorkTask, closeWorkProcess, completeWorkStage, currentStageOf, stageAllowsStart, startWorkStage,
   workProcessOf,
-} from 'workprocess-core'
-import type { WorkProcess, WorkStoreLike, WorkTask } from 'workprocess-core'
+} from './kernel.js'
+import type { WorkProcess, WorkStoreLike, WorkTask } from './kernel.js'
 import { decideWorkRound, renderWorkAskPrompt, renderWorkPlanPrompt, renderWorkRoundPrompt } from 'workprocess-round-driver'
 import type { DecideInput, GateFacts, RoundDecision, StageFacts, WorkFacts } from 'workprocess-round-driver'
 

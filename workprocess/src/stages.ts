@@ -12,7 +12,7 @@
  * 本包**不预置任何阶段键**：阶段表由调用方定义（大数据 / 训练 / 发布各不同），
  * 这里只给投影——模板属于调用方的领域。
  *
- * @module workprocess-core/stages
+ * @module workprocess/stages
  */
 import type { WorkProcess, WorkStage, WorkStageClosePolicy } from './types.js'
 

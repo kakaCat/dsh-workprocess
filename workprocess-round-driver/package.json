@@ -18,10 +18,11 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "build:bootstrap": "tsc -p tsconfig.build.json --noEmitOnError false || true",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run"
   },
   "dependencies": {
-    "workprocess-core": "workspace:*"
+    "workprocess": "workspace:*"
   }
 }

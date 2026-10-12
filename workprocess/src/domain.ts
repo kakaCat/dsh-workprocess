@@ -12,7 +12,7 @@
  * 反推要靠 diff 前后快照，脆弱且难测——故**显式带事件 + 结果快照**：
  * 解码时两样都严格校验，迁移时用事件重算再与快照逐字段比对（规则的唯一权威仍是 fold）。
  *
- * @module workprocess-core/domain
+ * @module workprocess/domain
  */
 import type {
   WorkBlockReason, WorkProcess, WorkProcessId, WorkStageDraft, WorkTaskDraft, WorkTaskId,

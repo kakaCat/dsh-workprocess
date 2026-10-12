@@ -31,10 +31,10 @@ goal 的目标是一句话，命令自己就能落库；workprocess 的流程**�
 
 ## 其它纪律
 
-- **只消费 `ctx.workprocess`**（由 `dsh-workprocess` 提供的领域服务）：不自己开存储域
+- **只消费 `ctx.workprocess`**（由 `workprocess` 提供的领域服务）：不自己开存储域
   （同名域重复 `open` 会被响亮拒绝），也不绕内核改状态。
 - 宿主 agent 不支持 `followup` 时**如实报错**（不假装建成，也不偷偷自己建）。
-- 装载：`dsh-workprocess/cordis.patch.yml` 里插两行（`workprocess` + `dsh-command-workprocess`），
+- 装载：`workprocess/cordis.patch.yml` 里插两行（`workprocess` + `dsh-command-workprocess`），
   与宿主 base bundle 里 `dsh-goal` / `dsh-command-goal` 的关系一致；profile 只需装好这两个包。
 
 ## 测试

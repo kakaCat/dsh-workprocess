@@ -23,14 +23,20 @@ importers:
       '@deepseek-ai/dsh-llm':
         specifier: 0.2.0-rc.1
         version: 0.2.0-rc.1(@deepseek-ai/cordis@4.0.4)
-      dsh-workprocess:
+      workprocess:
         specifier: workspace:*
-        version: link:../dsh-workprocess
-      workprocess-core:
-        specifier: workspace:*
-        version: link:../workprocess-core
+        version: link:../workprocess
 
-  dsh-workprocess:
+  tool-workprocess:
+    dependencies:
+      '@deepseek-ai/dsh-tools':
+        specifier: 0.2.0-rc.1
+        version: 0.2.0-rc.1(36940444868c3bdd7187eceb3e076533)
+      workprocess:
+        specifier: workspace:*
+        version: link:../workprocess
+
+  workprocess:
     dependencies:
       '@deepseek-ai/dsh-llm':
         specifier: 0.2.0-rc.1
@@ -41,9 +47,6 @@ importers:
       tool-workprocess:
         specifier: workspace:*
         version: link:../tool-workprocess
-      workprocess-core:
-        specifier: workspace:*
-        version: link:../workprocess-core
       workprocess-round-driver:
         specifier: workspace:*
         version: link:../workprocess-round-driver
@@ -51,22 +54,11 @@ importers:
         specifier: ^4.4.3
         version: 4.6.6
 
-  tool-workprocess:
-    dependencies:
-      '@deepseek-ai/dsh-tools':
-        specifier: 0.2.0-rc.1
-        version: 0.2.0-rc.1(36940444868c3bdd7187eceb3e076533)
-      workprocess-core:
-        specifier: workspace:*
-        version: link:../workprocess-core
-
-  workprocess-core: {}
-
   workprocess-round-driver:
     dependencies:
-      workprocess-core:
+      workprocess:
         specifier: workspace:*
-        version: link:../workprocess-core
+        version: link:../workprocess
 
 packages:
 

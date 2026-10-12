@@ -14,8 +14,8 @@ import { describe, it, expect } from 'vitest'
 import {
   completeWorkStage, completeWorkTask, createWorkProcess, createWorkTask, currentStageOf,
   processAllowsClose, stageAllowsStart, startWorkStage, workProcessOf,
-} from 'workprocess-core'
-import type { WorkProcess, WorkRecordLike } from 'workprocess-core'
+} from 'workprocess'
+import type { WorkProcess, WorkRecordLike } from 'workprocess'
 import { decideWorkRound } from 'workprocess-round-driver'
 import type { RoundDecision, WorkFacts, RoundScopeFacts } from 'workprocess-round-driver'
 

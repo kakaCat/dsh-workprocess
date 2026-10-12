@@ -15,8 +15,8 @@ import {
   createWorkstage, createWorktask, getWorkstage, getWorktask, updateWorkstage, updateWorktask,
   type WorkToolDeps, type WorkHumanVerdict,
 } from 'tool-workprocess'
-import type { WorkRecordLike } from 'workprocess-core'
-import { startWorkStage } from 'workprocess-core'
+import type { WorkRecordLike } from 'workprocess'
+import { startWorkStage } from 'workprocess'
 
 function storeOf(records: Record<string, WorkRecordLike>) {
   return {

@@ -16,29 +16,30 @@
  *
  * 【还没接的部分】`ask-*`（人机弹框确认）——见 README。
  *
- * @module dsh-workprocess
+ * @module workprocess
  */
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 // 引入模块增强（MessageSourceMap 加 'work' 一格）：类型面的事，运行时不需要它。
 import type {} from './message.js'
-import { workProcessOf } from 'workprocess-core'
+import { workProcessOf } from './kernel.js'
 import {
   WORK_TOOL_FACTORIES, WORK_TOOL_REGISTRY,
   type WorkHumanAsk, type WorkHumanVerdict, type WorkToolDeps,
 } from 'tool-workprocess'
 import { agentOf, authorityResolverOf, type AuthorityHostCtx, type HostAgent, type HostSession } from './authority.js'
-import { storageDomainStoreOf, type StorageDomainCtx } from './domain.js'
+import { storageDomainStoreOf, type StorageDomainCtx } from './storage.js'
 import { createWorkprocessService } from './service.js'
 import {
   DEFAULT_MAX_ROUNDS, askDeliveryOf, planDeliveryOf, roundDeliveryOf, tickWorkprocess, type RoundDelivery,
 } from './driver.js'
 
-export { storageDomainStoreOf, workprocessDomain, WORKPROCESS_DOMAIN, WORKPROCESS_DOMAIN_VERSION } from './domain.js'
+export * from './kernel.js'
+export { storageDomainStoreOf, workprocessDomain, WORKPROCESS_DOMAIN, WORKPROCESS_DOMAIN_VERSION } from './storage.js'
 export { createWorkprocessService } from './service.js'
 export type { WorkprocessService, WorkprocessStatus } from './service.js'
 export { agentOf, authorityResolverOf } from './authority.js'
 export { DEFAULT_MAX_ROUNDS, askDeliveryOf, effectiveMaxRoundsOf, factsOf, planDeliveryOf, roundDeliveryOf, tickWorkprocess } from './driver.js'
-export type { StorageDomainCtx, DomainTableHandle } from './domain.js'
+export type { StorageDomainCtx, DomainTableHandle } from './storage.js'
 export type { HostAgent, HostEvent, HostSession } from './authority.js'
 export type { RoundDelivery } from './driver.js'
 

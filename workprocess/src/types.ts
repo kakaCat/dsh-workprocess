@@ -14,7 +14,7 @@
  *
  * 客户端命名空间投影见 `./client.js`（零内容重复）。
  *
- * @module workprocess-core/types
+ * @module workprocess/types
  */
 
 /** 流程身份（跨修订稳定；形态 `wp:<scope>`，scope = 归属域键）。 */

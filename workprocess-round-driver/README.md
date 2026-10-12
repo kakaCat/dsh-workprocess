@@ -43,7 +43,7 @@
 
 **副作用由组合根落**（驱动器是纯函数，不下笔）：`start-stage` ⇒ `startWorkStage`、
 `close-stage` ⇒ `completeWorkStage`、`block-task` ⇒ `blockWorkTask`。
-本仓的组合根就是 `dsh-workprocess`（回合边界驱动 `src/driver.ts`）；`drive` 的投递也在那里
+本仓的组合根就是 `workprocess`（回合边界驱动 `src/driver.ts`；`drive` 的投递也在那里
 （`agent.followup` + 自署 `work` 来源；`drive` 与 `plan-stage` 两种投递都在那里）。
 
 ## 测试

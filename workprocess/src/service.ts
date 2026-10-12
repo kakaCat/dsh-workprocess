@@ -8,12 +8,12 @@
  * 【口径】动作都按 `agent` 定位（`agent.session.id` = 归属域），与 `ctx.goals.get(agent)` 同款；
  * 命令天然由人发起，故 `discard` / `resumePaused` 这类真人专属动作在这一层是合法的。
  *
- * @module dsh-workprocess/service
+ * @module workprocess/service
  */
 import {
   currentStageOf, discardWorkProcess, pauseWorkTask, resumeWorkTask, workProcessOf,
-} from 'workprocess-core'
-import type { WorkStage, WorkStoreLike } from 'workprocess-core'
+} from './kernel.js'
+import type { WorkStage, WorkStoreLike } from './kernel.js'
 
 /** 会话的最小读取面（与 authority/message 同源的窄类型）。 */
 interface AgentLike { readonly session?: { readonly id?: string } }

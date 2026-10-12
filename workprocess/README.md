@@ -1,4 +1,4 @@
-# dsh-workprocess
+# workprocess
 
 workprocess 的**插件入口**（组合根）：把「内核 + 驱动 + 工具面」三个库接成宿主能装载的插件。
 
@@ -33,7 +33,7 @@ apply(ctx, config) ⇒
 ```yaml
 - insert:
     - id: workprocess
-      name: "dsh-workprocess"
+      name: "workprocess"
       config:
         tick: true            # 回合边界是否自动驱动（缺省 true）
         drive: true           # 空闲边界是否**自动投递续跑回合**（缺省 false；本仓装载层打开）
@@ -76,12 +76,12 @@ goal 把状态放**会话日志**（`session.append('goal/change')` + 自己的 
 
 ```bash
 pnpm install && pnpm build          # ① 仓内构建（宿主加载的是 JS）
-# ② profile 登记：依赖 "dsh-workprocess": "link:<repo>/dsh-workprocess"、bundles 追加 "dsh-workprocess"
-ln -sfn <repo>/dsh-workprocess ~/.dsh/profiles/desktop/node_modules/dsh-workprocess
+# ② profile 登记：依赖 "workprocess": "link:<repo>/workprocess"、bundles 追加 "workprocess"
+ln -sfn <repo>/workprocess ~/.dsh/profiles/desktop/node_modules/workprocess
 # ③ 重启 DSH
 ```
 
-回滚：删掉 profile `package.json` 里的依赖与 bundles 条目 + `node_modules/dsh-workprocess` 链接
+回滚：删掉 profile `package.json` 里的依赖与 bundles 条目 + `node_modules/workprocess` 链接
 （改动前的备份是 `package.json.bak-workprocess`），重启即恢复原状。
 
 ## 命令行：`/work`（**独立包** `dsh-command-workprocess`）
@@ -89,7 +89,7 @@ ln -sfn <repo>/dsh-workprocess ~/.dsh/profiles/desktop/node_modules/dsh-workproc
 与宿主的 `/goal` 同构：**命令行也是一个独立包、独立装载行**，不塞在领域插件里；
 语法也逐字同形 —— `/work [<目标>|edit <目标>|pause|resume|clear]`。
 
-- 装载：本包的 `cordis.patch.yml` 插两行——`dsh-workprocess`（本包）+ `dsh-command-workprocess`（命令行包），
+- 装载：本包的 `cordis.patch.yml` 插两行——`workprocess`（本包）+ `dsh-command-workprocess`（命令行包），
   与宿主 base bundle 里 `dsh-goal` / `dsh-command-goal` 的关系一致。
 - 数据来源：命令行只消费 **`ctx.workprocess`**（本包 `ctx.provide` 出去的领域服务：view / discard /
   pauseActive / resumePaused），不自己开存储域（同名域重复 `open` 会被响亮拒绝），也不绕内核改状态。

@@ -13,7 +13,7 @@
  *
  * @module workprocess/round/types
  */
-import type { WorkStageClosePolicy, WorkStageState, WorkTaskPhase } from 'workprocess-core'
+import type { WorkStageClosePolicy, WorkStageState, WorkTaskPhase } from 'workprocess'
 
 /** 归属侧窄投影（驱动拍要读的**有界**事实）。 */
 export interface RoundScopeFacts {
