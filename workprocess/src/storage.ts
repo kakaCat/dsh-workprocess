@@ -81,25 +81,20 @@ export interface DomainTableHandle {
  */
 export function storageDomainStoreOf(ctx: StorageDomainCtx): WorkStoreLike {
   const opened = ctx.storageDomain.open(workprocessDomain)
-  /** 已解析的表句柄（遍历端口是同步签名，得有个同步可达的引用）。 */
-  const tables = new Map<string, { entries(): IterableIterator<readonly [string, unknown]> }>()
-  const tableOf = async (): Promise<DomainTableHandle> => {
-    const table = (await opened).table('processes')
-    tables.set('processes', table as unknown as { entries(): IterableIterator<readonly [string, unknown]> })
-    return table
-  }
+  const tableOf = async (): Promise<DomainTableHandle> => (await opened).table('processes')
   return {
     async get(scope: string) {
       const record = (await tableOf()).get(scope)
       return record === undefined ? undefined : record as WorkRecordLike
     },
     /** 快照遍历（表句柄的 `entries()` 就是快照语义：迭代期间落盘的写不干扰本次遍历）。 */
-    entries(): IterableIterator<readonly [string, WorkRecordLike]> {
-      // 句柄是异步拿到的，而端口是同步签名：用"已经打开的域"上的表——`open` 在同一 tick 内
-      // 完成登记，故这里在有记录时必然已可用；拿不到就返回空迭代（审计降级，不抛）。
-      const table = tables.get('processes')
-      if (table === undefined) return [][Symbol.iterator]()
-      return table.entries() as IterableIterator<readonly [string, WorkRecordLike]>
+    async entries(): Promise<IterableIterator<readonly [string, WorkRecordLike]>> {
+      const table = await tableOf()
+      const enumerate = (table as unknown as { entries?: () => IterableIterator<readonly [string, unknown]> }).entries
+      // 后端不支持遍历 ⇒ 审计降级为"没有可审的"，绝不抛（审计是诊断，不是门禁）。
+      return typeof enumerate === 'function'
+        ? enumerate.call(table) as IterableIterator<readonly [string, WorkRecordLike]>
+        : [][Symbol.iterator]()
     },
     async mutate(scope: string, fn: (draft: WorkRecordLike) => unknown) {
       const table = await tableOf()

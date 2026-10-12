@@ -54,8 +54,28 @@ export function apply(ctx: Context, _config?: WorkprocessConfig): void {
       console.warn('[workprocess] work/changed 投递失败：' + String((err as Error)?.message ?? err))
     }
   }
-  ctx.provide('workprocess', createWorkprocessService(
+  const service = createWorkprocessService(
     { store, now: () => Date.now(), onChanged: (n) => emitChanged(n.scope, n.change as WorkChangedPayload['change']) },
     (scope) => emitChanged(scope, undefined),
-  ))
+  )
+  ctx.provide('workprocess', service)
+  // **装载时自审一遍已落盘的历史**：坏记录（上一版留下的 / 被人手改过的）当场记一行，
+  // 不等它某天被读出来才炸。不阻断装载——审计是诊断，不是门禁。
+  void service.audit().then((report) => {
+    for (const finding of report.findings) {
+      warn(ctx, '归属记录不自洽（' + finding.scope + '）：' + finding.problem)
+    }
+  }).catch((err: unknown) => {
+    warn(ctx, '装载时审计失败：' + String((err as Error)?.message ?? err))
+  })
+}
+
+/** 记一行警告（优先走宿主 logger；假 ctx / 没接 logger 时回落 console）。 */
+function warn(ctx: Context, message: string): void {
+  const line = '[workprocess] ' + message
+  try {
+    ctx.logger?.warn(line)
+  } catch {
+    console.warn(line)
+  }
 }

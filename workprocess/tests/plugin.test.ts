@@ -39,12 +39,19 @@ function fakeDomainFacility() {
             return {
               get: (k: string): unknown => map.get(k),
               put: async (k: string, v: unknown): Promise<void> => { writes.push(k); map.set(k, v) },
+              entries: (): IterableIterator<[string, unknown]> => map.entries(),
             }
           },
         }
       },
     },
-    recordsOf: (table: string): Map<string, unknown> => tables.get(table) ?? new Map<string, unknown>(),
+    recordsOf: (table: string): Map<string, unknown> => {
+      const existing = tables.get(table)
+      if (existing !== undefined) return existing
+      const created = new Map<string, unknown>()
+      tables.set(table, created)
+      return created
+    },
   }
 }
 
@@ -60,6 +67,8 @@ interface FakeHost {
   policySections: Array<{ name: string; order: number; text: string }>
   /** `ctx.emit` 收下的载荷（work/changed 断言用）。 */
   emitted: Array<{ name: string; payload: unknown }>
+  /** 插件记下的警告（装载时自审断言用）。 */
+  warnings: string[]
   session: { id: string; snapshotEvents(): readonly HostEvent[] }
   domain: ReturnType<typeof fakeDomainFacility>
   /** 投一条会话事件（走插件真挂上的 handler，等它跑完）。 */
@@ -111,6 +120,7 @@ function fakeHost(): FakeHost {
   // 驱动器起的那条串行 run（`withoutInitiator`）：harness 靠它把"投递完成"等到确定点上。
   const runs: Array<Promise<unknown>> = []
   const teardowns: Array<() => void> = []
+  const warnings: string[] = []
   const ctx = {
     agents: {
       get: (id: string) => (id === agent.id ? agent : undefined),
@@ -126,7 +136,7 @@ function fakeHost(): FakeHost {
     fiber: { state: 2 },
     // 耐久检查点口（驱动器在两次推进之间 flush 一次）。
     sessions: { flush: async (): Promise<boolean> => true },
-    logger: { warn: (): void => {} },
+    logger: { warn: (line: string) => { warnings.push(line) } },
     sessionProjections: { stateOf: () => ({ openTurnStartSeq }) },
     storageDomain: domain.facility,
     tools: { register: (t: unknown) => { const tool = t as { name: string } & ToolLike; tools[tool.name] = tool; return (): void => {} } },
@@ -168,7 +178,7 @@ function fakeHost(): FakeHost {
     }
   }
   return {
-    ctx: ctx as never, tools, hooks, sent, deferred, policySections, emitted, session, domain,
+    ctx: ctx as never, tools, hooks, sent, deferred, policySections, emitted, session, domain, warnings,
     store: storageDomainStoreOf(ctx as never),
     emit: async (event: unknown) => {
       for (const h of handlers.get('session/event') ?? []) await h(session, event)
@@ -626,6 +636,26 @@ describe('流程收口（close: auto 缺省 / human 显式）', () => {
     h.setEvents([{}, { type: 'user/message', data: { source: { kind: 'user' } } }])
     expect(await h.tools.update_workstage.execute({ action: 'discard' }, h.exec())).toMatchObject({ success: true, changed: true })
     expect(h.record()?.workProcess).toBeUndefined()
+  })
+})
+
+describe('装载时自审（坏记录不等被读出来才炸）', () => {
+  it('表里有别的归属域的坏快照 ⇒ 装载那一刻记一行（不阻断装载）', async () => {
+    const h = fakeHost()
+    // 往域里塞一条**别的 scope** 的坏记录：读路径永远不会碰它（没人读那个 scope）。
+    h.domain.recordsOf('processes').set('session-broken', {
+      updatedAt: 1,
+      workProcess: { id: 'wp:session-broken', objective: 'x', revision: 1, stages: '不是数组' },
+    })
+    apply(h.ctx)
+    // 审计链是异步的（entries → 域句柄 → 遍历）：让出一个宏任务把它走完。
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const auditLines = h.warnings.filter((w) => w.includes('不自洽'))
+    expect(auditLines).toHaveLength(1)
+    expect(auditLines[0]).toContain('session-broken')
+    expect(auditLines[0]).toContain('严格解码')
+    // 照常提供 服务：审计是诊断，不是门禁。
+    expect(typeof (h.ctx as unknown as { workprocess?: unknown }).workprocess).toBe('object')
   })
 })
 

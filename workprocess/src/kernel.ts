@@ -63,10 +63,13 @@ export interface WorkStoreLike {
     fn: (draft: WorkRecordLike) => unknown,
   ): Promise<{ readonly changed?: boolean }>
   /**
-   * **快照遍历**（`[scope, 记录]` 对）。只有"审计已落盘历史"需要它（不变量伴生插件）；
-   * 省略 = 该 store 不支持遍历（读路径照常，审计降级为只报"无法遍历"）。
+   * **快照遍历**（`[scope, 记录]` 对）。只有"审计已落盘历史"需要它（不变量伴生插件 / 装载自审）；
+   * 省略 = 该 store 不支持遍历（读路径照常，审计降级为空）。
+   *
+   * 返回 promise：域句柄是**异步解析**的（`open` 之后再 `table()`），同步签名会在
+   * "还没人读过表"时遍历到空——装载时自审恰好就是那个时刻（真机踩过）。
    */
-  entries?(): IterableIterator<readonly [string, WorkRecordLike]>
+  entries?(): Promise<IterableIterator<readonly [string, WorkRecordLike]>>
 }
 
 /** 服务依赖（对齐宿主服务构造期注入的 ctx 面）。 */

@@ -162,7 +162,8 @@ export function createWorkprocessService(
   const audit = async (): Promise<WorkAuditReport> => {
     const findings: WorkAuditFinding[] = []
     const snapshots: { scope: string; process: WorkProcess }[] = []
-    for (const [scope, record] of deps.store.entries?.() ?? []) {
+    const enumerated = deps.store.entries === undefined ? undefined : await deps.store.entries()
+    for (const [scope, record] of enumerated ?? []) {
       const raw = record?.workProcess
       if (raw === undefined) continue                    // 空记录（只有 rounds）：不是流程
       let process: WorkProcess
