@@ -4,13 +4,16 @@
 # package.json 声明了 `dsh.bundle.patch: ./cordis.patch.yml` —— DSH 加载器**读不到**该文件时
 # 会**整个跳过**这个 bundle（现象：重启宿主也看不到任何 workprocess 工具）。
 #
-# 三条装载行 = 领域插件 + 工具插件 + 命令行插件（与宿主 base bundle 里
-# `dsh-goal` / `dsh-tool-goal` / `dsh-command-goal` 的关系一致）：后两者都是**独立包**，
-# 只消费 `ctx.workprocess`；不装工具面 = 只有服务没有工具，不装命令行 = 只有工具没有命令。
-# 顺序：领域插件先（provide 服务），工具与命令行随后消费。
+# 四条装载行 = 领域插件 + 回合驱动器 + 工具插件 + 命令行插件（与宿主 base bundle 里
+# `dsh-goal` / `dsh-goal-round-driver` / `dsh-tool-goal` / `dsh-command-goal` 一一对应）：
+# 后三者都是**独立包**，只消费 `ctx.workprocess`。不装驱动器 = 状态迁移全靠人/模型显式调；
+# 不装工具面 = 只有服务没有工具；不装命令行 = 只有工具没有命令。
+# 顺序：领域插件先（provide 服务），其余随后消费。
 - insert:
     - id: workprocess
       name: "workprocess"
+    - id: workprocess-round-driver
+      name: "workprocess-round-driver"
       config:
         # 回合边界是否自动驱动（开工 / auto 阶段自动收口 / 落盘 block）：缺省 true。
         tick: true

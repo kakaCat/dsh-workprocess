@@ -6,11 +6,7 @@
     "declaration": true,
     "outDir": "dist",
     "rootDir": "src",
-    "paths": {
-      "workprocess-round-driver": [
-        "./src/index.ts"
-      ]
-    }
+    "paths": {}
   },
   "include": [
     "src/**/*.ts"

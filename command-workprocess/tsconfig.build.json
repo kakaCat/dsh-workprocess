@@ -6,11 +6,7 @@
     "declaration": true,
     "outDir": "dist",
     "rootDir": "src",
-    "paths": {
-      "dsh-command-workprocess": [
-        "./src/index.ts"
-      ]
-    }
+    "paths": {}
   },
   "include": [
     "src/**/*.ts"

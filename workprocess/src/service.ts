@@ -14,7 +14,7 @@
 import {
   blockWorkTask, clearWorkTask, closeWorkProcess, completeWorkStage, completeWorkTask, createWorkProcess,
   createWorkTask, currentStageOf, defineWorkStages, discardWorkProcess, editWorkObjective, editWorkTask,
-  pauseWorkTask, resumeWorkTask, workProcessOf,
+  pauseWorkTask, resumeWorkTask, startWorkStage, workProcessOf,
 } from './kernel.js'
 import type {
   CreateWorkProcessRequest, CreateWorkTaskRequest, EditWorkTaskRequest, WorkBlockReason, WorkProcess,
@@ -55,6 +55,8 @@ export interface WorkprocessService {
   // ── 写（域 API，与内核服务函数一一对应）─────────────────────────
   createProcess(scope: string, request: CreateWorkProcessRequest): Promise<boolean>
   defineStages(scope: string, stages: readonly WorkStageDraft[], revision?: number): Promise<boolean>
+  /** 阶段开工（串行门放行才成立；**驱动器的动作**，不是模型的动词）。 */
+  startStage(scope: string, stageKey: string, revision?: number): Promise<boolean>
   editObjective(scope: string, objective: string, revision?: number): Promise<boolean>
   closeStage(scope: string, stageKey: string, revision?: number): Promise<boolean>
   createTask(scope: string, request: CreateWorkTaskRequest, revision?: number): Promise<boolean>
@@ -68,6 +70,15 @@ export interface WorkprocessService {
   discardProcess(scope: string, revision?: number): Promise<boolean>
   /** 收口整条流程（全阶段 done 才成立；方案 B 的轻量终止水印）。 */
   closeProcess(scope: string, revision?: number): Promise<boolean>
+
+  // ── 回合计数（驱动器的回合预算判据；耐久在归属记录里）────────────
+  /** 该归属域**已准入回合数**（缺省 = 没记录过）。 */
+  roundsStarted(scope: string): Promise<number | undefined>
+  /**
+   * 记一个**被接手的回合**（`round` 单调前进；旧回合/重复观察零写入）。
+   * 只有自署 `work` 来源的回合才算——人的消息不是回合（判据在驱动器侧）。
+   */
+  observeRound(scope: string, round: number): Promise<void>
 
   // ── 人机干预（agent 键；命令面用）──────────────────────────────
   /** 丢弃该 agent 会话的整条流程（幂等：没有流程 ⇒ false）。 */
@@ -135,6 +146,17 @@ export function createWorkprocessService(
     },
     // 写：域 API（与内核服务函数一一对应，服务是唯一持有 store 的那一层）。
     createProcess: (scope, request) => createWorkProcess(deps, scope, request),
+    startStage: (scope, stageKey, revision) => startWorkStage(deps, scope, stageKey, revision),
+    roundsStarted: async (scope) => (await deps.store.get(scope))?.rounds?.started,
+    async observeRound(scope, round) {
+      await deps.store.mutate(scope, (record) => {
+        const current = record.rounds?.started ?? 0
+        if (round <= current) return undefined   // 旧回合 / 重复观察：零写入
+        record.rounds = { ...record.rounds, started: round }
+        record.updatedAt = deps.now()
+        return { changed: true }
+      })
+    },
     defineStages: (scope, stages, revision) => defineWorkStages(deps, scope, stages, revision),
     editObjective: (scope, objective, revision) => editWorkObjective(deps, scope, objective, revision),
     closeStage: (scope, stageKey, revision) => completeWorkStage(deps, scope, stageKey, revision),

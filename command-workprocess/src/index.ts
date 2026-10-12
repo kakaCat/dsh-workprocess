@@ -20,7 +20,7 @@
  * 授权面据此判"本回合由人发起"，`update_workstage action=edit` 这类**真人专属**动作才落得下章。
  * 若省略 source 会被当成 user（同样的判定），但显式自署是"这是人发起的一轮"的诚实声明。
  *
- * 【它怎么拿数据】只消费 `ctx.workprocess`（由 `workprocess` 提供）——不自己开存储域
+ * 【它怎么拿数据】只消费 `workprocessOf(ctx)`（由 `workprocess` 提供）——不自己开存储域
  * （同名域重复 `open` 是响亮拒绝），也不绕内核改状态。动作按 `invocation.agent` 定位会话。
  *
  * 【命令天然的授权】命令由人敲出来，所以 `edit` / `resume` / `clear` 这类真人专属动作在这一层是合法的
@@ -31,6 +31,7 @@
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Context } from '@deepseek-ai/cordis'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
+import { workprocessOf } from 'workprocess'
 import type { WorkprocessService, WorkprocessStatus } from 'workprocess'
 import type { WorkStage, WorkTask } from 'workprocess'
 
@@ -43,7 +44,7 @@ export const inject = ['commands', 'workprocess']
 const USAGE = '用法：/work [<目标>|edit <目标>|pause|resume|clear]'
 
 /**
- * 命令面只要的**四个干预方法**（接口隔离）：`ctx.workprocess` 是完整域服务，
+ * 命令面只要的**四个干预方法**（接口隔离）：`workprocessOf(ctx)` 是完整域服务，
  * 命令只读概览 + 做三种人可做的干预——收窄之后测试桩不必补一整套写方法。
  */
 export type WorkprocessFacade = Pick<WorkprocessService, 'view' | 'discard' | 'pauseActive' | 'resumePaused'>
@@ -196,7 +197,7 @@ function deliver(invocation: WorkCommandInvocation, text: string, receipt: strin
   return { kind: 'success', text: receipt }
 }
 
-/** 造命令 handler（对着 `ctx.workprocess` 的人机干预面做分派）。 */
+/** 造命令 handler（对着 `workprocessOf(ctx)` 的人机干预面做分派）。 */
 export function workCommandHandler(service: WorkprocessFacade) {
   return async (invocation: WorkCommandInvocation): Promise<WorkCommandResult> => {
     const command = parseWorkCommand(invocation.rawInput)
@@ -259,7 +260,7 @@ export function workCommandHandler(service: WorkprocessFacade) {
 
 /**
  * 注册 `/work`（宿主 `dsh-command-goal` 同款形状：直接吃 cordis Context，
- * `ctx.commands` / `ctx.workprocess` 都是官方类型）。
+ * `ctx.commands` / `workprocessOf(ctx)` 都是官方类型）。
  */
 export function apply(ctx: Context): void {
   ctx.commands.register({
@@ -268,6 +269,6 @@ export function apply(ctx: Context): void {
     name: 'work',
     description: '建/看/干预这条流程（阶段 · 任务 · 回合）：给目标即让 agent 拆阶段建流程',
     input: { hint: '[<目标>|edit <目标>|pause|resume|clear]' },
-    handler: workCommandHandler(ctx.workprocess),
+    handler: workCommandHandler(workprocessOf(ctx)),
   })
 }

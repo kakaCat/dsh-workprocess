@@ -7,7 +7,7 @@
   "scripts": {
     "test": "vitest run --passWithNoTests",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "build": "pnpm -r run build:bootstrap && pnpm -r build"
+    "build": "pnpm -r build"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

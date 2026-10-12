@@ -18,6 +18,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-session-projection'
 import type {} from '@deepseek-ai/dsh-system-prompt'
+import { workprocessOf } from 'workprocess'
 import { WORK_TOOL_FACTORIES } from './tools.js'
 import { WORK_TOOL_REGISTRY } from './registry.js'
 import { authorityResolverOf, deferNoticeOf, askHumanOf, agentOf } from './host.js'
@@ -43,7 +44,7 @@ const REGISTRATION_ORDER: readonly (keyof typeof WORK_TOOL_FACTORIES)[] =
 /** 从宿主 ctx 组装工具面依赖（唯一装配点：工具面只认 `ctx.workprocess` 这个数据口）。 */
 export function workToolDepsOf(ctx: Context): WorkToolDeps {
   return {
-    domain: ctx.workprocess,
+    domain: workprocessOf(ctx),
     // 归属缺省 = **本会话**（一个会话一条流程；多流程并存时要显式给 scope）。
     defaultScope: (exec) => agentOf(exec)?.session?.id,
     resolveAuthority: authorityResolverOf(ctx),

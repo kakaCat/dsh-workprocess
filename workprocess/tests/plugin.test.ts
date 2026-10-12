@@ -14,6 +14,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { apply, name, inject, storageDomainStoreOf, workprocessDomain } from 'workprocess'
 import { WORK_TOOL_REGISTRY } from 'tool-workprocess'
 import { apply as applyTools } from 'tool-workprocess/plugin.js'
+import { apply as applyDriver } from 'workprocess-round-driver'
 import { applyWorkEvent, startWorkStage } from 'workprocess'
 
 interface ToolLike { execute(args: Record<string, unknown>, exec?: unknown): Promise<Record<string, unknown>> }
@@ -87,6 +88,8 @@ function fakeHost(): FakeHost {
     session,
     // 语义等价于宿主的 `agent.followup(message)`：留住投出去的那条，供断言。
     followup: (message: unknown): void => { sent.push(message as Sent) },
+    // 竞态围栏读的两条队列（驱动器会把投出去的那条算作"自己那条"）。
+    inbox: { nextStep: [] as unknown[], nextTurn: [] as unknown[] },
   }
   const tools: Record<string, ToolLike> = {}
   const hooks: string[] = []
@@ -105,14 +108,40 @@ function fakeHost(): FakeHost {
     },
   }
   const domain = fakeDomainFacility()
+  // 驱动器起的那条串行 run（`withoutInitiator`）：harness 靠它把"投递完成"等到确定点上。
+  const runs: Array<Promise<unknown>> = []
+  const teardowns: Array<() => void> = []
   const ctx = {
-    agents: { get: (id: string) => (id === agent.id ? agent : undefined), currentInitiator: () => agent },
+    agents: {
+      get: (id: string) => (id === agent.id ? agent : undefined),
+      currentInitiator: () => agent,
+      // 宿主同款：驱动器在"无发起者"作用域里跑（不把自动回合记成人的动作）。
+      withoutInitiator: <T,>(fn: () => T): T => {
+        const out = fn()
+        if (out instanceof Promise) runs.push(out as Promise<unknown>)
+        return out
+      },
+    },
+    // 驱动器就绪判据读的 fiber 状态（FiberState.ACTIVE = 2）。
+    fiber: { state: 2 },
+    // 耐久检查点口（驱动器在两次推进之间 flush 一次）。
+    sessions: { flush: async (): Promise<boolean> => true },
+    logger: { warn: (): void => {} },
     sessionProjections: { stateOf: () => ({ openTurnStartSeq }) },
     storageDomain: domain.facility,
     tools: { register: (t: unknown) => { const tool = t as { name: string } & ToolLike; tools[tool.name] = tool; return (): void => {} } },
     on: (event: string, cb: (a: unknown, b: unknown) => void | Promise<void>) => {
       hooks.push(event)
       handlers.set(event, [...(handlers.get(event) ?? []), cb])
+    },
+    // 宿主 cordis 的 effect：跑一遍生成器，把 yield 出来的卸载器收好（fiber 卸载时调用）。
+    effect: (fn: () => Generator<unknown, void, unknown>) => {
+      const iter = fn()
+      for (let next = iter.next(); !next.done; next = iter.next()) {
+        const yielded = next.value
+        if (typeof yielded === 'function') teardowns.push(yielded as () => void)
+      }
+      return (): void => { for (const teardown of teardowns.splice(0)) teardown() }
     },
     // 宿主 cordis 的服务注册口（本插件把 `ctx.workprocess` 提供出去，命令行包消费它）。
     provide: (serviceName: string, value: unknown) => { (ctx as Record<string, unknown>)[serviceName] = value; return undefined },
@@ -126,13 +155,29 @@ function fakeHost(): FakeHost {
       getSectionOrder: (name: string) => (name === 'TOOL_GOAL' ? 2400 : 0),
     },
   }
+  /** 等到驱动器那条串行 run 收敛（它有 retire → 可能再起一条）。 */
+  const settle = async (): Promise<void> => {
+    for (let i = 0; i < 20; i += 1) {
+      const pending = runs.splice(0)
+      if (pending.length === 0) {
+        await Promise.resolve()
+        if (runs.length === 0) return
+        continue
+      }
+      await Promise.allSettled(pending)
+    }
+  }
   return {
     ctx: ctx as never, tools, hooks, sent, deferred, policySections, emitted, session, domain,
     store: storageDomainStoreOf(ctx as never),
-    emit: async (event: unknown) => { for (const h of handlers.get('session/event') ?? []) await h(session, event) },
+    emit: async (event: unknown) => {
+      for (const h of handlers.get('session/event') ?? []) await h(session, event)
+      await settle()
+    },
     emitStatus: async (next: string) => {
       status = next
       for (const h of handlers.get('agent/status') ?? []) await h({ agent, status: next })
+      await settle()
     },
     setStatus: (next: string) => { status = next },
     setUserAnswers: (answers) => { userAnswers = [...answers] },
@@ -148,9 +193,10 @@ let host: FakeHost
 
 beforeEach(() => {
   host = fakeHost()
-  // 真机装配的形状：领域插件（provide ctx.workprocess + 驱动）在前，工具插件在后消费它。
-  apply(host.ctx, {})
+  // 真机装配的形状：领域插件（provide ctx.workprocess）在前，工具与驱动器随后消费它。
+  apply(host.ctx)
   applyTools(host.ctx)
+  applyDriver(host.ctx, {})
 })
 
 const call = (tool: string, args: Record<string, unknown> = {}) => host.tools[tool].execute(args, host.exec())
@@ -171,9 +217,14 @@ async function idleTick(h: FakeHost = host): Promise<void> {
 describe('插件装配面', () => {
   it('声明 name / inject，并按登记表注册六个工具（名字逐字一致）', () => {
     expect(name).toBe('workprocess')
-    expect(inject).toEqual(['agents', 'sessionProjections', 'storageDomain'])
+    // 领域插件只 inject 存储域：工具面/驱动器各是独立插件、各有自己的 inject 表。
+    expect(inject).toEqual(['storageDomain'])
     expect(Object.keys(host.tools).sort()).toEqual(WORK_TOOL_REGISTRY.map((e) => e.toolName).sort())
-    expect(host.hooks).toEqual(['session/event', 'agent/status'])
+    // 事件订阅 = 领域插件（session/event）+ 驱动器（宿主 goal driver 同款那张表）。
+    expect(host.hooks).toEqual([
+      'agent/created', 'agent/disposed', 'agent/error', 'agent/status', 'work/changed',
+      'session/event', 'agent/inbox/inserted', 'agent/inbox/claimed', 'agent/inbox/discarded',
+    ])
   })
 
   it('归属记录域：声明合法，且快照的严格性由**内核解码器**在耐久边界把住', () => {
@@ -269,8 +320,9 @@ describe('续跑投递（drive）', () => {
   /** 起一条流程 + 一个任务（驱动配置由用例给）。 */
   async function seeded(config: Record<string, unknown> = { drive: true }) {
     const local = fakeHost()
-    apply(local.ctx, config)
+    apply(local.ctx)
     applyTools(local.ctx)
+    applyDriver(local.ctx, config)
     await local.tools.create_workstage.execute(
       { objective: '把模型发上线', stages: [{ key: 'prep', statement: '准备' }] }, local.exec(),
     )
@@ -328,8 +380,9 @@ describe('阶段规划轮（阶段开工了却没任务 ⇒ 让 agent 建任务�
   /** 起一条流程（**不建任务**：模拟"刚跨过阶段边界"的新阶段）。 */
   async function seededEmpty(config: Record<string, unknown> = { drive: true }) {
     const local = fakeHost()
-    apply(local.ctx, config)
+    apply(local.ctx)
     applyTools(local.ctx)
+    applyDriver(local.ctx, config)
     await local.tools.create_workstage.execute(
       { objective: '实现一个俄罗斯方块小游戏', stages: [{ key: 'ui', statement: '界面与交互' }] }, local.exec(),
     )
@@ -372,8 +425,9 @@ describe('收口确认轮（任务全达成 + 策略 human ⇒ 请人拍板，�
   /** 起一条流程 + 一个任务并把它做完（策略由用例给）。 */
   async function seededDone(policy: 'human' | 'auto' = 'human') {
     const local = fakeHost()
-    apply(local.ctx, { drive: true })
+    apply(local.ctx)
     applyTools(local.ctx)
+    applyDriver(local.ctx, { drive: true })
     await local.tools.create_workstage.execute({
       objective: '实现一个俄罗斯方块小游戏',
       stages: [{ key: 'ui', statement: '界面与交互', close_policy: policy }],
@@ -458,8 +512,9 @@ describe('人机确认接线（工具自己问人：宿主 userQuestions）', ()
   /** 建一条流程 + 一个任务并做完（策略 human，agent 自治）。 */
   async function readyToClose() {
     const local = fakeHost()
-    apply(local.ctx, {})
+    apply(local.ctx)
     applyTools(local.ctx)
+    applyDriver(local.ctx, {})
     await local.tools.create_workstage.execute(
       { objective: 'x', stages: [{ key: 'prep', statement: '准备' }] }, local.exec(),
     )
@@ -514,8 +569,9 @@ describe('流程收口（close: auto 缺省 / human 显式）', () => {
   /** 起一条单阶段流程并把它做完（auto 收口，配置由用例给）。 */
   async function seededFinished(config: Record<string, unknown> = {}) {
     const local = fakeHost()
-    apply(local.ctx, { drive: true, ...config })
+    apply(local.ctx)
     applyTools(local.ctx)
+    applyDriver(local.ctx, { drive: true, ...config })
     await local.tools.create_workstage.execute(
       { objective: '实现一个俄罗斯方块小游戏', stages: [{ key: 'only', statement: '唯一阶段', close_policy: 'auto' }] },
       local.exec(),
