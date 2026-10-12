@@ -91,6 +91,12 @@ export interface WorkToolDeps {
    */
   readonly defaultScope?: (exec: unknown) => string | undefined
   /**
+   * **落 block 的前置轮数**（缺省 {@link DEFAULT_BLOCKED_AFTER_ROUNDS}，对齐宿主 goal 的
+   * `blockedAfterConsecutiveRounds`）：自治回合里，没跑满这么多轮就不许宣告"被挡住"——
+   * 防的是"第一轮遇到点难处就停手等人"。真人直接发起不受此限（人在场，随时可以叫停）。
+   */
+  readonly blockedAfterRounds?: number
+  /**
    * 把一条**通告**追加到本次工具回执之后（宿主 `exec.deferContext` 的适配口；缺省 = 不发）。
    *
    * 【为什么需要它（对齐宿主 `dsh-tool-goal`）】宿主 goal 在模型刚落完 `complete` / `blocked`
@@ -347,6 +353,9 @@ export async function createWorkstage(
  *   · `discard` —— **丢弃整条流程**（不要 stage_key；误建流程的补救口，见下）。
  * 阶段开工不是本工具的动词：串行门放行后由驱动器开工。
  */
+/** 自治回合落 block 的前置轮数（缺省 3，对齐宿主 goal）。 */
+export const DEFAULT_BLOCKED_AFTER_ROUNDS = 3
+
 const STAGE_ACTIONS = ['done', 'edit', 'discard', 'arm', 'disarm'] as const
 
 /**
@@ -595,7 +604,22 @@ export async function updateWorktask(
     if (act === 'block' && !KEBAB.test(reasonCode)) {
       return { ...base, success: false, error: 'reason_code 必须是 lower-kebab-case（如 wait-human）' }
     }
-    authorize(('task_' + act) as WorkAuthorityAction, authorityOf(deps, exec))
+    const authority = authorityOf(deps, exec)
+    authorize(('task_' + act) as WorkAuthorityAction, authority)
+    if (act === 'block' && authority.kind !== 'direct-human') {
+      // 对齐宿主 goal 的 `GOAL_TOOL_BLOCK_THRESHOLD`：**同一件事至少撑过 N 轮**才允许宣告被挡住。
+      // 判据用归属域已准入回合数（耐久，重启不丢）；真人直接发起不受此限（人在场随时可叫停）。
+      const threshold = deps.blockedAfterRounds ?? DEFAULT_BLOCKED_AFTER_ROUNDS
+      const rounds = (await deps.domain.roundsStarted(scope)) ?? 0
+      if (rounds < threshold) {
+        return {
+          ...base, success: false,
+          error: `落 block 前至少要跑满 ${threshold} 轮（当前 ${rounds} 轮）——`
+            + '先继续做（把卡点写进回执），或由人直接叫停（真人发起不受此限）。',
+          code: 'WORK_TOOL_BLOCK_THRESHOLD',
+        }
+      }
+    }
     const changed = act === 'edit'
       ? await deps.domain.editTask(scope, taskId, {
         ...(objective.trim() === '' ? {} : { objective }),

@@ -465,7 +465,26 @@ describe('层2 处理器 · 任务', () => {
     expect(String(noReason.error)).toContain('必须给原因')
     const badCode = await updateWorktask(agent, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'block', reason: '等人', reason_code: 'wait_human' })
     expect(String(badCode.error)).toContain('kebab-case')
-    expect((await updateWorktask(agent, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'block', reason: '等人裁', reason_code: 'wait-human' })).changed).toBe(true)
+    // 相位三：**落 block 有门槛**（对齐宿主 goal 的 GOAL_TOOL_BLOCK_THRESHOLD）——
+    // 自治回合没跑满 3 轮不许宣告"被挡住"（防第一轮遇难处就停手等人）。
+    const early = await updateWorktask(agent, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'block', reason: '等人裁', reason_code: 'wait-human' })
+    expect(early.success).toBe(false)
+    expect(early.code).toBe('WORK_TOOL_BLOCK_THRESHOLD')
+    expect(String(early.error)).toContain('当前 0 轮')
+    // 真人直接发起不受此限（人在场，随时可以叫停）。
+    expect((await updateWorktask(human, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'block', reason: '等人裁', reason_code: 'wait-human' })).changed).toBe(true)
+  })
+
+  it('block 门槛：跑满 3 轮后自治回合才允许落 block（判据用耐久回合计数）', async () => {
+    const records = { 'ws-a': { updatedAt: 1, rounds: { started: 3 } } }
+    const agent = depsOf(records)
+    await createWorkstage(agent, { scope: 'ws-a', objective: '把模型发上线', stages: STAGES })
+    await startWorkStage(agent, 'ws-a', 'prep')
+    await createWorktask(agent, { scope: 'ws-a', stage_key: 'prep', objective: '清洗数据' })
+    const blocked = await updateWorktask(agent, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'block', reason: '等外部依赖', reason_code: 'wait-dep' })
+    expect(blocked.changed).toBe(true)
+    const read = await tools.getWorktask(agent, { scope: 'ws-a', task_id: 'wt:prep:1' })
+    expect(JSON.stringify(read)).toContain('blocked')   // 相位与阻塞原因都该在回执里
   })
 
   it('update_worktask：CAS 用旧 revision 改 → WORK_CONFLICT；clear 后按 id 读不到', async () => {

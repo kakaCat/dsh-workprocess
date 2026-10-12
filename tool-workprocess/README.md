@@ -90,6 +90,9 @@ workprocess 的**工具面**：两层各三工具（`src/tools.ts` 顶部的登�
 
 数据口只有 `ctx.workprocess`（`WorkToolDeps.domain`）；`apply` 从宿主 ctx 一次接好授权、通告、人机确认。
 
+**配置**（装载层 `config` 段）：`policySection`（缺省 true，策略段是否注册）、
+`blockedAfterRounds`（缺省 3，自治回合落 `block` 的前置轮数，对齐宿主 goal 的 `blockedAfterConsecutiveRounds`）。
+
 ## 测试
 
 ```bash

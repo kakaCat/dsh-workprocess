@@ -35,6 +35,8 @@ export const WORK_POLICY_TEXT = [
   '- **收口策略决定谁落 done**：`human`（缺省）——你**只提议**，由人确认（agent 自写会被拒）；',
   '  `auto`——任务全达成后由驱动器自动收口，你不要自己写。',
   '- **任务有回合预算**（`max_rounds`，缺省由配置兜底）：到顶会落盘 block，等人裁；不要靠反复重试绕过它。',
+  '- **落 block 有门槛**：至少撑过 3 轮（`rounds.started`）才允许宣告"被挡住"——第一轮遇到难处就停手',
+  '  会被拒（真人直接发起不受此限）。到顶被内核落 block 之后，恢复要人来：`update_worktask action=resume`。',
   '- 自动续跑回合会以一条带 `<workprocess_round>` / `<workprocess_plan>` / `<workprocess_ask>` 语义的',
   '  指令出现（来源自署 `work`）：只做那一轮说的事，做完停手，下一轮由驱动器投递。',
   '- **续跑许可是耐久的**（`get_workstage` 回执里的 `activation`）：会话从盘上恢复（宿主重启）后',
@@ -56,6 +58,11 @@ export const inject = ['tools', 'workprocess', 'agents', 'sessionProjections', '
 export interface WorkToolConfig {
   /** 策略段是否注册（缺省 true；关掉只影响模型面纪律，不影响工具）。 */
   readonly policySection?: boolean
+  /**
+   * 自治回合落 `block` 的前置轮数（缺省 {@link DEFAULT_BLOCKED_AFTER_ROUNDS} = 3，对齐宿主 goal 的
+   * `blockedAfterConsecutiveRounds`）。真人直接发起不受此限。
+   */
+  readonly blockedAfterRounds?: number
 }
 
 /** 登记顺序（= 登记表顺序，稳定：日志与快照可比）。 */
@@ -63,9 +70,10 @@ const REGISTRATION_ORDER: readonly (keyof typeof WORK_TOOL_FACTORIES)[] =
   WORK_TOOL_REGISTRY.map((e) => e.handler as keyof typeof WORK_TOOL_FACTORIES)
 
 /** 从宿主 ctx 组装工具面依赖（唯一装配点：工具面只认 `ctx.workprocess` 这个数据口）。 */
-export function workToolDepsOf(ctx: Context): WorkToolDeps {
+export function workToolDepsOf(ctx: Context, config?: WorkToolConfig): WorkToolDeps {
   return {
     domain: workprocessOf(ctx),
+    ...(config?.blockedAfterRounds === undefined ? {} : { blockedAfterRounds: config.blockedAfterRounds }),
     // 归属缺省 = **本会话**（一个会话一条流程；多流程并存时要显式给 scope）。
     defaultScope: (exec) => agentOf(exec)?.session?.id,
     resolveAuthority: authorityResolverOf(ctx),
@@ -78,7 +86,7 @@ export function workToolDepsOf(ctx: Context): WorkToolDeps {
 
 /** 把六个 workprocess 工具注册进宿主 `tools` 服务（返回卸载器数组）。 */
 export function apply(ctx: Context, config?: WorkToolConfig): void {
-  const deps = workToolDepsOf(ctx)
+  const deps = workToolDepsOf(ctx, config)
   for (const handler of REGISTRATION_ORDER) {
     const factory = WORK_TOOL_FACTORIES[handler] as (d: WorkToolDeps) => unknown
     ctx.tools.register(factory(deps) as never)

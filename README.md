@@ -100,6 +100,16 @@ python3 scripts/observe-workflow.py <会话 id>   # 指定会话
 两个阶段各自 auto 收口、流程 `closedAt` 落下，全程零人工介入。账：6 条投递中 2 条规划轮、
 `rounds.started` 未前进（任务都在规划轮内做完，没消耗任务轮）。
 
+## block 语义（对齐宿主 goal 的"连续 N 轮"纪律）
+
+| 谁落 | 门槛 | 恢复 |
+|---|---|---|
+| **agent**（自治回合） | 至少跑满 **3 轮**（`rounds.started`，耐久）才允许宣告"被挡住"；不够 ⇒ 拒并给 `WORK_TOOL_BLOCK_THRESHOLD`（对齐 goal 的 `GOAL_TOOL_BLOCK_THRESHOLD`） | `update_worktask action=resume`（**真人专属**）；或 `update_workstage action=arm` 放回续跑许可 |
+| **真人**（直接发起） | 无门槛（人在场，随时可以叫停） | 同上 |
+| **内核**（回合预算到顶） | 到顶即落盘 block（`round-limit`），不需要"连续"判据 | 同上 |
+
+阈值可配：工具插件 `blockedAfterRounds`（缺省 3）。
+
 ## 续跑许可（`activation`：耐久；对齐宿主 goal 的 arm/disarm）
 
 | | 说明 |

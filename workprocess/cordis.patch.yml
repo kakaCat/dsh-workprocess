@@ -28,5 +28,8 @@
         disarmOnResume: true
     - id: tool-workprocess
       name: "tool-workprocess"
+      config:
+        # 自治回合落 block 的前置轮数（缺省 3，对齐宿主 goal 的 blockedAfterConsecutiveRounds）。
+        blockedAfterRounds: 3
     - id: command-workprocess
       name: "dsh-command-workprocess"
