@@ -1,5 +1,8 @@
 # workprocess-round-driver
 
+> 本包自带装载行（`dsh.bundle.patch: ./cordis.patch.yml`，只插自己那一行）：profile 的
+> `dsh.profile.bundles` 里列上本包即生效。
+
 **回合驱动器插件**（对齐宿主 `@deepseek-ai/dsh-goal-round-driver`）：`name` / `inject` / `apply(ctx, config)`，
 **独立装载行**（`cordis.patch.yml` 的第二条，紧跟领域插件）。职责：agent 空闲时把流程往前推——
 落"不需要人"的副作用（开工 / auto 收口 / 落盘 block / 流程收口），并投递下一轮（任务轮 / 阶段规划轮 / 收口确认轮）。

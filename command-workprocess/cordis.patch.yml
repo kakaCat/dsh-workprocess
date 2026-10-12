@@ -1,0 +1,8 @@
+# command-workprocess 的装载层（bundle patch）。
+#
+# 一包一 patch（对齐宿主：每个 `@deepseek-ai/*` 包自带自己的装载行）：本文件只插自己那一行。
+# 目标 profile 的 `dsh.profile.bundles` 里列了本包 ⇒ 这一行才会被应用；
+# **`dsh.bundle.patch` 指向的文件读不到，宿主会整个跳过这个 bundle**（现象：重启也不见本包生效）。
+- insert:
+    - id: command-workprocess
+      name: "dsh-command-workprocess"

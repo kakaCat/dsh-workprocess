@@ -1,5 +1,8 @@
 # tool-workprocess
 
+> 本包自带装载行（`dsh.bundle.patch: ./cordis.patch.yml`，只插自己那一行）：profile 的
+> `dsh.profile.bundles` 里列上本包即生效。
+
 **插件形态**（对齐宿主 `dsh-tool-goal`）：`name` / `inject: ['tools','workprocess','agents','sessionProjections','systemPrompt']` / `apply(ctx, config)`。
 **数据口只有 `ctx.workprocess`**——存储域由领域插件独占打开（同名域重复 `open` 是响亮拒绝），
 本面不碰 store、不绕内核；授权判据 / 通告（`exec.deferContext`）/ 人机确认（`ctx.userQuestions`）

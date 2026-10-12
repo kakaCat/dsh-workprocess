@@ -66,11 +66,19 @@ pnpm build         # 出 dist/（宿主加载的是 JS，不是 TS）。四包�
 
 ## 装进宿主（DSH profile）
 
-profile 的 `package.json` 里四个包都要有依赖（`link:<repo>/<包目录>`）、`node_modules/` 下要有对应软链，
-`dsh.profile.bundles` 里列 **`workprocess`**（它带 `dsh.bundle.patch: ./cordis.patch.yml`，
-该 patch 一次插四条装载行：`workprocess` → `workprocess-round-driver` → `tool-workprocess` →
-`dsh-command-workprocess`）。
-注意：**`dsh.bundle.patch` 指向的文件读不到，宿主会整个跳过这个 bundle**（现象：重启也不见工具）。
+**一包一 patch**（对齐宿主：每个 `@deepseek-ai/*` 包自带自己那一行）：
+四个包各自声明 `dsh.bundle.patch: ./cordis.patch.yml`，各自的 patch 只插**自己**那一行
+（工具面 `blockedAfterRounds`、驱动器 `tick/drive/defaultMaxRounds/close/disarmOnResume` 等配置
+跟着各自的包走）。profile 侧要做两件事：
+
+1. `package.json` 的 `dependencies` 里四个包都写 `link:<repo>/<包目录>`，`node_modules/` 下有对应软链；
+2. `dsh.profile.bundles` 里**四个包都列**（顺序建议 领域 → 驱动器 → 工具 → 命令行；
+   真正的先后由 cordis 的 `inject` 保证——消费方等提供方）。
+
+于是每一层都独立可装可卸：只列 `workprocess` = 只有领域服务没有工具/驱动器；只列 `tool-workprocess`
+而不列领域包 = 工具装不上（`inject` 等不到 `workprocess`）。
+
+注意：**`dsh.bundle.patch` 指向的文件读不到，宿主会整个跳过这个 bundle**（现象：重启也不见本包生效）。
 改完重启 DSH 生效。
 
 ## 真机验收（一条全 auto 流程）

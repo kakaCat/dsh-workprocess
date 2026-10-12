@@ -1,40 +1,18 @@
 # workprocess 的装载层（bundle patch）。
 #
-# 为什么必须有这个文件：目标 profile 的 `dsh.profile.bundles` 里列了本包，而本包
-# package.json 声明了 `dsh.bundle.patch: ./cordis.patch.yml` —— DSH 加载器**读不到**该文件时
-# 会**整个跳过**这个 bundle（现象：重启宿主也看不到任何 workprocess 工具）。
+# 一包一 patch（对齐宿主：每个 `@deepseek-ai/*` 包自带自己的装载行）：本文件只插领域插件那一行。
+# 工具面 / 回合驱动器 / 命令行各自带自己的 patch——**四条包各自独立可装可卸**，
+# 顺序由 cordis 的 `inject` 保证（消费方等提供方）。
 #
-# 四条装载行 = 领域插件 + 回合驱动器 + 工具插件 + 命令行插件（与宿主 base bundle 里
-# `dsh-goal` / `dsh-goal-round-driver` / `dsh-tool-goal` / `dsh-command-goal` 一一对应）：
-# 后三者都是**独立包**，只消费 `ctx.workprocess`。不装驱动器 = 状态迁移全靠人/模型显式调；
-# 不装工具面 = 只有服务没有工具；不装命令行 = 只有工具没有命令。
-# 顺序：领域插件先（provide 服务），其余随后消费。
+# 为什么必须有这个文件：目标 profile 的 `dsh.profile.bundles` 里列了本包，而本包 package.json
+# 声明了 `dsh.bundle.patch: ./cordis.patch.yml` —— DSH 加载器**读不到**该文件时会**整个跳过**
+# 这个 bundle（现象：重启宿主也看不到任何 workprocess 工具）。
 - insert:
     - id: workprocess
       name: "workprocess"
-    - id: workprocess-round-driver
-      name: "workprocess-round-driver"
-      config:
-        # 回合边界是否自动驱动（开工 / auto 阶段自动收口 / 落盘 block）：缺省 true。
-        tick: true
-        # 空闲边界是否**自动投递续跑回合**（任务自己往下跑）：这里打开。
-        # 刹车 = 任务自己的 max_rounds，没写就按 defaultMaxRounds（硬上限，防跑飞）。
-        drive: true
-        defaultMaxRounds: 20
-        # 流程收口：auto = 最后一段 done 即收口（缺省）；human = 全阶段 done 后投「请判」轮（判了不落章，方案 B 口径）。
-        close: auto
-        # 会话 resume（宿主重启后加载）⇒ 自动收回续跑许可（disarmed），要人说"继续"再 arm。
-        # 对齐宿主 goal 的 disarm-on-resume 纪律；想让流程跨重启继续自动跑就设 false。
-        disarmOnResume: true
-    - id: tool-workprocess
-      name: "tool-workprocess"
-      config:
-        # 自治回合落 block 的前置轮数（缺省 3，对齐宿主 goal 的 blockedAfterConsecutiveRounds）。
-        blockedAfterRounds: 3
-    - id: command-workprocess
-      name: "dsh-command-workprocess"
     # 不变量伴生件（对齐宿主 `dsh-goal/invariant`）：**只在开发/CI** 挂——它 inject `invariants`，
-    # 而桌面 profile 不挂 `@deepseek-ai/dsh-invariants`（宿主自己的 goal/session 伴生件同样休眠）。
-    # 要用就把下面两行放开，并在 profile 里补一挂 `@deepseek-ai/dsh-invariants` 的行：
+    # 而桌面 profile 不挂 `@deepseek-ai/dsh-invariants`（那个服务在发行物里**没有 provider**，
+    # 宿主自己的 goal/session 伴生件同样因此休眠）。要用就放开下面两行，
+    # 并在 profile 里补一挂 `@deepseek-ai/dsh-invariants` 的行：
     # - id: workprocess-invariant
     #   name: "workprocess/invariant"
