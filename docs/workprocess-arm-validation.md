@@ -1,2 +1,0 @@
-armed ok
-armed done
