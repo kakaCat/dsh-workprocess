@@ -362,6 +362,45 @@ describe('续跑投递（drive）', () => {
     expect(stages.stages).toMatchObject([{ state: 'active' }])
   })
 
+  it('门槛数字**两处必须同值**（驱动器只负责写进提示词，真正拒 block 的是工具面）', async () => {
+    // 两个包各自独立装载（一包一 patch），驱动器读不到工具面的 config ⇒ 漂移只能由门禁抓。
+    // 漂移的后果：模型按投递里的数去试、被工具面按另一个数拒（真机踩过"只说 block 会被拒"的同类白跑）。
+    const numberIn = (text: string): number | undefined => {
+      const m = /撑[满过] (\d+) 轮/.exec(text)
+      return m === null ? undefined : Number(m[1])
+    }
+    /** 同一份装载配置同时喂给工具面与驱动器，回读两处的门槛数字。 */
+    async function pair(toolConfig: Record<string, unknown>, driverConfig: Record<string, unknown>) {
+      const local = fakeHost()
+      apply(local.ctx)
+      applyTools(local.ctx, toolConfig)
+      applyDriver(local.ctx, { drive: true, ...driverConfig })
+      await local.tools.create_workstage.execute(
+        { objective: 'x', stages: [{ key: 'prep', statement: '准备' }] }, local.exec(),
+      )
+      await local.tools.create_worktask.execute({ stage_key: 'prep', objective: '清洗数据' }, local.exec())
+      await local.emitStatus('idle')
+      const tool = local.tools.update_worktask as unknown as {
+        parameters: { properties: { action: { description: string } } }
+      }
+      return {
+        prompt: numberIn(JSON.stringify(local.sent[0].content)),
+        tool: numberIn(tool.parameters.properties.action.description),
+        policy: numberIn(local.policySections[0].text),
+      }
+    }
+
+    const dflt = await pair({}, {})
+    expect(dflt.prompt).toBe(3)                      // 两边缺省都必须是 3（改一处忘另一处即红）
+    expect(dflt.tool).toBe(dflt.prompt)
+    expect(dflt.policy).toBe(dflt.prompt)
+    // 配置改一处：只要两处同值，投递与工具自述就还是同一个数。
+    const five = await pair({ blockedAfterRounds: 5 }, { blockedAfterRounds: 5 })
+    expect(five.prompt).toBe(5)
+    expect(five.tool).toBe(5)
+    expect(five.policy).toBe(5)
+  })
+
   it('回合被接手 ⇒ 计数耐久前进；到上限落盘 block 并停止投递', async () => {
     const h = await seeded({ drive: true, defaultMaxRounds: 1 })
     await h.emitStatus('idle')              // 开工 + 投第 1 轮

@@ -1,143 +1,135 @@
 /**
- * workprocess 的**域不变量**（对齐宿主 `@deepseek-ai/dsh-goal/src/invariant.ts`：
- * 宿主用独立折叠校验耐久事件流；本包把同一条纪律做成可单测的纯检查）。
+ * **不变量伴生插件**（对齐宿主 `dsh-goal/lib/invariant.js`：独立入口、`inject: ['invariants']`、
+ * 以包名注册进宿主的 invariants 服务）。
  *
- * 【检查什么】折叠结果必须满足的不变量——违反即"规则实现坏了"，不是业务拒绝：
- *   INV-1 层2 终态：`complete` 的任务只能**原样保留**或被 `clear`，不得再被改写；
- *   INV-2 revision 单调：有效变更恰好 +1（`init` 为 1），无效变更**零变化**（幂等）；
- *   INV-3 blocked 必带非空结构化原因（code + message）；
- *   INV-4 身份稳定：流程 id 不变；存活的阶段键与任务 id / stageKey 不变；
- *         `objective` 只由 `init`（确立）与 `objective-edit`（人改目标）两个动词改写；
- *   INV-5 **串行门**：任一阶段非 `pending` 时，其前序阶段必须全 `done`（至多一个 active）；
- *   INV-6 **阶段收口自洽**：阶段 `done` ⇒ 其任务非空且全部 `complete`。
+ * 【它守什么——两件写路径守卫**拦不住**的事】
+ *   ① **发布前的流校验**：挂 `internal/dispatch`，在每一格 `work/changed` **发布给监听器之前**，
+ *      拿载荷里的"事件 + 快照"做**影子折叠**——事件必须能把上一份快照折成载荷里那一份
+ *      （`applyWorkEvent` → `sameProcess`）。写路径的守卫是"自己折完自己验"；这一层验的是
+ *      **外部流**：漏发 / 乱序 / 重复 / 事件与快照不一致 / 有东西绕过领域服务直接改状态，
+ *      都会在这里现形。
+ *   ② **启动时重放已落盘的历史**：从服务面把整张表审一遍（严格解码 + 归属边界 + 读数合法性），
+ *      通过审计的快照拿来做影子折叠的**播种**——于是"上一版留下的 / 被人手改过的"坏记录
+ *      在装载那一刻就被点名，而不是等它某天被读出来才炸。
  *
- * INV-5 / INV-6 是本包相对宿主的**加层纪律**——两层模型里最容易出的错就是
- * "阶段态与任务态各说各话"（阶段标了 done 但任务还没完、后一阶段偷跑）。
+ * 【为什么它必须是独立插件】它要 `inject: ['invariants']`：宿主**没挂**那个服务时它根本不激活
+ * （桌面 profile 就是这个情况——宿主自己的 goal / session 伴生件同样是休眠的）。
+ * 装法（开发/CI）：profile 里既挂 `@deepseek-ai/dsh-invariants`，也挂本入口 `workprocess/invariant`。
+ *
+ * 【文件名的讲究】本文件就叫 `invariant.ts`（对齐宿主 `dsh-goal/src/invariant.ts`）：
+ * 这个名字留给**伴生入口**，域不变量本身的**纯检查**在 `fold.ts` 里（同宿主：严格校验沉在折叠层）。
  *
  * @module workprocess/invariant
  */
-import type { WorkEventKind } from './domain.js'
-import { processAllowsClose, sameProcess, sameTask, serialViolation, type WorkFoldResult } from './fold.js'
-import { WorkError } from './runtime.js'
-import type { WorkProcess, WorkTask } from './types.js'
+import type { Context } from '@deepseek-ai/cordis'
+import { applyWorkEvent, decodeWorkProcess, sameProcess } from './kernel.js'
+import type { WorkProcess } from './kernel.js'
+import { onWorkChanged, workprocessOf, type WorkChangedPayload } from './events.js'
 
-/** 一条不变量违反（人话；供测试与诊断面）。 */
-export interface WorkInvariantViolation {
-  readonly inv: 'INV-1' | 'INV-2' | 'INV-3' | 'INV-4' | 'INV-5' | 'INV-6' | 'INV-7'
-  readonly message: string
+/** 伴生插件名（宿主同款命名：`<包>-invariant`）。 */
+export const name = 'workprocess-invariant'
+
+/** 只有宿主挂了不变量服务才激活。 */
+export const inject = ['invariants']
+
+/** 宿主 invariants 服务的**最小面**（`register(packageName, installer)`）。 */
+interface InvariantsService {
+  register(packageName: string, installer: ((ctx: Context, fail: (message: string) => never) => unknown) & {
+    readonly inject?: readonly string[]
+  }): () => void
 }
 
-function tasksById(process: WorkProcess | undefined): Map<string, WorkTask> {
-  const map = new Map<string, WorkTask>()
-  for (const stage of process?.stages ?? []) for (const task of stage.tasks) map.set(task.id, task)
-  return map
-}
+/** 本包在 invariants 服务里占的包名（= 领域包名，一个包只能注册一次）。 */
+const PACKAGE_NAME = 'workprocess'
 
 /**
- * 校验一次折叠是否守住不变量。
+ * 装配：把本包的不变量注册进宿主服务。返回 `register` 的处置器（随插件卸载）。
  *
- * @param prev 折叠前的快照（可能 undefined）
- * @param res 折叠结果
- * @param eventKind 触发事件（`init` 时 `objective` 允许确立；缺省按最严口径）
+ * `installer.inject = ['workprocess']`：校验要经**服务面**读状态（域由领域插件独占打开）。
  */
-export function checkWorkInvariants(
-  prev: WorkProcess | undefined,
-  res: WorkFoldResult,
-  eventKind?: WorkEventKind,
-): readonly WorkInvariantViolation[] {
-  const out: WorkInvariantViolation[] = []
-  const next = res.next
-  if (!res.changed) {
-    // 无效变更必须**零变化**（不得顺手 bump revision）。
-    if (prev === undefined) {
-      if (next !== undefined) out.push({ inv: 'INV-2', message: '无效变更却产出了流程快照' })
-    } else if (next === undefined || !sameProcess(next, prev)) {
-      out.push({ inv: 'INV-2', message: '无效变更却改动了快照（幂等被破坏）' })
-    }
-    return out
-  }
-  if (next === undefined) {
-    out.push({ inv: 'INV-2', message: 'changed:true 却没有快照' })
-    return out
-  }
-  if (prev === undefined) {
-    if (next.revision !== 1) out.push({ inv: 'INV-2', message: '建流程的 revision 必须是 1（实际 ' + next.revision + '）' })
-    return out
-  }
-  if (next.revision !== prev.revision + 1) {
-    out.push({ inv: 'INV-2', message: 'revision 未恰好 +1（' + prev.revision + ' → ' + next.revision + '）' })
-  }
-  const before = tasksById(prev)
-  const after = tasksById(next)
-
-  if (next.id !== prev.id) out.push({ inv: 'INV-4', message: '流程身份被改写（' + prev.id + ' → ' + next.id + '）' })
-  // objective 只能由两个**明说的**动词改写：`init`（确立）与 `objective-edit`（人改目标）。
-  // 其余任何事件顺手改 objective 都是规则实现坏了——目标漂移会让"跑的是不是同一件事"无从判定。
-  if (eventKind !== 'init' && eventKind !== 'objective-edit' && next.objective !== prev.objective) {
-    out.push({ inv: 'INV-4', message: 'objective 被非 init / objective-edit 事件改写（应当稳定）' })
-  }
-  // closedAt 只能由 `process-close` 写：它是终止水印，任何别的动词顺手改它都是收口语义被架空。
-  if (eventKind !== 'process-close' && next.closedAt !== prev.closedAt) {
-    out.push({ inv: 'INV-4', message: 'closedAt 被非 process-close 事件改写（终止水印应当稳定）' })
-  }
-
-  // INV-1：已完成的任务只能原样保留，或被 clear 掉（不在 after 里）。
-  for (const [id, task] of before) {
-    if (task.phase !== 'complete') continue
-    const kept = after.get(id)
-    if (kept !== undefined && !sameTask(task, kept)) {
-      out.push({ inv: 'INV-1', message: 'complete 的任务被改写（终态不可逆）：' + id })
-    }
-  }
-
-  // INV-4：存活任务的身份不被改写（id 在 map 里已稳定，故只查归属跨层漂移）。
-  for (const [id, task] of after) {
-    const was = before.get(id)
-    if (was !== undefined && was.stageKey !== task.stageKey) {
-      out.push({ inv: 'INV-4', message: '任务跨阶段漂移（' + id + '：' + was.stageKey + ' → ' + task.stageKey + '）' })
-    }
-  }
-
-  // INV-3：blocked 必带结构化原因（code 与 message 都非空）。
-  for (const [id, task] of after) {
-    if (task.phase !== 'blocked') continue
-    if (task.blockedReason === undefined
-      || task.blockedReason.code.trim() === '' || task.blockedReason.message.trim() === '') {
-      out.push({ inv: 'INV-3', message: 'blocked 任务缺结构化原因（code + message）：' + id })
-    }
-  }
-
-  // INV-5：串行门。
-  const gate = serialViolation(next.stages)
-  if (gate !== undefined) out.push({ inv: 'INV-5', message: gate })
-
-  // INV-6：阶段收口自洽（done ⇒ 任务非空且全 complete）。
-  for (const stage of next.stages) {
-    if (stage.state !== 'done') continue
-    if (stage.tasks.length === 0 || stage.tasks.some((t) => t.phase !== 'complete')) {
-      out.push({ inv: 'INV-6', message: '阶段已收口但任务未全完成：' + stage.key })
-    }
-  }
-
-  // INV-7：流程收口自洽（closed ⇒ 全阶段 done）。与 fold 的收口判据同源：规则坏了当场响。
-  if (next.closedAt !== undefined && !processAllowsClose(next)) {
-    out.push({ inv: 'INV-7', message: '流程已收口但阶段未全部 done' })
-  }
-  return out
-}
+export const apply = (ctx: Context): unknown =>
+  (ctx.get('invariants') as InvariantsService | undefined)?.register(PACKAGE_NAME, install)
 
 /**
- * 写路径的**断言版**（生产接线入口）：违反不变量即抛 `WORK_INVARIANT`——
- * 规则实现坏了要当场响，不许把坏状态写进记录。
+ * 安装器（跑在子 fiber 里；`fail` 抛 `InvariantError` 并点名本包）。
+ *
+ * @param ctx 子上下文（只带 `invariants` + 声明注入的服务）。
+ * @param fail 违规上报口（抛；宿主会拆掉这个子 fiber 并留痕）。
  */
-export function assertWorkInvariants(
-  prev: WorkProcess | undefined, res: WorkFoldResult, eventKind?: WorkEventKind,
-): void {
-  const violations = checkWorkInvariants(prev, res, eventKind)
-  if (violations.length > 0) {
-    throw new WorkError(
-      'workprocess 折叠违反不变量：' + violations.map((v) => v.inv + ' ' + v.message).join('；'),
-      'WORK_INVARIANT',
-    )
-  }
-}
+const install = ((ctx: Context, fail: (message: string) => never): void => {
+  const domain = workprocessOf(ctx)
+  /** 影子折叠状态（每归属域一份）：只由**事件**推出来，与盘上快照互为校验。 */
+  const shadow = new Map<string, WorkProcess | undefined>()
+  /** 发布前暂存的候选状态（键 = 载荷对象本身；宿主同款两段式：先验、发布时提交）。 */
+  const staged = new Map<WorkChangedPayload, { scope: string; state: WorkProcess | undefined }>()
+
+  // ── ② 启动重放：审计整张表，并把通过审计的快照播种进影子状态 ──
+  void domain.audit().then((report) => {
+    for (const finding of report.findings) {
+      fail(`已落盘的归属记录不自洽（${finding.scope}）：${finding.problem}`)
+    }
+    for (const snapshot of report.snapshots) shadow.set(snapshot.scope, snapshot.process)
+  }).catch((error: unknown) => {
+    // fail 自身会抛（点名即拒载）：then 里 fail 抛出的拒绝落到这里时问题**已点名**，
+    // 再原样抛一次只会变成 unhandled rejection（vitest 整机报红、真机日志噪音）。
+    // 仍要 fail 一拍：审计通道本身坏了（audit 拒绝）且 fail 不抛的实现形态下，不留静默缺口。
+    try {
+      fail(`审计已落盘归属记录失败：${String((error as Error)?.message ?? error)}`)
+    } catch {
+      /* 上一轮 fail 已把问题点名；拒绝链到此为止。 */
+    }
+  })
+
+  // ── ① 发布前校验：`internal/dispatch` 拦截每一格 work/changed ──
+  ctx.on('internal/dispatch', (_mode: string, eventName: string, args: readonly unknown[]) => {
+    if (eventName !== 'work/changed') return
+    const payload = args[0] as WorkChangedPayload | undefined
+    if (payload === undefined || typeof payload.scope !== 'string') return
+    const current = shadow.get(payload.scope)
+    // 丢弃墓碑：整条流程没了 ⇒ 影子状态随之清空（没有"事件 + 快照"可折）。
+    if (payload.change === undefined) {
+      staged.set(payload, { scope: payload.scope, state: undefined })
+      return
+    }
+    const { event, process } = payload.change
+    if (process.id !== 'wp:' + payload.scope) {
+      return fail(`work/changed 的归属边界不符：快照 id ${JSON.stringify(process.id)} 与 scope 不一致`)
+    }
+    let result: ReturnType<typeof applyWorkEvent>
+    try {
+      result = applyWorkEvent(current, event)
+    } catch (error) {
+      return fail(`work/changed 的事件折不过去（上一份快照上不成立）：${String((error as Error)?.message ?? error)}`)
+    }
+    if (!result.changed || result.next === undefined) {
+      // 事件在上一份快照上不成立 = 漏发 / 乱序 / 重复通知，之一。
+      return fail(`work/changed 的事件在影子状态上不成立（漏发 / 乱序 / 重复？）：`
+        + `${event.kind} @ revision ${String(current?.revision ?? 0)}`)
+    }
+    if (!sameProcess(result.next, process)) {
+      return fail(`work/changed 的事件折叠结果与载荷快照不一致（${event.kind}）：`
+        + `折出 revision ${result.next.revision}，载荷 revision ${process.revision}`)
+    }
+    staged.set(payload, { scope: payload.scope, state: result.next })
+  }, { global: true })
+
+  // ── ① 提交：真事件发布时核对暂存候选并落到影子状态 ──
+  onWorkChanged(ctx, (payload) => {
+    const candidate = staged.get(payload)
+    if (candidate === undefined) {
+      return fail('work/changed 未经影子折叠校验就发布了（internal/dispatch 那一拍没拦到）')
+    }
+    staged.delete(payload)
+    shadow.set(candidate.scope, candidate.state)
+    return undefined
+  })
+}) as ((ctx: Context, fail: (message: string) => never) => void) & { inject: readonly string[] }
+
+/**
+ * 安装器的自注入面（宿主 invariants 服务读它来建子 fiber）：
+ * 校验要经**服务面**读状态——域由领域插件独占打开，伴生件拿不到表句柄。
+ */
+install.inject = ['workprocess']
+
+export * from './events.js'
+export { decodeWorkProcess }

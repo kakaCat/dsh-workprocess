@@ -3,8 +3,9 @@
 **两层工作模型**的独立实现：一条流程（`workProcess`）由若干**阶段**（`workStage`，严格串行）组成，
 每个阶段装若干**任务**（`workTask`，会被自动续跑推动的工作单元）。
 
-零第三方领域依赖：内核（`workprocess` 包的 types/domain/fold/invariant/runtime/stages/client
-七个模块）不 import 任何东西——由 `tests/kernel-purity.test.ts` 逐文件机械守卫；工具插件
+零第三方领域依赖：内核（`workprocess` 包的 types/domain/fold/runtime/stages/client
+**六个**模块——域不变量的纯检查住在 `fold` 里，`invariant.ts` 这个名字留给伴生插件入口）不 import
+任何东西——由 `tests/kernel-purity.spec.ts` 逐文件机械守卫；工具插件
 依赖宿主工具 SDK（`@deepseek-ai/dsh-tools`）把六个工具注册进宿主。**运行时依赖只认 `@deepseek-ai` 官方包与工作区包**：唯一的 `zod`
 在 `dsh-workprocess` 走 `peerDependencies`——`@deepseek-ai/dsh-storage-domain` 自己声明
 `zod: ^4.4.3` 且其公开 API `domainTable(schema: ZodType<V>)` 的类型即来自 'zod'，是官方契约
@@ -44,8 +45,8 @@ workProcess  id=wp:<scope>   revision（两层的写共用同一个 CAS）
 
 | 包 | 作用 | 依赖 |
 |---|---|---|
-| `workprocess` | **领域插件**（对齐宿主 `dsh-goal`，含不变量伴生入口 `workprocess/invariant`）：内核（两层快照 / 事件表 / 折叠 / 七条不变量 / 严格解码 / 服务：CAS + 幂等 + 身份分配）＋ 归属记录落宿主存储域（`ctx.storageDomain`，域由本插件**独占**打开）/ 回合边界驱动（开工 · auto 收口 · 落盘 block · **续跑投递**）/ 提供 **`ctx.workprocess`**（域 API：读 + 全部写动词 + 人机干预）/ 发 **`work/changed`** typed 宿主事件（对齐 `goal/changed`）。内核纯度守在**模块边界**（内核七文件零外部 import，由 `tests/kernel-purity.test.ts` 机械守卫） | `workprocess-round-driver`、`@deepseek-ai/dsh-storage-domain`、`@deepseek-ai/dsh-llm`（cordis 与 zod 走 peer：前者是宿主单例符号包，后者是官方存储域钦定 schema 语言——都由官方栈提供） |
-| `workprocess-round-driver` | 回合驱动器：纯决策树（闸 → 串行门 → 相位机）+ 提示词渲染 | `workprocess` |
+| `workprocess` | **领域插件**（对齐宿主 `dsh-goal`，含不变量伴生入口 `workprocess/invariant`）：内核（两层快照 / 事件表 / 折叠 / 七条不变量 / 严格解码 / 服务：CAS + 幂等 + 身份分配）＋ 归属记录落宿主存储域（`ctx.storageDomain`，域由本插件**独占**打开）/ 回合边界驱动（开工 · auto 收口 · 落盘 block · **续跑投递**）/ 提供 **`ctx.workprocess`**（域 API：读 + 全部写动词 + 人机干预）/ 发 **`work/changed`** typed 宿主事件（对齐 `goal/changed`）。内核纯度守在**模块边界**（内核六文件零外部 import，由 `tests/kernel-purity.spec.ts` 机械守卫） | `workprocess-round-driver`、`@deepseek-ai/dsh-storage-domain`、`@deepseek-ai/dsh-llm`（cordis 与 zod 走 peer：前者是宿主单例符号包，后者是官方存储域钦定 schema 语言——都由官方栈提供） |
+| `workprocess-round-driver` | 回合驱动器：纯决策树（闸 → 串行门 → 相位机）+ 提示词渲染 + 不变量伴生入口 `workprocess-round-driver/invariant`（自动回合消息与重建载荷逐字节比对） | `workprocess` |
 | `tool-workprocess` | **工具插件**（对齐宿主 `dsh-tool-goal`：`name`/`inject`/`apply(ctx, config)`）：`get_/create_/update_*` 六个工具 + 授权判据 + 通告（`exec.deferContext`）+ 人机确认（`ctx.userQuestions`）+ 常驻策略段；数据只经 **`ctx.workprocess`** | `workprocess`、`@deepseek-ai/dsh-tools`、`@deepseek-ai/dsh-llm`（cordis/dsh-agent/dsh-session-projection/dsh-system-prompt 走 peer，type-only） |
 | `command-workprocess` | **命令行插件** `/work`（`<目标>` 让 agent 拆阶段建流程 · `edit <目标>` 改目标 · `pause` / `resume` / `clear`）——独立包、独立装载行（对齐宿主 `dsh-command-goal`），只消费 `ctx.workprocess` 的四个人机干预方法，**结构化动作投话给 agent 做** | `workprocess`（类型）、`@deepseek-ai/dsh-llm`（cordis/dsh-commands 走 peer，type-only） |
 
@@ -53,23 +54,63 @@ workProcess  id=wp:<scope>   revision（两层的写共用同一个 CAS）
 `get_workstage / create_workstage / update_workstage` 与 `get_worktask / create_worktask / update_worktask`，
 **状态变更收进 `update` 的 `action`**。
 
+## 产物形状：一个装载入口 = 一个文件（对齐宿主 `dsh-goal`）
+
+宿主加载器只认 `package.json` 的 `main`，所以每个**装载入口**都收成**一个** bundle：
+
+```
+src/（多模块）── tsc ──▶ dist/types/*.js + *.d.ts（中间态；只发其中的 .d.ts）
+                        └─ tsdown ─▶ dist/index.js（+ 伴生件 dist/invariant.js）
+client/*.tsx ──────────────── tsdown ─▶ lib/client.js（CJS + __ModuleLoader__ 工厂；react 走模块表）
+```
+
+| 包 | 运行时产物（`files` 白名单发的就是这些） | 浏览器半 |
+|---|---|---|
+| `workprocess` | `dist/index.js` + `dist/invariant.js` | `lib/client.js`（由 `client/*.tsx` 构建：tsdown + lightningcss 编译 CSS Modules） |
+| `workprocess-round-driver` | `dist/index.js` + `dist/invariant.js` | — |
+| `tool-workprocess` | `dist/index.js` | — |
+| `command-workprocess` | `dist/index.js` | — |
+
+`exports` 只开必要子路径（`./invariant` 给伴生件装载行、`./client` 给浏览器半），**不再有 `"./*"` 通配**：
+`dist/types/*.js` 是构建中间态，不是公开面。
+
+### 与宿主 goal 的对齐：能对齐的 / 学不了的
+
+| 维度 | 宿主 `dsh-goal` 一线 | 我们 | 结论 |
+|---|---|---|---|
+| 包拓扑 | 4 个包（领域 / 驱动器 / 工具 / 命令） | 同样 4 个 | 已对齐 |
+| 伴生件 | `src/invariant.ts` 一个文件（`name`/`inject`/`apply`） | 同样一个文件（纯检查沉进 `fold.ts`） | 已对齐 |
+| 产物 | tsdown 按入口打成 `lib/index.js`（+ `lib/invariant.js`） | 同形（目录名仍是 `dist/`） | 已对齐 |
+| 测试命名 | `*.spec.ts` | `*.spec.ts` | 已对齐 |
+| 状态真源 | **会话日志**（`session.append('goal/change')` + 会话投影） | 宿主**存储域**（`ctx.storageDomain`） | **学不了**：仓外插件 append 自定义事件没有 `ignorable` 标记，持久化读路径会拒绝解释整条会话日志 |
+| 客户端面 | 会话投影 → 客户端 `useProjection('goal')` | 自建只读数据面（HTTP + SSE） | **学不了**：投影只吃会话事件；转发白名单是宿主自有文件 |
+| 装载行 | 写在宿主 `packages/bundle/base`（仓内 bundle） | 各包自带 `dsh.bundle.patch` | **学不了**：改不了宿主仓内的 bundle |
+
 ## 快速开始
 
 ```bash
 pnpm install
 pnpm typecheck
-pnpm test          # 172 条：内核（含纯度守卫）53 / 回合驱动器 34（决策 25 · 循环 3 · 设计契约 6）
-                   #        / 工具面 35（工具 29 · 插件 4 · 端到端 2）/ 领域插件 37 / 命令行 13
-pnpm build         # 出 dist/（宿主加载的是 JS，不是 TS）。四包拓扑序直出：构建期关掉源码 paths，
-                   # 兄弟包按 node_modules → dist 声明解析（循环已断，两段式过渡桥已撤除）
+pnpm test          # 243 条（17 个 *.spec.ts）：领域插件 120（内核 58 · 插件 35 · 伴生件 9 · 服务 5
+                   #        · 视图 4 · 客户端 7 · 内核纯度 2）/ 回合驱动器 66（决策 25 · 插件 14
+                   #        · 伴生件 19 · 循环 8）/ 工具面 44（登记表+授权 28 · 工具壳 5 · HTTP 5 · 端到端 2 · 插件 4）/ 命令行 13
+                   #   ↑ `pretest` 先跑 `workprocess` 的 `build:client`：客户端契约测试读的是产物 lib/client.js
+pnpm build         # tsc 出中间态 dist/types/（逐模块 + .d.ts），tsdown 按**装载入口**收成
+                   # dist/index.js（+ 伴生件 dist/invariant.js）——宿主加载的就是那一个文件
+                   #（对齐宿主 dsh-goal 的 tsdown.config.ts；外部依赖不打包，兄弟包走 node_modules 声明）
 ```
 
 ## 装进宿主（DSH profile）
 
-**一包一 patch**（对齐宿主：每个 `@deepseek-ai/*` 包自带自己那一行）：
+**一包一 patch**（对齐宿主**实验性 bundle 包**的做法，如 `voice-input-bundle` / `auto-review`）：
 四个包各自声明 `dsh.bundle.patch: ./cordis.patch.yml`，各自的 patch 只插**自己**那一行
 （工具面 `blockedAfterRounds`、驱动器 `tick/drive/defaultMaxRounds/close/disarmOnResume` 等配置
-跟着各自的包走）。profile 侧要做两件事：
+跟着各自的包走）。
+
+> 口径更正：宿主 `dsh-goal` 那一线**不是**这么装的——它的装载行写在宿主的
+> `packages/bundle/base/cordis.patch.yml`（仓内 bundle）里，包本身没有 patch 文件。
+> 我们不在宿主仓内、改不了 base bundle，所以走"包自带 patch"这条宿主为**仓外插件**准备的路。
+> profile 侧要做两件事：
 
 1. `package.json` 的 `dependencies` 里四个包都写 `link:<repo>/<包目录>`，`node_modules/` 下有对应软链；
 2. `dsh.profile.bundles` 里**四个包都列**（顺序建议 领域 → 驱动器 → 工具 → 命令行；

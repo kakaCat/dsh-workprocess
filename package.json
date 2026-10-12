@@ -5,12 +5,17 @@
   "version": "0.1.0",
   "description": "两层工作模型（workStage / workTask）的独立实现：内核 + 回合驱动器 + 工具面",
   "scripts": {
+    "pretest": "pnpm --filter workprocess run build:client",
     "test": "vitest run --passWithNoTests",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "build": "pnpm -r build"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
+    "@types/react": "~18.3.31",
+    "lightningcss": "^1.33.0",
+    "react": "^18.3.1",
+    "tsdown": "^0.22.14",
     "typescript": "^5.3.3",
     "vitest": "^2.0.0"
   }

@@ -33,43 +33,63 @@ export interface WorkToolRegistryEntry {
   description: string
 }
 
-/** 6 条 = 两层 × 三工具（get / create / update）。 */
+/**
+ * 6 条 = 两层 × 三工具（get / create / update）。
+ *
+ * 【模型面措辞纪律（对齐宿主 `dsh-tool-goal` 的三条工具自述）】自述是**给模型看的**，不是给维护者看的：
+ *   · 一句话说清**这是什么工具 + 什么时候用**（`create_goal` 那句"不是单轮任务"就是范本：
+ *     触发条件与**反触发条件**都要写，模型才知道什么时候**不**该调）；
+ *   · **取数来源点名**（goal 的 `get_goal` 写"including the id and revision that update_goal requires"）：
+ *     凡是"调用方下一句要用"的值，都在自述里说清去哪个工具的回执取——本面把 task_id / revision 都点名了；
+ *   · **语义只写一处**：`update_*` 的动作语义归 `action` 的 `enum` 描述所有（goal 的
+ *     `update_goal` 自述只有一句 "Update the current goal."）——两处都写必然漂移（本面原来正是如此：
+ *     自述与 enum 近乎逐字重复，且自述那份漏了 arm/disarm）；
+ *   · **不写内部术语**（层0/层1/层2、组合根、串行门……）：模型没有这些上下文，看到只会当成噪声；
+ *   · **不许把 id 的形状写成"可以自己拼"**：`wt:<阶段键>:<序号>` 只是识别用的形状，
+ *     值一律照抄回执（goal 的 "Exact id returned by get_goal" 就是这个口径）。
+ */
 export const WORK_TOOL_REGISTRY: readonly WorkToolRegistryEntry[] = [
   {
     handler: 'getWorkstage',
     toolName: 'get_workstage',
     layer: 'stage',
-    description: '读阶段表（数组顺序即串行顺序）与当前阶段 / 串行门 / 是否具备收口条件',
+    description: '读这条流程：阶段表（数组顺序即执行顺序）、当前阶段、能不能开工/收口，以及续跑许可 activation；'
+      + 'update_workstage 要的 revision 也在这里取。',
   },
   {
     handler: 'createWorkstage',
     toolName: 'create_workstage',
     layer: 'stage',
-    description: '建流程（带阶段表：key / statement / done_criteria? / close_policy?）或整体替换阶段表：同名阶段保留其任务与态，会丢掉非空阶段的一律拒',
+    description: '建一条流程（objective + 阶段表）。每条归属域只有一条流程，已有流程时是整体替换阶段表。'
+      + '要跨多轮做成的事才建；单轮任务不要建流程。',
   },
   {
     handler: 'updateWorkstage',
     toolName: 'update_workstage',
     layer: 'stage',
-    description: '阶段态变更：action=done（阶段收口，本阶段任务须非空且全部 complete）——策略 human 时**真人专属**，策略 auto 时可由驱动器自动落；action=edit（**改流程目标**，要 objective，真人专属）；action=discard（丢弃整条流程，不可逆，**真人专属**）',
+    description: '阶段态变更（一个工具 + action：阶段收口 / 改流程目标 / 丢弃整条流程 / 续跑许可）——'
+      + '各 action 的语义与权限见 action。',
   },
   {
     handler: 'getWorktask',
     toolName: 'get_worktask',
     layer: 'task',
-    description: '读任务（层2：相位 / 陈述 / revision / 阻塞原因）',
+    description: '读任务：给 task_id 读一条、给 stage_key 读一个阶段、都不给读全部。'
+      + 'update_worktask 要的 revision 也从这里取。',
   },
   {
     handler: 'createWorktask',
     toolName: 'create_worktask',
     layer: 'task',
-    description: '在某阶段建任务（身份由服务分配 `wt:<阶段键>:<序号>`，清掉的不复用）',
+    description: '给当前阶段建任务（阶段严格串行：给后续阶段建会被拒——留到它成为当前阶段再拆）。'
+      + 'task_id 由服务分配，用回执给的那个，不要自己拼。',
   },
   {
     handler: 'updateWorktask',
     toolName: 'update_worktask',
     layer: 'task',
-    description: '任务态变更：edit / pause / resume / block / complete / clear（edit 与 resume = **真人专属**；block 必填原因）',
+    description: '任务态变更（一个工具 + action：改陈述 / 暂停 / 继续 / 落 block / 达成 / 撤销误建）——'
+      + '各 action 的语义与权限见 action。',
   },
 ]
 
@@ -556,6 +576,25 @@ export async function createWorktask(
   const maxRounds = typeof args.max_rounds === 'number' ? args.max_rounds : undefined
   const revision = typeof args.revision === 'number' ? args.revision : undefined
   return guarded(async () => {
+    // **agent 行为纪律的牙**（策略段那条"不要提前给后续阶段建任务"）。
+    //
+    // 【为什么牙长在工具面，而不是内核】域是**通用引擎**：它刻意允许"计划先落任务、开工归驱动器"
+    // （驱动器的环测与 `view` / `service` 的读投影都靠这个能力，`workprocess` 的测试里有一条专门
+    // 钉住它）。"不要提前建"是 **agent 的行为纪律**，不是状态完整性规则——与 `blockedAfterRounds`
+    // 完全同形：内核不知道的 agent 政策，由**策略段的作者（本面）**自己执行。
+    //
+    // 【为什么不能只靠域层拒】`mutateWork` 把 `changed:false` 折成静默 false（幂等重放必须静默），
+    // 域层的拒给不出原因——模型只会看到"没变化"，然后拿同一个阶段键反复试。故这里写前拒 + 写清理由。
+    const before = await deps.domain.process(scope)
+    const active = before === undefined ? undefined : currentStageOf(before)
+    const target = before?.stages.find((s) => s.key === stageKey)
+    if (active !== undefined && target !== undefined && target.state !== 'done' && active.key !== stageKey) {
+      return {
+        success: false, scope, stage_key: stageKey, code: 'WORK_NOT_CURRENT_STAGE',
+        error: '任务只能挂当前阶段（现在是 ' + active.key + '）：阶段严格串行——' + stageKey
+          + ' 等它成为当前阶段时再拆任务（提前建出来的任务会让阶段表不能再整体替换）。',
+      }
+    }
     const changed = await deps.domain.createTask(scope, {
       stageKey, objective, ...(maxRounds === undefined ? {} : { maxRounds }),
     }, revision)
@@ -565,7 +604,12 @@ export async function createWorktask(
     const created = stage === undefined ? undefined : stage.tasks[stage.tasks.length - 1]
     return {
       success: true, scope, stage_key: stageKey, changed,
-      ...(changed && created !== undefined ? { task_id: created.id, revision: created.revision } : {}),
+      ...(changed && created !== undefined ? { task_id: created.id } : {}),
+      // **聚合 revision**（不是新建那张任务自己的 `revision`，那是 1）：两层的写共用一个聚合修订
+      //（e2e 第⑥条契约："每次 +1，并可从回执读到"），而工具的 `revision` 参数校的也是这个。
+      // 真机陷阱（已实测）：回执原来给的是**任务自己的** revision ⇒ 模型照着回执递 CAS 必得
+      // `WORK_CONFLICT`（"期望 revision=1，当前=3"）——回执给的数必须能直接用于下一句。
+      ...(process === undefined ? {} : { revision: process.revision }),
       next_step: '任务轮由驱动器投递（带 <workprocess_round> 标签）——**收到那一轮再动手**，'
         + '做完调 update_worktask(action: "complete")。不要顺手把后续阶段的任务也建满。',
     }
@@ -668,13 +712,30 @@ function entryOf(handler: string): WorkToolRegistryEntry {
   return found
 }
 
-/** 归属参数（六个工具共用；缺省 = 组合根注入本会话绑定的归属）。 */
-const SCOPE_PARAM = { type: 'string', description: '归属域键：这条流程挂在谁名下（宿主可用会话 id，项目侧可用工作区/项目 id）；缺省 = 组合根注入的本会话绑定归属。' } as const
-const STAGE_KEY_PARAM = { type: 'string', description: '阶段键（阶段表里的 key）；从 get_workstage 的回执取。action=discard（丢流程）时不需要。' } as const
-const TASK_ID_PARAM = { type: 'string', description: '任务 id（wt:<阶段键>:<序号>）；从 create_worktask / get_worktask 的回执取。' } as const
-const REVISION_PARAM = { type: 'number', description: 'CAS：给 get 里读到的 revision（旧值即拒——先 get 再改）。' } as const
-const OBJECTIVE_PARAM = { type: 'string', description: '这个工作单元要达成什么（写成可核验的陈述）。' } as const
-const MAX_ROUNDS_PARAM = { type: 'number', description: '自动续跑回合上限；缺省 = 由组合根按阶段回落。' } as const
+/**
+ * 参数描述（对齐宿主 goal 的 `Exact id returned by get_goal` 口径）。
+ *
+ * 【为什么 revision 要按层拆两个常量】原来六个工具共用一句"给 get 里读到的 revision"——
+ * 模型得自己猜是哪个 get（层1 是 `get_workstage`、层2 是 `get_worktask`），而两层的 revision
+ * **不是同一个数**（阶段表修订 vs 任务修订）。点名是唯一不会指错的写法。
+ */
+const SCOPE_PARAM = { type: 'string', description: '归属域键：这条流程挂在谁名下（宿主用会话 id，项目侧可用工作区/项目 id）；不给 = 本会话的归属。' } as const
+/** 阶段键：读（`get_worktask` / 建任务）与收口（`update_workstage`）都要照抄这一个来源。 */
+const STAGE_KEY_PARAM = { type: 'string', description: '阶段键：照抄 get_workstage 回执里的 key，不要自己拼。' } as const
+const TASK_ID_PARAM = { type: 'string', description: '任务 id：照抄 create_worktask / get_worktask 回执里的原值，不要自己拼（`wt:<阶段键>:<序号>` 只是它的形状；清掉的任务编号不复用）。' } as const
+/** 层1 的并发校验（值来自 `get_workstage` / `create_workstage` 回执）。 */
+const STAGE_REVISION_PARAM = { type: 'number', description: '并发校验用：给 get_workstage（或 create_workstage）回执里的 revision 原值（读到旧值会被拒——先 get 再改）；不给 = 这次不校验。' } as const
+/**
+ * 层2 的并发校验（值来自 `get_worktask` / `create_worktask` 回执**顶层**的 revision）。
+ *
+ * 【为什么要强调"顶层"】两层的写共用一个**聚合** revision，而任务自己还有一个 per-task revision
+ * （`tasks[].revision`，新建时恒为 1）。两个数长得一样大、含义不同——不点名就等于让模型掷硬币
+ * （实测：拿 `tasks[].revision` 去递 CAS 必得 `WORK_CONFLICT`）。
+ */
+const TASK_REVISION_PARAM = { type: 'number', description: '并发校验用：给 get_worktask（或 create_worktask）回执**顶层**的 revision 原值——两层的写共用一个聚合修订，别拿 tasks 里单张任务自己的 revision；读到旧值会被拒（先 get 再改）；不给 = 这次不校验。' } as const
+const TASK_OBJECTIVE_PARAM = { type: 'string', description: '这个工作单元要达成什么：写成**可核验**的陈述（跑什么、看到什么算过）——它同时是本任务的验收判据。' } as const
+const CREATE_MAX_ROUNDS_PARAM = { type: 'number', description: '自动续跑回合上限（正整数）；不给 = 用装载配置的兜底值。到顶会落盘 block 等人裁——不要靠反复重试绕过。' } as const
+const EDIT_MAX_ROUNDS_PARAM = { type: 'number', description: 'edit 用：换掉自动续跑回合上限（正整数）。' } as const
 
 /** 回执 schema：字段随工具不同，故放开；`render` 给宿主一行摘要。 */
 const REPLY_SCHEMA = { type: 'object', additionalProperties: true } as const
@@ -724,14 +785,17 @@ export function defineGetWorkstageTool(deps: WorkToolDeps) {
 export function defineCreateWorkstageTool(deps: WorkToolDeps) {
   return buildTool(deps, 'createWorkstage', {
     scope: SCOPE_PARAM,
-    objective: { type: 'string', description: '这条流程要达成什么（只在**建流程**时必填）。' },
+    objective: { type: 'string', description: '这条流程要达成什么；**只在建流程时必填**（已有流程时改它用 update_workstage action=edit）。' },
     stages: {
       type: 'array',
       items: { type: 'object', additionalProperties: true },
-      description: '阶段表（数组顺序即**串行顺序**）：[{ key, statement, done_criteria?, close_policy? }]；'
+      description: '阶段表（数组顺序即执行顺序）：[{ key, statement, done_criteria?, close_policy? }]。'
+        // 这条"陷阱"必须写在这儿：它是**真实存在**的静默行为（`fold` 的 stage-define：定义以草案为准），
+        // 不写就等于让模型在改阶段表时把上一版的 auto 悄悄改回 human（真机踩过的那类"该自动却停手等人"）。
+        + '注意整体替换阶段表时**定义以草案为准**：close_policy 不写就回到缺省的 human（上一版的 auto 不会被留着）。'
         + 'close_policy: human（缺省，人工确认收口）/ auto（任务全完成即自动收口）。',
     },
-    revision: REVISION_PARAM,
+    revision: STAGE_REVISION_PARAM,
   })
 }
 
@@ -739,58 +803,75 @@ export function defineCreateWorkstageTool(deps: WorkToolDeps) {
 export function defineUpdateWorkstageTool(deps: WorkToolDeps) {
   return buildTool(deps, 'updateWorkstage', {
     scope: SCOPE_PARAM,
-    stage_key: STAGE_KEY_PARAM,
+    // stage_key 只对 done 必需（其余 action 改的都是整条流程）——这就是 goal 的
+    // "valid only with action edit" 那条口径的镜像写法：**适用范围写在参数上**。
+    stage_key: { ...STAGE_KEY_PARAM, description: '要收口的阶段键（action=done 必填，其余 action 不需要）：照抄 get_workstage 回执里的 key。' },
     action: {
       type: 'string',
       // enum 从**单一来源**派生（`STAGE_ACTIONS`）：schema 与运行期白名单不许各写一份
       //（真机踩过：只改白名单 ⇒ 宿主在 schema 层就把 `arm` 拒了，handler 根本没轮到）。
       enum: [...STAGE_ACTIONS],
-      description: 'done = 阶段收口落定，按**本阶段的收口策略**判谁来落：human（缺省）= **真人专属**（人工确认）；'
-        + 'auto = 本回合（驱动器决策）可自动落 done。两条路都必须任务非空且全部 complete。'
-        + 'edit = **改流程目标**（要 objective；对齐宿主 update_goal 的 edit；**真人专属**——阶段与任务原样保留）。'
-        + 'discard = **丢弃整条流程**（不需要 stage_key；不可逆：流程与任务墓碑一起消失、回合计数归零；**真人专属**）。'
-        + 'arm / disarm = **续跑许可**（真人专属）：disarm 让驱动器停手（会话 resume 时驱动器自动落），'
-        + 'arm 在人说"继续"时放回去。'
+      description: 'done = 阶段收口落定，按该阶段的 close_policy 判谁来落：human（缺省）= **真人专属**（工具自己弹框请人确认，agent 自写会被拒）；'
+        + 'auto = 本回合（驱动器决策）也可自动落。两条路都必须任务非空且全部 complete。'
+        + 'edit = **改流程目标**（要 objective；阶段与任务原样保留；**真人专属**）。'
+        + 'discard = **丢弃整条流程**（不需要 stage_key；**不可逆**：阶段、任务与编号墓碑一起消失、回合计数归零；**真人专属**）。'
+        + 'arm / disarm = **续跑许可**（**真人专属**）：disarm 让驱动器停手（会话从盘上恢复时驱动器会自动落），'
+        + 'arm 在人说「继续」时放回去。'
         + '注意**阶段开工不是本工具的动词**——串行门放行后由驱动器开工。',
     },
     objective: { type: 'string', description: 'edit 用：这条流程改成要达成什么（替换原目标）。' },
-    revision: REVISION_PARAM,
+    revision: STAGE_REVISION_PARAM,
   })
 }
 
 /** `get_worktask`：读任务（一条 / 一阶段 / 全部）。 */
 export function defineGetWorktaskTool(deps: WorkToolDeps) {
-  return buildTool(deps, 'getWorktask', { scope: SCOPE_PARAM, stage_key: STAGE_KEY_PARAM, task_id: TASK_ID_PARAM })
+  return buildTool(deps, 'getWorktask', {
+    scope: SCOPE_PARAM,
+    stage_key: { ...STAGE_KEY_PARAM, description: '读这个阶段下的任务：照抄 get_workstage 回执里的 key。' },
+    task_id: TASK_ID_PARAM,
+  })
 }
 
 /** `create_worktask`：在某阶段建任务（身份由内核分配，回执给 task_id）。 */
 export function defineCreateWorktaskTool(deps: WorkToolDeps) {
   return buildTool(deps, 'createWorktask', {
     scope: SCOPE_PARAM,
-    stage_key: STAGE_KEY_PARAM,
-    objective: OBJECTIVE_PARAM,
-    max_rounds: MAX_ROUNDS_PARAM,
-    revision: REVISION_PARAM,
+    stage_key: { ...STAGE_KEY_PARAM, description: '任务挂在哪个阶段：给**当前阶段**（从 get_workstage 的 current_stage 取）——给后续阶段会被拒（WORK_NOT_CURRENT_STAGE，阶段严格串行）。' },
+    objective: TASK_OBJECTIVE_PARAM,
+    max_rounds: CREATE_MAX_ROUNDS_PARAM,
+    revision: STAGE_REVISION_PARAM,
   })
 }
 
-/** `update_worktask`：任务态变更（一个工具 + action，对齐宿主 `update_goal`）。 */
+/**
+ * `update_worktask`：任务态变更（一个工具 + action，对齐宿主 `update_goal`）。
+ *
+ * 【为什么门槛数字要在这里渲染出来】`block` 的轮数门槛是**装载配置**（`blockedAfterRounds`）。
+ * 自述里写死一个数字 = 配置一改，模型就按一个错的数去试（宿主 goal 的解法是
+ * `guidance(blockedAfter)`：策略文本由配置渲染，不写死）——本面照此办理，工具自述与策略段同源。
+ */
 export function defineUpdateWorktaskTool(deps: WorkToolDeps) {
+  const blockedAfter = deps.blockedAfterRounds ?? DEFAULT_BLOCKED_AFTER_ROUNDS
   return buildTool(deps, 'updateWorktask', {
     scope: SCOPE_PARAM,
     task_id: TASK_ID_PARAM,
     action: {
       type: 'string',
-      enum: ['edit', 'pause', 'resume', 'block', 'complete', 'clear'],
-      description: 'edit（改陈述 / 回合上限）与 resume（继续）需要**人直接发起**；'
-        + 'pause（被中断）/ block（等依赖或等人裁，原因必填）/ complete（真的达成了）由 agent 发起；'
-        + 'clear（撤掉误建的工作单元，编号不复用）。',
+      // enum 从单一来源派生（与 STAGE_ACTIONS 同一纪律：schema 与运行期白名单不许各写一份）。
+      enum: [...TASK_ACTIONS],
+      description: 'complete = 真的达成了（终态不可逆）——判据没齐不要写，别把"做了一部分"报成达成。'
+        + 'block = 等依赖或等人裁：必须给 reason；且同一件事**至少撑过 ' + String(blockedAfter) + ' 轮**才允许落'
+        + '（不足会被拒；真人直接发起不受此限）。'
+        + 'pause = 被中断（可再 resume）；clear = 撤掉误建的工作单元（编号不复用，不可逆）。'
+        + 'edit（改陈述 / 回合上限）与 resume（继续）是**真人专属**（需要人直接发起）；'
+        + 'pause / block / complete / clear 可由 agent 发起。',
     },
     objective: { type: 'string', description: 'edit 用：换掉任务陈述（至少要给 objective 或 max_rounds 之一）。' },
-    max_rounds: MAX_ROUNDS_PARAM,
-    reason: { type: 'string', description: 'block 必填：被什么挡住、等谁。' },
+    max_rounds: EDIT_MAX_ROUNDS_PARAM,
+    reason: { type: 'string', description: 'block 必填：被什么挡住、等谁（写具体条件——难度大、不确定、还有活没干完都不算被挡住）。' },
     reason_code: { type: 'string', description: 'block 的原因分类（lower-kebab-case，缺省 blocked）。' },
-    revision: REVISION_PARAM,
+    revision: TASK_REVISION_PARAM,
   })
 }
 

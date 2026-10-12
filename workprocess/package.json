@@ -5,25 +5,30 @@
   "type": "module",
   "description": "workprocess 领域插件（组合根，已并入内核）：两层快照 / 事件表 / 折叠 / 不变量 / 严格解码 / 服务 + 归属记录落宿主存储域 + 真人判定 + 回合边界驱动与续跑投递 + apply(ctx, config)",
   "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "types": "./dist/types/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
+      "types": "./dist/types/index.d.ts",
       "default": "./dist/index.js"
     },
     "./invariant": {
-      "types": "./dist/invariant-plugin.d.ts",
-      "default": "./dist/invariant-plugin.js"
+      "types": "./dist/types/invariant.d.ts",
+      "default": "./dist/invariant.js"
     },
+    "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
   "files": [
-    "dist",
+    "dist/index.js",
+    "dist/invariant.js",
+    "dist/types/**/*.d.ts",
+    "lib/client.js",
     "cordis.patch.yml",
     "README.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && tsdown",
+    "build:client": "tsdown --config tsdown.client.config.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run"
   },
@@ -37,6 +42,12 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
     }
   }
 }

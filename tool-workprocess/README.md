@@ -18,13 +18,56 @@ workprocess 的**工具面**：两层各三工具（`src/tools.ts` 顶部的登�
 |---|---|---|
 | `get_workstage` | 层1 | 读阶段表（顺序即串行顺序）+ 当前阶段 + 串行门 + 收口条件 + 每阶段的收口策略（`close_policy`） |
 | `create_workstage` | 层1 | 建流程（带阶段表：`key / statement / done_criteria? / close_policy?`）或整体替换阶段表；会丢掉**非空**阶段的一律被内核拒 |
-| `update_workstage` | 层1 | `action=done`：阶段收口落定——按**本阶段收口策略**判谁来落（`human` = **真人专属**；`auto` = 驱动器/自治回合可落）；任务须非空且全部 complete。`action=edit`：**改流程目标**（要 `objective`；阶段与任务原样保留；**真人专属**）。`action=discard`：**丢弃整条流程**（不需要 `stage_key`，不可逆，**真人专属**） |
+| `update_workstage` | 层1 | `action=done`：阶段收口落定——按**该阶段 `close_policy`** 判谁来落（`human` = **真人专属**；`auto` = 驱动器/自治回合可落）；任务须非空且全部 complete。`action=edit`：**改流程目标**（要 `objective`；阶段与任务原样保留；**真人专属**）。`action=discard`：**丢弃整条流程**（不需要 `stage_key`，不可逆，**真人专属**）。`action=arm` / `disarm`：**续跑许可**（**真人专属**；`disarm` 时驱动器停手，`arm` 由人在说"继续"时放回） |
 | `get_worktask` | 层2 | 读任务（给 `task_id` 读一条 / 给 `stage_key` 读一阶段 / 都不给读全部） |
-| `create_worktask` | 层2 | 在某阶段建任务；身份由内核分配 `wt:<阶段键>:<序号>`，回执直接给 `task_id` |
-| `update_worktask` | 层2 | `action` 六动词：`edit / pause / resume / block / complete / clear`（`edit`、`resume` = **真人专属**，`block` 必须给原因） |
+| `create_worktask` | 层2 | 在某阶段建任务；身份由内核分配 `wt:<阶段键>:<序号>`，回执直接给 `task_id` 与**聚合 `revision`** |
+| `update_worktask` | 层2 | `action` 六动词：`edit / pause / resume / block / complete / clear`（`edit`、`resume` = **真人专属**，`block` 必须给原因，且门槛轮数由配置渲染进自述） |
 
-**阶段开工没有动词**（有意）：`update_workstage` 只认 `done` / `edit` / `discard`——开工是**驱动器的动作**
-（`workprocess-round-driver` 的 `start-stage` 决策，串行门放行才开工），避免两条开工入口。
+**阶段开工没有动词**（有意）：`update_workstage` 的动词只有 `done` / `edit` / `discard` / `arm` / `disarm`
+——开工是**驱动器的动作**（`workprocess-round-driver` 的 `start-stage` 决策，串行门放行才开工），
+避免两条开工入口。
+
+### 模型面措辞（工具自述怎么写）
+
+六个自述是**给模型看的**（进宿主工具清单，每轮都在上下文里），所以按宿主 `dsh-tool-goal` 的三条
+自述立了五条纪律（`src/tools.ts` 登记表上方有同一份）：
+
+| 纪律 | 宿主范本 | 本面落地 |
+|---|---|---|
+| 说清**是什么 + 什么时候用**（含**反触发**） | `create_goal`：…even if the user did not say "goal"; **not for single-turn work** | `create_workstage`：要跨多轮做成的事才建；单轮任务不要建流程 |
+| 取数**来源点名** | `get_goal`：including the id and revision that `update_goal` requires | `get_workstage` / `get_worktask` 自述里点名"`update_*` 要的 `revision` 在这里取"；每个 id / revision 参数写清去哪个工具的回执取 |
+| **语义只写一处** | `update_goal` 自述只有一句 "Update the current goal."，权限与门槛全在 `action` 的 enum 里 | `update_*` 自述只说"有哪些 action"，**权限 / 不可逆性 / 门槛**全归 enum 描述（原来两处近乎逐字重复，且自述那份漏了 `arm` / `disarm`） |
+| **不写内部术语** | —— | 自述与参数描述里不许出现层0/层1/层2、组合根、串行门、CAS 这类只有维护者才懂的词（模型看到只会当噪声） |
+| **id 的形状 ≠ 可以自己拼** | `update_goal`：Exact id **returned by** `get_goal` | `task_id`：照抄回执原值（`wt:<阶段键>:<序号>` 只是形状；清掉的不复用） |
+
+**门槛数字不许写死**（对齐宿主 `guidance(blockedAfterConsecutiveRounds)`）：`block` 的前置轮数是
+**装载配置**，故 `update_worktask` 的 action 自述与常驻策略段都由 `workPolicyText(blockedAfterRounds)`
+按生效配置渲染（`apply` 里一次算好）。写死一个数 = 配置一改，模型就按错的门槛去试、白跑一轮
+（真机踩过"只说 block 会被拒"的坑，同一个坑的第二种形态）。
+
+**这个数还有第二处**：驱动器也要在**投递的任务轮**里写它（`workprocess-round-driver` 的
+`blockedAfterRounds`）——真正拒 `block` 的是本包，驱动器只负责告诉模型几轮。两个包各自独立装载、
+读不到对方的 `config`，所以两处装载行必须写同一个数；全栈测试有一条门禁钉住"两边缺省一致"
+（`workprocess/tests/plugin.spec.ts` 的「门槛数字两处必须同值」）。
+
+**回执里的数必须能直接喂给下一句**（真机实测出来的坑）：`create_worktask` 原来把**新建任务自己的**
+`revision`（恒为 1）当 `revision` 回给模型，而 `update_worktask` 的 `revision` 参数校的是**聚合**修订
+⇒ 模型照着回执递 CAS 必得 `WORK_CONFLICT`（"期望 revision=1，当前=3"）。现在回执给聚合修订
+（e2e 第⑥条契约：两层的写共用一个 revision，"每次 +1，并可从回执读到"），并有防回归断言钉住。
+
+### 纪律与牙的位置：任务只属于当前阶段
+
+策略段那条「不要提前给后续阶段建任务」的牙长在**本包**（`create_worktask` 写前拒，
+`WORK_NOT_CURRENT_STAGE`），**不在内核**——这是刻意的分工：
+
+- **域是通用引擎**：`createTask` 允许给任何未收口的阶段落任务（"计划先落任务、开工归驱动器"），
+  驱动器的环测与 `service.view` / `workWireOf` 的读投影都按这个状态写。把 agent 的纪律做成状态规则，
+  等于把那批能力与夹具一起作废（试过：4 处夹具当场红）。
+- **与 `blockedAfterRounds` 完全同形**：内核不知道的 **agent 政策**由**策略段的作者（本面）**执行。
+  内核只管状态完整性（已收口阶段不许塞任务 / 串行门 / 身份不复用 / CAS）。
+- **拒因必须说出口**：`mutateWork` 把 `changed:false` 折成静默 false（幂等重放必须静默），
+  只靠域层拒的话模型看到的是"没变化"，然后拿同一个阶段键反复试——所以本面写前拒并给出人话理由。
+  已收口阶段那条仍走域层的静默零写入（既有缺口，不在本次射程内，有用例钉住现状）。
 
 ### 与宿主 dsh 的两处必然差异
 
@@ -94,10 +137,12 @@ workprocess 的**工具面**：两层各三工具（`src/tools.ts` 顶部的登�
 数据口只有 `ctx.workprocess`（`WorkToolDeps.domain`）；`apply` 从宿主 ctx 一次接好授权、通告、人机确认。
 
 **配置**（装载层 `config` 段）：`policySection`（缺省 true，策略段是否注册）、
-`blockedAfterRounds`（缺省 3，自治回合落 `block` 的前置轮数，对齐宿主 goal 的 `blockedAfterConsecutiveRounds`）。
+`blockedAfterRounds`（缺省 3，自治回合落 `block` 的前置轮数，对齐宿主 goal 的 `blockedAfterConsecutiveRounds`；
+**同时决定策略段与 `update_worktask` action 自述里写的那个数**，且必须与
+`workprocess-round-driver` 的同名配置同值——见上面「门槛数字不许写死」）。
 
 ## 测试
 
 ```bash
-cd workprocess/tool-workprocess && pnpm test   # 34 条：登记表自洽 / 授权口径（含收口策略与 process_edit）/ 六工具行为 / 人机确认（userQuestions）/ 工具通告（deferContext 适配）
+cd workprocess/tool-workprocess && pnpm test   # 52 条：登记表自洽 / 模型面措辞（单行·无术语·取数点名·语义只写一处·门槛随配置）/ 授权口径（含收口策略与 process_edit）/ 六工具行为（含"任务只属于当前阶段"的写前拒）/ 回执 CAS 可用性 / 人机确认（userQuestions）/ 工具通告（deferContext 适配）
 ```

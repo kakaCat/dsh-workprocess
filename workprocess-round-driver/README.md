@@ -14,6 +14,7 @@
 | `src/index.ts` | 插件壳 + 运行时（事实投影 · 一拍 · 投递）+ 消息来源声明（`kind: 'work'`） |
 | `src/decide.ts` | 契约类型 + 决策树（**纯层**：零 I/O、零宿主依赖，可穷举单测） |
 | `src/prompt.ts` | 四种轮次的提示词渲染（纯字符串函数）：任务轮 / 规划轮 / 收口确认轮 / **终局收束轮** |
+| `src/invariant.ts` | **不变量伴生件**（独立入口 `workprocess-round-driver/invariant`，对齐宿主 `goal-round-driver/invariant`）：每条自称 `kind:'work'` 的会话消息必须与驱动器给定持久状态会渲染的载荷**逐字节一致**——没有它，`kind:'work'` 就是"自动回合冒充人话"的口子 |
 
 宿主那个包源码也是三个模块（`index` / `prompt` / `invariant`）——粒度一致；我们的第二模块是**决策树**
 （goal 的规则简单到能内联进 `drive()`，我们的域有阶段 × 任务相位 × 收口策略 × 回合预算 × 规划/确认轮）。
@@ -46,7 +47,16 @@
 | 确认轮 / 收束轮 | 人机确认路径与三种结局 / 终局结束语合同 | 253–665（基本未动：那几条不直观，必须完整） |
 
 **顺带修掉一个坑**：任务轮原来写「推不动就 block」却**没提门槛** ⇒ 模型照做会被 `WORK_TOOL_BLOCK_THRESHOLD` 拒、白跑一轮。
-现在停手条件里明写「**先撑满 3 轮**（不足就落 block 会被拒）」，并有断言锁住。
+现在停手条件里明写「**先撑满 N 轮**（不足就落 block 会被拒）」，并有断言锁住。
+
+**N 从哪来（两处必须同值）**：真正拒 `block` 的是**工具面**（`tool-workprocess` 的 `blockedAfterRounds`，
+抛 `WORK_TOOL_BLOCK_THRESHOLD`），驱动器只决定"投给模型的提示词里写几轮"。两个包各自独立装载（一包一 patch），
+驱动器读不到工具面的 `config` ⇒ 只能靠两处装载行写同一个数（都写 3），并由全栈门禁钉住"两边的缺省一致"
+（`workprocess/tests/plugin.spec.ts` 的「门槛数字两处必须同值」）。**写死的代价**（本条修的就是它）：
+提示词说 3、工具面按 5 拒 —— 模型白跑一轮。
+
+数字随来源自署（与 `maxRounds` 同款）：`blockedAfterRounds` 是装载配置、不在持久状态里，
+不变量伴生件要靠它才能逐字节重建这一轮的载荷（老日志没有这个字段 ⇒ 回落缺省 3）。
 
 ## 配置（装载层 `config` 段）
 
@@ -55,6 +65,7 @@
 | `tick` | `true` | 关掉 = 一条监听都不挂（等于没装驱动器，状态迁移全靠人/模型显式调） |
 | `drive` | `false` | 是否自动**投递续跑回合**（本仓装载层打开）；关掉仍会落开工/收口/block |
 | `defaultMaxRounds` | `20` | 任务没写 `max_rounds` 时的生效上限（自动续跑必须有刹车） |
+| `blockedAfterRounds` | `3` | 投递里写几轮门槛；**必须与 `tool-workprocess` 的同名配置取同一个数**（拒 block 的是那边） |
 | `close` | `'auto'` | 流程收口：`auto` = 最后一段 done 即落 close；`human` = 投「请判」轮（判了不落章） |
 | `disarmOnResume` | `true` | 会话 `resume`（宿主重启后加载）⇒ 自动收回续跑许可（`disarmed`，一拍不推进），要人 `arm` 才继续；设 `false` = 跨重启接着自动跑 |
 
@@ -117,5 +128,5 @@
 ## 测试
 
 ```bash
-cd workprocess/workprocess-round-driver && pnpm test   # 26 条：闸顺序 / 串行门 / 收口策略 / 相位机 / 回合上限 / 规划轮 / 提示词
+cd workprocess/workprocess-round-driver && pnpm test   # 68 条：闸顺序 / 串行门 / 收口策略 / 相位机 / 回合上限 / 规划轮 / 提示词（含门槛随配置）/ 不变量伴生件（含门槛自署）
 ```

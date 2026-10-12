@@ -13,7 +13,17 @@
         # 刹车 = 任务自己的 max_rounds，没写就按 defaultMaxRounds（硬上限，防跑飞）。
         drive: true
         defaultMaxRounds: 20
+        # 落 block 的前置轮数门槛：**必须与 tool-workprocess 那一行取同一个数**。
+        # 真正拒 block 的是工具面（WORK_TOOL_BLOCK_THRESHOLD）；驱动器只决定"投给模型的提示词里写几轮"。
+        # 两个包各自独立装载、读不到对方的 config，故只能靠这里写同一个数（全栈测试钉住缺省值一致）。
+        blockedAfterRounds: 3
         # 流程收口：auto = 最后一段 done 即收口（缺省）；human = 全阶段 done 后投「请判」轮（判了不落章，方案 B 口径）。
         close: auto
         # 会话 resume（宿主重启后加载）⇒ 自动收回续跑许可（disarmed），要人说"继续"再 arm。
         disarmOnResume: true
+    # 不变量伴生件（对齐宿主 `goal-round-driver/invariant`）：**只在开发/CI** 挂——它 inject `invariants`，
+    # 而桌面 profile 不挂 `@deepseek-ai/dsh-invariants`（那个服务在发行物里**没有 provider**，
+    # 宿主自己的 goal / session 伴生件同样因此休眠）。要用就放开下面两行，
+    # 并在 profile 里补一挂 `@deepseek-ai/dsh-invariants` 的行：
+    # - id: workprocess-round-driver-invariant
+    #   name: "workprocess-round-driver/invariant"

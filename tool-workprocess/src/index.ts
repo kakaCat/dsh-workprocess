@@ -19,32 +19,46 @@ import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-session-projection'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { workprocessOf } from 'workprocess'
-import { WORK_TOOL_FACTORIES, WORK_TOOL_REGISTRY, type WorkToolDeps } from './tools.js'
+import { WORK_TOOL_FACTORIES, WORK_TOOL_REGISTRY, DEFAULT_BLOCKED_AFTER_ROUNDS, type WorkToolDeps } from './tools.js'
+import { registerWorkprocessApi } from './http.js'
 import { agentOf, askHumanOf, authorityResolverOf, deferNoticeOf } from './authority.js'
 
 //#region 常驻策略段（模型面纪律：工具自述只在"打算调工具"时被读到，纪律得每轮在场）
 /** 策略段名（宿主 systemPrompt 的段名空间；与 goal 的 `tool:goal` 同族）。 */
 export const WORK_POLICY_SECTION = 'tool:workprocess'
 
-/** 段内容（纯文本；段顺序由装配期取 `TOOL_GOAL` 槽位决定）。 */
-export const WORK_POLICY_TEXT = [
-  '## workprocess（两层工作模型：流程 → 阶段 → 任务）',
-  '- **阶段严格串行**：前序阶段全部收口后才轮到下一阶段；不要越阶段开工，也不要提前给后续阶段建任务。',
-  '- **阶段开工不是你的动作**：串行门放行后由驱动器在空闲边界落；你只管任务（`create_worktask` / `update_worktask`）。',
-  '- **每个阶段开始时驱动器会提醒你规划**该阶段的任务（1–3 个、写成可核验的陈述）。',
-  '- **收口策略决定谁落 done**：`human`（缺省）——你**只提议**，由人确认（agent 自写会被拒）；',
-  '  `auto`——任务全达成后由驱动器自动收口，你不要自己写。',
-  '- **任务有回合预算**（`max_rounds`，缺省由配置兜底）：到顶会落盘 block，等人裁；不要靠反复重试绕过它。',
-  '- **落 block 有门槛**：至少撑过 3 轮（`rounds.started`）才允许宣告"被挡住"——第一轮遇到难处就停手',
-  '  会被拒（真人直接发起不受此限）。到顶被内核落 block 之后，恢复要人来：`update_worktask action=resume`。',
-  '- 自动续跑回合会以一条带 `<workprocess_round>` / `<workprocess_plan>` / `<workprocess_ask>` 语义的',
-  '  指令出现（来源自署 `work`）：只做那一轮说的事，做完停手，下一轮由驱动器投递。',
-  '- **收口是写库、不投轮**：所以终局会专门投一条 `<workprocess_done>`（流程落幕）或',
-  '  `<workprocess_blocked>`（停住等人）让你**给用户说一句结束语**——那一轮只说话、不要再调工具。',
-  '- **续跑许可是耐久的**（`get_workstage` 回执里的 `activation`）：会话从盘上恢复（宿主重启）后',
-  '  驱动器会自动把它置为 `disarmed` 并停手；**人说"继续 / 接着跑"时**，你调',
-  '  `update_workstage action=arm` 把许可放回去（真人专属，agent 不能自己放行自己）。',
-].join('\n')
+/**
+ * 段内容（纯文本；段顺序由装配期取 `TOOL_GOAL` 槽位决定）。
+ *
+ * 【为什么是函数而不是常量】`block` 的轮数门槛是**装载配置**（`blockedAfterRounds`）。写死一个
+ * 数字 = 配置一改，常驻策略段就开始教模型一个错的数（真机症状：模型按策略段说的轮数去落 block，
+ * 被内核按配置的门槛拒掉，白跑一轮）。宿主 goal 的解法是 `guidance(blockedAfterConsecutiveRounds)`：
+ * 策略文本由**生效配置**渲染——本面照此办理，与 `update_worktask` 的 action 自述用同一个数。
+ */
+export function workPolicyText(blockedAfter: number): string {
+  return [
+    '## workprocess（两层工作模型：流程 → 阶段 → 任务）',
+    '- **阶段严格串行**：前序阶段全部收口后才轮到下一阶段；不要越阶段开工，也不要提前给后续阶段建任务',
+    '  （后者会被工具拒：`WORK_NOT_CURRENT_STAGE`——留到它成为当前阶段再拆）。',
+    '- **阶段开工不是你的动作**：串行门放行后由驱动器在空闲边界落；你只管任务（`create_worktask` / `update_worktask`）。',
+    '- **每个阶段开始时驱动器会提醒你规划**该阶段的任务（1–3 个、写成可核验的陈述）。',
+    '- **收口策略决定谁落 done**：`human`（缺省）——你**只提议**，由人确认（agent 自写会被拒）；',
+    '  `auto`——任务全达成后由驱动器自动收口，你不要自己写。',
+    '- **任务有回合预算**（`max_rounds`，缺省由配置兜底）：到顶会落盘 block，等人裁；不要靠反复重试绕过它。',
+    '- **落 block 有门槛**：至少撑过 ' + String(blockedAfter) + ' 轮（`rounds.started`）才允许宣告"被挡住"——第一轮遇到难处就停手',
+    '  会被拒（真人直接发起不受此限）。到顶被内核落 block 之后，恢复要人来：`update_worktask action=resume`。',
+    '- 自动续跑回合会以一条带 `<workprocess_round>` / `<workprocess_plan>` / `<workprocess_ask>` 语义的',
+    '  指令出现（来源自署 `work`）：只做那一轮说的事，做完停手，下一轮由驱动器投递。',
+    '- **收口是写库、不投轮**：所以终局会专门投一条 `<workprocess_done>`（流程落幕）或',
+    '  `<workprocess_blocked>`（停住等人）让你**给用户说一句结束语**——那一轮只说话、不要再调工具。',
+    '- **续跑许可是耐久的**（`get_workstage` 回执里的 `activation`）：会话从盘上恢复（宿主重启）后',
+    '  驱动器会自动把它置为 `disarmed` 并停手；**人说"继续 / 接着跑"时**，你调',
+    '  `update_workstage action=arm` 把许可放回去（真人专属，agent 不能自己放行自己）。',
+  ].join('\n')
+}
+
+/** 策略段文本（缺省门槛 = {@link DEFAULT_BLOCKED_AFTER_ROUNDS}）；装配期按生效配置重算。 */
+export const WORK_POLICY_TEXT = workPolicyText(DEFAULT_BLOCKED_AFTER_ROUNDS)
 //#endregion
 
 //#region 插件装配
@@ -93,12 +107,15 @@ export function apply(ctx: Context, config?: WorkToolConfig): void {
     const factory = WORK_TOOL_FACTORIES[handler] as (d: WorkToolDeps) => unknown
     ctx.tools.register(factory(deps) as never)
   }
+  // 浏览器只读数据面（惰性注入 webServer；宿主没有 web 载体时零行为）。
+  registerWorkprocessApi(ctx, deps.domain)
   if (config?.policySection !== false) {
     try {
       ctx.systemPrompt?.section({
         name: WORK_POLICY_SECTION,
         order: ctx.systemPrompt.getSectionOrder('TOOL_GOAL'),
-        text: WORK_POLICY_TEXT,
+        // 门槛数字按**生效配置**渲染（与 `update_worktask` 的 action 自述同源）：写死就会与内核实际拦截面漂移。
+        text: workPolicyText(config?.blockedAfterRounds ?? DEFAULT_BLOCKED_AFTER_ROUNDS),
       })
     } catch (err) {
       console.warn('[workprocess] 策略段注册失败（工具面照常）：' + String((err as Error)?.message ?? err))
@@ -110,3 +127,4 @@ export function apply(ctx: Context, config?: WorkToolConfig): void {
 
 export * from './authority.js'
 export * from './tools.js'
+export * from './http.js'

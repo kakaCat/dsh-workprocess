@@ -4,13 +4,13 @@ workprocess 的**插件入口**（组合根）：把「内核 + 驱动 + 工具�
 
 ## 它补的正是那层接线
 
-| 缺口 | 本包怎么补 |
+| 缺口 | 本包怎么补（**只补自己这一层**：其余缺口在兄弟包里，见右列） |
 |---|---|
-| 没有 `store` 实现 | `src/domain.ts`：**用宿主的存储域**（`defineDomain` + `ctx.storageDomain`，域 `workprocess` v1、表 `processes`、键 = 归属域）。schema 校验、耐久、`domain/changed` 事件都由宿主后端负责——**不自造文件库**。`workProcess` 的权威校验器仍是**内核**的 `decodeWorkProcess`（schema 的 `superRefine` 调它） |
-| 真人判定没接上 | `src/authority.ts`：从会话投影拿 `turnBoundary` + `session.snapshotEvents()`，喂给 `authorityFromEvents`；口径对齐宿主 `tool-goal`（agent 必须是注册表里那个、running、且是 `currentInitiator()`），判不出就不授自治 |
-| `drive` 的结论没人执行 | `src/driver.ts` + `src/index.ts`：开工 / auto 收口 / 落盘 block 由 tick 直接落；**续跑回合**由 `roundDeliveryOf` 造载荷、`agent.followup` 投递 |
-| 投递会冒充人话 | `src/message.ts`：往 `@deepseek-ai/dsh-llm` 的 `MessageSourceMap` 加 `work` 一格并**自署来源**——自动回合 = `autonomous`，`human` 策略的收口照样落不了章（省略 source 会被当成 user，那正是"自动回合替人收口"的口子） |
-| 没有插件形状 | `src/index.ts`：`export const name / inject / apply(ctx, config)`（与宿主 `tool-goal` 同形），注册六个工具 |
+| 没有 `store` 实现 | `src/storage.ts` + `src/index.ts`：**用宿主的存储域**（`defineDomain` + `ctx.storageDomain.open`，域 `workprocess` v1、表 `processes`、键 = 归属域）。schema 校验、耐久、`domain/changed` 事件都由宿主后端负责——**不自造文件库**。`workProcess` 的权威校验器仍是**内核**的 `decodeWorkProcess`（schema 的 `superRefine` 调它） |
+| 真人判定 | **本包不判**（保持领域层"只管状态规则"）：判定在 `tool-workprocess/src/authority.ts`（从会话事件切面判本回合由谁发起 + 动作分级），合法性来源在 `command-workprocess`（命令由人敲、投话自署 `user`）。内核只**定义**词汇（错误码 `WORK_NO_PERMISSION`、阶段策略 `closePolicy: 'human' \| 'auto'`），全仓**抛出** `WORK_NO_PERMISSION` 的只有工具面 |
+| `drive` 的结论没人执行 | 在 `workprocess-round-driver` 包：开工 / auto 收口 / 落盘 block 由 tick 直接落，续跑回合由 `agent.followup` 投递（本包只提供 `ctx.workprocess` 服务面） |
+| 投递会冒充人话 | 在 `workprocess-round-driver/src/index.ts` + `tool-workprocess/src/authority.ts`：往 `@deepseek-ai/dsh-llm` 的 `MessageSourceMap` 加 `work` 一格并**自署来源**——自动回合 = `autonomous`，`human` 策略的收口照样落不了章（省略 source 会被当成 user，那正是"自动回合替人收口"的口子） |
+| 没有插件形状 | `src/index.ts`：`export const name / inject / apply(ctx, config)`（与宿主 `dsh-goal` 同形）；六个工具在 `tool-workprocess`，命令行在 `command-workprocess` |
 
 ## 装配
 
@@ -129,10 +129,26 @@ ln -sfn <repo>/workprocess ~/.dsh/profiles/desktop/node_modules/workprocess
 - `update_workstage { action: 'discard' }` —— **丢弃整条流程**（不需要 stage_key；不可逆：流程与任务墓碑
   一起消失、回合计数归零；**真人专属**——误建流程的补救口）。幂等：没有流程 ⇒ `changed:false`。
 
+## 域**不**执行 agent 的纪律：提前给后续阶段建任务是**有意允许**的
+
+工具面会拒"给非当前阶段建任务"（`WORK_NOT_CURRENT_STAGE`），但**内核不拒**——这是刻意的分工，
+别把它当成缺口"补"进 `fold`：
+
+- **域是通用引擎**：`createWorkTask` 允许给任何未收口的阶段落任务（"计划先落任务、开工归驱动器"）。
+  驱动器的环测与 `service.view` / `workWireOf` 的读投影都按这个状态写（`tests/service.spec.ts` 与
+  `tests/view.spec.ts` 的夹具就是这么造的）；把它变成状态规则会让那批能力与夹具一起作废
+  （试过：4 处夹具当场红）。**这个状态也不只由"提前建"造出来**：重排阶段表在前插一段，同样能把已有的
+  任务留在非当前阶段上（单阶段流程建好任务 → 前面插一段）。两条路都合法，所以读路径必须继续吃得下它
+  （`workprocess-kernel.spec.ts` 有一条用例把"域层允许 + 严格解码接受"钉住）。
+- **牙长在纪律的作者那里**：那句"不要提前建"是**策略段**（`tool-workprocess`）写的，属 **agent 行为
+  纪律**；与 `blockedAfterRounds` 完全同形——内核不知道的 agent 政策，由工具面自己写前拒。
+- **域只管状态完整性**：已收口的阶段不许再塞任务（`task-create:stage-done`）、串行门（`stage-start` /
+  `stage-define` 重排）、任务身份（`wt:<阶段键>:<序号>` 不复用）、聚合 CAS。
+
 ## 测试
 
 ```bash
-pnpm test   # 全仓 160 条；本包 33 条：装配面 / 域声明与内核校验 / 归属缺省 / 真人判定 /
-            #   空闲边界（开工·auto 收口·running 不动手）/ 续跑投递（自署来源·去重·上限刹车）/ **阶段规划轮** / **收口确认轮** /
-            #   服务面 ctx.workprocess（view / pauseActive / resumePaused / discard 幂等）
+pnpm test   # 全仓 255 条；本包 122 条：装配面 / 域声明与内核校验 / 归属缺省 / 真人判定 /
+            #   空闲边界（开工·auto 收口·running 不动手）/ 续跑投递（自署来源·去重·上限刹车·门槛两处同值）/ **阶段规划轮** / **收口确认轮** /
+            #   服务面 ctx.workprocess（view / pauseActive / resumePaused / discard 幂等）/ 内核（含"域有意允许提前建任务"）
 ```

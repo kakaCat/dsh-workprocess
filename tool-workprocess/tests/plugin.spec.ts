@@ -69,11 +69,23 @@ describe('工具面插件入口（apply / name / inject）', () => {
     expect(on.sections.map((x) => x.name)).toEqual([WORK_POLICY_SECTION])
     expect(on.sections[0].order).toBe(2400)
     expect(on.sections[0].text).toContain('阶段严格串行')
+    expect(on.sections[0].text).toContain('撑过 3 轮')     // 缺省门槛
 
     const off = stubCtx()
     apply(off.ctx, { policySection: false })
     expect(off.registered).toHaveLength(WORK_TOOL_REGISTRY.length)   // 工具照注册
     expect(off.sections).toEqual([])                                  // 只是没有策略段
+  })
+
+  it('策略段的 block 门槛按**生效配置**渲染（写死就会与内核实际拦截面漂移）', () => {
+    const five = stubCtx()
+    apply(five.ctx, { blockedAfterRounds: 5 })
+    expect(five.sections[0].text).toContain('撑过 5 轮')
+    expect(five.sections[0].text.includes('撑过 3 轮')).toBe(false)
+    // 工具自述与策略段同源：装载层只给一个数，两处都跟着变。
+    const tool = five.registered.find((t) => t.name === 'update_worktask') as
+      { parameters?: { properties?: { action?: { description?: string } } } } | undefined
+    expect(String(tool?.parameters?.properties?.action?.description)).toContain('撑过 5 轮')
   })
 
   it('deps 组装：数据口 = ctx.workprocess；归属缺省取本会话；授权/通告/人机确认已接上', () => {

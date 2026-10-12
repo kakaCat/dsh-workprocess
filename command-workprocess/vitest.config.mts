@@ -19,5 +19,5 @@ export default defineConfig({
       'dsh-command-workprocess': at('../command-workprocess/src/index.ts'),
     },
   },
-  test: { include: ['tests/**/*.test.ts'] },
+  test: { include: ['tests/**/*.spec.ts'] },
 })

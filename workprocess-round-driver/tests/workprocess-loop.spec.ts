@@ -16,7 +16,10 @@ import {
   processAllowsClose, stageAllowsStart, startWorkStage, workProcessOf,
 } from 'workprocess'
 import type { WorkProcess, WorkRecordLike } from 'workprocess'
-import { decideWorkRound, renderWorkPlanPrompt, renderWorkRoundPrompt, renderWorkWrapupPrompt } from 'workprocess-round-driver'
+import {
+  decideWorkRound, DEFAULT_MAX_ROUNDS, factsOf as projectedFactsOf,
+  renderWorkPlanPrompt, renderWorkRoundPrompt, renderWorkWrapupPrompt,
+} from 'workprocess-round-driver'
 import type { RoundDecision, WorkFacts, RoundScopeFacts } from 'workprocess-round-driver'
 
 function storeOf(records: Record<string, WorkRecordLike>) {
@@ -31,7 +34,14 @@ function storeOf(records: Record<string, WorkRecordLike>) {
   }
 }
 
-/** 组合根要写的适配器：把内核快照投影成驱动拍要读的窄事实。 */
+/**
+ * **简化样本**：把内核快照投影成驱动拍要读的窄事实（够跑这条环即可）。
+ *
+ * 【与生产适配器的差别（重要）】它**不含回合上限兜底**——任务没写 `max_rounds` 时纯层按
+ * "缺省不限"放行。生产那份（`workprocess-round-driver` 导出的 `factsOf`）会把生效上限填成
+ * `defaultMaxRounds`（缺省 20）——**刹车是适配器给的，不是纯层给的**。要照抄请抄生产那份
+ * （见本文件 `事实投影：刹车由适配器给` 那组用例的对照）。
+ */
 function factsOf(process: WorkProcess): WorkFacts {
   const current = currentStageOf(process)
   return {
@@ -72,6 +82,44 @@ function label(d: RoundDecision): string {
 }
 
 const SCOPE: RoundScopeFacts = { id: 'ws-a', ownerSessionId: 'sess-1', drivable: true }
+
+describe('事实投影：刹车由适配器给（纯层缺省不限）', () => {
+  it('生产 factsOf 把生效上限填进窄事实：任务自写优先，否则回落 defaultMaxRounds（缺省 20）', async () => {
+    const records = { 'ws-a': { updatedAt: 1 } }
+    const deps = { store: storeOf(records) as never, now: () => 1_000 }
+    await createWorkProcess(deps, 'ws-a', { objective: 'x', stages: [{ key: 'prep', statement: '准备' }] })
+    await createWorkTask(deps, 'ws-a', { stageKey: 'prep', objective: '没写上限定' })
+    await createWorkTask(deps, 'ws-a', { stageKey: 'prep', objective: '自带上限', maxRounds: 3 })
+    await startWorkStage(deps, 'ws-a', 'prep')
+    const process = (await workProcessOf(deps, 'ws-a'))!
+
+    const capped = projectedFactsOf(process, 'sess-1').currentStage!.tasks!
+    expect(capped[0].maxRounds).toBe(DEFAULT_MAX_ROUNDS)   // 没写 ⇒ 兜底（不是 undefined！）
+    expect(capped[1].maxRounds).toBe(3)                    // 写了 ⇒ 自己的
+    // 兜底值可注入（装载层的 defaultMaxRounds 走这个口）
+    expect(projectedFactsOf(process, 'sess-1', 7).currentStage!.tasks![0].maxRounds).toBe(7)
+  })
+
+  it('同一状态：生产投影到顶会 block-task（刹车在适配器）；纯层省掉上限则不限（它的口径）', async () => {
+    const records = { 'ws-a': { updatedAt: 1 } }
+    const deps = { store: storeOf(records) as never, now: () => 1_000 }
+    await createWorkProcess(deps, 'ws-a', { objective: 'x', stages: [{ key: 'prep', statement: '准备' }] })
+    await createWorkTask(deps, 'ws-a', { stageKey: 'prep', objective: '没写上限定' })
+    await startWorkStage(deps, 'ws-a', 'prep')
+    const process = (await workProcessOf(deps, 'ws-a'))!
+
+    // 生产投影：到顶 ⇒ 落盘 block（自动续跑不会跑飞）
+    const projected = decideWorkRound({
+      now: 1_000, scope: SCOPE, gates: {},
+      work: projectedFactsOf(process, 'sess-1'), roundsStarted: DEFAULT_MAX_ROUNDS,
+    })
+    expect(projected.kind).toBe('block-task')
+    // 本文件的简化样本：没有上限 ⇒ 纯层按"缺省不限"放行（这就是两份样本的差别）
+    expect(decideWorkRound({
+      now: 1_000, scope: SCOPE, gates: {}, work: factsOf(process), roundsStarted: DEFAULT_MAX_ROUNDS,
+    }).kind).toBe('drive')
+  })
+})
 
 describe('端到端 · 驱动器环', () => {
   it('两段流程：开工 → 跑任务 → 请人确认 → 开工 → 跑任务 → 请人收口', async () => {
@@ -198,10 +246,11 @@ describe('两种轮次的分工口径（防"规划轮把活干完、回合预算
   const stage = { key: 'v1', statement: '写文件', doneCriteria: ['文件在'] }
 
   it('规划轮只建任务，明确叫停手等任务轮（理由压成一行，不复述策略段规则）', () => {
-    const text = renderWorkPlanPrompt({ processObjective: 'x', stage, round: 1 })
+    const text = renderWorkPlanPrompt({ processObjective: 'x', stage })
     expect(text).toContain('只建任务，这一轮不要动手')
     expect(text).toContain('任务轮会由驱动器投给你')
     expect(text).toContain('理由一行')            // 只说一句为什么，踩坑史留在代码注释里
+    expect(text).toContain('唯一一次')            // 同一阶段只问一次：不许让模型以为还有下一次
     expect(text).not.toContain('前一阶段全部达成后才轮到下一阶段')   // 串行规则属策略段
   })
 
@@ -230,6 +279,19 @@ describe('两种轮次的分工口径（防"规划轮把活干完、回合预算
     expect(text).toContain('收口策略 `human`')      // 收口策略是**逐阶段数据**，必须在本轮报出（夹具没写 ⇒ 缺省 human）
     // 真机踩过：投递叫模型 block、却没提门槛 ⇒ 照做被拒、白跑一轮。门槛必须在本轮说明里。
     expect(text).toContain('先撑满 3 轮')
+    // 动作写成可照抄的工具调用（不是领域事件名）：模型不需要猜 task-complete 是事件还是工具。
+    expect(text).toContain('update_worktask { task_id: "wt:v1:1", action: "complete" }')
+    expect(text).toContain('action: "block", reason:')
     expect(text).not.toContain('不越阶段开工')      // 串行规则属策略段，不在每轮复述
+  })
+
+  it('门槛数字**由装载配置渲染**（写死就会与工具面真实的拦截面漂移）', () => {
+    const at = (blockedAfterRounds?: number) => renderWorkRoundPrompt({
+      processObjective: 'x', stage, task: { id: 'wt:v1:1', objective: '写文件' }, round: 1,
+      ...(blockedAfterRounds === undefined ? {} : { blockedAfterRounds }),
+    })
+    expect(at()).toContain('先撑满 3 轮')            // 缺省
+    expect(at(5)).toContain('先撑满 5 轮')           // 配置说了算
+    expect(at(5).includes('撑满 3 轮')).toBe(false)
   })
 })

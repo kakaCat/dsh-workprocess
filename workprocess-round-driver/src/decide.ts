@@ -2,7 +2,7 @@
  * **回合决策的纯层**：契约类型（事实 / 闸 / 结论）+ 决策树 `decideWorkRound`。
  *
  * 【为什么自成一个模块】这一层**零 I/O、零宿主依赖**：给定事实就出结论，可穷举单测
- * （见 `tests/workprocess-decide.test.ts`）。宿主 `dsh-goal-round-driver` 没有对应的模块，
+ * （见 `tests/workprocess-decide.spec.ts`）。宿主 `dsh-goal-round-driver` 没有对应的模块，
  * 是因为 goal 的规则简单到能内联进 `drive()`（一条激活相位 + 回合计数）；
  * 我们的域有阶段 × 任务相位 × 收口策略 × 回合预算 × 规划轮/确认轮，规则值得单独立住。
  *

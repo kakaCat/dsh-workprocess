@@ -433,6 +433,34 @@ describe('层2 处理器 · 任务', () => {
     expect((await createWorktask(deps, { scope: 'ws-a', stage_key: 'prep' })).error).toContain('objective')
   })
 
+  it('create_worktask：给**后续阶段**建任务被工具拒（WORK_NOT_CURRENT_STAGE）——域层允许，纪律的牙在工具面', async () => {
+    const deps = await seeded(true)
+    // 域层自己不会拒（"计划先落任务"是它刻意支持的能力），所以这条拒必须由工具面给出，
+    // 而且必须**说得出理由**（域层的静默 false 只会让模型拿同一个阶段键反复试）。
+    const rejected = await createWorktask(deps, { scope: 'ws-a', stage_key: 'train', objective: '先拆好' })
+    expect(rejected).toMatchObject({ success: false, code: 'WORK_NOT_CURRENT_STAGE', stage_key: 'train' })
+    expect(String(rejected.error)).toContain('当前阶段（现在是 prep）')
+    expect((await getWorktask(deps, { scope: 'ws-a' })).tasks).toEqual([])      // 零写入
+    // 当前阶段（哪怕还没开工的 pending）照常可建：规划轮问的就是它。
+    expect(await createWorktask(deps, { scope: 'ws-a', stage_key: 'prep', objective: '清洗数据' }))
+      .toMatchObject({ success: true, task_id: 'wt:prep:1' })
+    // 阶段推进到 train 之后，train 就成了当前阶段，这时建任务放行。
+    await updateWorktask(deps, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'complete' })
+    await updateWorkstage(deps, { scope: 'ws-a', stage_key: 'prep', action: 'done' })
+    expect(await startWorkStage(deps, 'ws-a', 'train')).toBe(true)
+    expect(await createWorktask(deps, { scope: 'ws-a', stage_key: 'train', objective: '调参' }))
+      .toMatchObject({ success: true, task_id: 'wt:train:1' })
+  })
+
+  it('create_worktask：已收口的阶段**不**改口径（域层的静默零写入照旧，不在本次射程内）', async () => {
+    const deps = await seeded(true)
+    await createWorktask(deps, { scope: 'ws-a', stage_key: 'prep', objective: '清洗数据' })
+    await updateWorktask(deps, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'complete' })
+    await updateWorkstage(deps, { scope: 'ws-a', stage_key: 'prep', action: 'done' })
+    expect(await createWorktask(deps, { scope: 'ws-a', stage_key: 'prep', objective: '补一张' }))
+      .toMatchObject({ success: true, changed: false })
+  })
+
   it('update_worktask：动词白名单；edit/resume 真人专属；block 必须给原因', async () => {
     // 同一份记录上取两套授权（agent / 真人）：授权只影响放行，不改变状态。
     const records = { 'ws-a': { updatedAt: 1 } }

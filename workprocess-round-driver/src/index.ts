@@ -1,11 +1,13 @@
 /**
  * workprocess-round-driver：**回合驱动器插件**（结构照宿主 `@deepseek-ai/dsh-goal-round-driver` 一比一）。
  *
- * 【一个模块一件事】宿主那个包源码是三个模块（`index` / `prompt` / `invariant`），
- * 我们同粒度：
+ * 【一个模块一件事】宿主那个包源码是三个模块（`index` / `prompt` / `invariant`），我们同粒度：
  *   · 本模块 = 插件壳（`name` / `inject` / `apply`）+ 运行时（事实投影 · 一拍 · 投递）+ 消息来源声明；
  *   · `decide.ts` = 契约类型 + 决策树（纯层，可穷举单测）；
- *   · `prompt.ts` = 三种轮次的提示词渲染（纯字符串）。
+ *   · `prompt.ts` = 三种轮次的提示词渲染（纯字符串）；
+ *   · `invariant.ts` = 不变量伴生件（**独立入口** `workprocess-round-driver/invariant`，对齐宿主
+ *     `goal-round-driver/invariant`）：每条自称 `kind:'work'` 的会话消息必须与驱动器给定持久状态
+ *     会渲染的载荷**逐字节一致**——没有它，`kind:'work'` 就是"自动回合冒充人话"的口子。
  *
  * 【壳的设计（与宿主逐条对应）】
  * | 宿主 goal driver | 本插件 |
@@ -36,7 +38,7 @@ import { currentStageOf, onWorkChanged, stageAllowsStart, workprocessOf } from '
 import type { WorkProcess, WorkprocessService, WorkTask } from 'workprocess'
 import { decideWorkRound } from './decide.js'
 import type { DecideInput, GateFacts, RoundDecision, StageFacts, WorkFacts } from './decide.js'
-import { renderWorkAskPrompt, renderWorkPlanPrompt, renderWorkRoundPrompt, renderWorkWrapupPrompt } from './prompt.js'
+import { DEFAULT_BLOCKED_AFTER_ROUNDS, renderWorkAskPrompt, renderWorkPlanPrompt, renderWorkRoundPrompt, renderWorkWrapupPrompt } from './prompt.js'
 
 //#region 消息来源（仓外插件必须自己声明这一格）
 /** 续跑回合的来源载荷（进程 / 阶段 / 任务 / 修订 / 回合号：授权面按它精确匹配）。 */
@@ -52,6 +54,16 @@ export interface WorkRoundMessageSource {
   readonly taskId?: string
   readonly revision: number
   readonly round?: number
+  /**
+   * 生效回合上限（**任务轮才带**；投递时算好自署）：`defaultMaxRounds` 是装载配置、不在持久状态里，
+   * 不变量伴生件重建提示词要靠它（见 `invariant.ts`）。
+   */
+  readonly maxRounds?: number
+  /**
+   * 落 `block` 的轮数门槛（**任务轮才带**，理由同 `maxRounds`）：`blockedAfterRounds` 也是装载配置，
+   * 不变量伴生件重建提示词要靠它。
+   */
+  readonly blockedAfterRounds?: number
 }
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -190,6 +202,16 @@ export interface RoundDelivery {
   /** 授权判据的第三维：任务轮 = 任务 revision；规划轮 = 流程 revision。 */
   readonly revision: number
   readonly round?: number
+  /**
+   * 生效回合上限（**任务轮才带**）：和 `round` 一起自署进消息来源——`defaultMaxRounds` 是装载配置、
+   * 不在持久状态里，不变量伴生件重建提示词要靠它（见 `invariant.ts`）。
+   */
+  readonly maxRounds?: number
+  /**
+   * 落 `block` 的轮数门槛（**任务轮才带**，理由同 `maxRounds`：`blockedAfterRounds` 是装载配置、
+   * 不在持久状态里，不变量伴生件重建提示词要靠它）。**必须与工具面那份取同一个数**。
+   */
+  readonly blockedAfterRounds?: number
   readonly prompt: string
 }
 
@@ -199,13 +221,15 @@ export interface RoundDelivery {
  * 任务不在当前阶段 / 阶段已收口 ⇒ `undefined`（没得投）。
  */
 export function roundDeliveryOf(
-  process: WorkProcess, taskId: string, roundsStarted: number, fallbackMaxRounds = DEFAULT_MAX_ROUNDS,
+  process: WorkProcess, taskId: string, roundsStarted: number,
+  fallbackMaxRounds = DEFAULT_MAX_ROUNDS, blockedAfterRounds = DEFAULT_BLOCKED_AFTER_ROUNDS,
 ): RoundDelivery | undefined {
   const stage = currentStageOf(process)
   if (stage === undefined) return undefined
   const task = stage.tasks.find((t) => t.id === taskId)
   if (task === undefined) return undefined
   const round = roundsStarted + 1
+  const maxRounds = effectiveMaxRoundsOf(task, fallbackMaxRounds)
   const prompt = renderWorkRoundPrompt({
     processObjective: process.objective,
     stage: {
@@ -214,9 +238,13 @@ export function roundDeliveryOf(
     },
     task: { id: task.id, objective: task.objective },
     round,
-    maxRounds: effectiveMaxRoundsOf(task, fallbackMaxRounds),
+    maxRounds,
+    blockedAfterRounds,
   })
-  return { processId: process.id, taskId: task.id, stageKey: stage.key, revision: task.revision, round, prompt }
+  return {
+    processId: process.id, taskId: task.id, stageKey: stage.key, revision: task.revision,
+    round, maxRounds, blockedAfterRounds, prompt,
+  }
 }
 
 /**
@@ -226,7 +254,7 @@ export function roundDeliveryOf(
  * 驱动器按阶段键记一次（`stagePlanAsked`），问过之后决策树改成停手等人。
  */
 export function planDeliveryOf(
-  process: WorkProcess, stageKey: string, askedRound = 1,
+  process: WorkProcess, stageKey: string,
 ): RoundDelivery | undefined {
   const stage = currentStageOf(process)
   if (stage === undefined || stage.key !== stageKey || stage.tasks.length > 0) return undefined
@@ -240,7 +268,6 @@ export function planDeliveryOf(
         key: stage.key, statement: stage.statement, doneCriteria: stage.doneCriteria,
         ...(stage.closePolicy === undefined ? {} : { closePolicy: stage.closePolicy }),
       },
-      round: askedRound,
     }),
   }
 }
@@ -256,7 +283,7 @@ export function wrapupDeliveryOf(
 ): RoundDelivery | undefined {
   const doneStages = process.stages
     .filter((stage) => stage.state === 'done')
-    .map((stage) => ({ key: stage.key, statement: stage.statement }))
+    .map((stage) => ({ key: stage.key, statement: stage.statement, doneCriteria: stage.doneCriteria }))
   if (kind === 'complete' && process.closedAt === undefined && process.stages.some((s) => s.state !== 'done')) {
     return undefined   // 还没全收口：不是"落幕"，别报喜
   }
@@ -325,6 +352,15 @@ export interface WorkRoundDriverConfig {
   /** 任务没写 `max_rounds` 时的生效上限（缺省 {@link DEFAULT_MAX_ROUNDS}）。 */
   readonly defaultMaxRounds?: number
   /**
+   * 落 `block` 的前置轮数门槛（缺省 {@link DEFAULT_BLOCKED_AFTER_ROUNDS} = 3）。
+   *
+   * 【必须与工具面同值】真正拒 `block` 的是**工具面**（`tool-workprocess` 的 `blockedAfterRounds`：
+   * `WORK_TOOL_BLOCK_THRESHOLD`）。本项只决定**投递给模型的提示词里写几轮**——两处取不同的数，
+   * 模型就会按一个错的数去试、被拒、白跑一轮。两个包各自独立装载（一包一 patch），驱动器读不到
+   * 工具面的配置，故只能靠装载层写同一个数，并由全栈测试钉住"两边的缺省值一致"。
+   */
+  readonly blockedAfterRounds?: number
+  /**
    * **流程收口**（方案 B）：'auto'（缺省）= 最后一段 done 后驱动器直接落 close，记录终止；
    * 'human' = 全阶段 done 后投「请判」轮（方案 B 口径：判了不落章，与旧行为等价）。
    */
@@ -392,6 +428,8 @@ export function apply(ctx: Context, config?: WorkRoundDriverConfig): void {
   const domain = workprocessOf(ctx)
   const driveEnabled = config?.drive === true
   const defaultMaxRounds = config?.defaultMaxRounds ?? DEFAULT_MAX_ROUNDS
+  /** 落 `block` 的门槛（**必须与工具面同值**；见 `WorkRoundDriverConfig.blockedAfterRounds`）。 */
+  const blockedAfterRounds = config?.blockedAfterRounds ?? DEFAULT_BLOCKED_AFTER_ROUNDS
   const autoClose = config?.close !== 'human'
   /** 会话 resume ⇒ 自动收回续跑许可（缺省开；goal 同款纪律）。 */
   const disarmOnResume = config?.disarmOnResume !== false
@@ -463,6 +501,9 @@ export function apply(ctx: Context, config?: WorkRoundDriverConfig): void {
         ...(delivery.taskId === undefined ? {} : { taskId: delivery.taskId }),
         revision: delivery.revision,
         ...(delivery.round === undefined ? {} : { round: delivery.round }),
+        ...(delivery.maxRounds === undefined ? {} : { maxRounds: delivery.maxRounds }),
+        // 门槛数字也是装载配置、不在持久状态里：与 `maxRounds` 同款自署，不变量伴生件重建提示词靠它。
+        ...(delivery.blockedAfterRounds === undefined ? {} : { blockedAfterRounds: delivery.blockedAfterRounds }),
       },
     })
     state.attempt = {
@@ -513,7 +554,7 @@ export function apply(ctx: Context, config?: WorkRoundDriverConfig): void {
         const process = await domain.process(scope)
         if (process === undefined) return false
         const roundsStarted = (await domain.roundsStarted(scope)) ?? 0
-        const delivery = roundDeliveryOf(process, decision.taskId, roundsStarted, defaultMaxRounds)
+        const delivery = roundDeliveryOf(process, decision.taskId, roundsStarted, defaultMaxRounds, blockedAfterRounds)
         if (delivery === undefined) return false
         // 同一轮只投一次（`taskId:revision:round`）：宿主靠 goal 服务的耐久回合计数挡住重复，
         // 我们额外在进程内挡一道——域没变（没有 work/changed）时这一轮就是"已投出去的那一轮"。
@@ -529,7 +570,7 @@ export function apply(ctx: Context, config?: WorkRoundDriverConfig): void {
         if (!driveEnabled) return false
         const process = await domain.process(scope)
         if (process === undefined) return false
-        const delivery = planDeliveryOf(process, decision.stageKey, state.planAsked.size)
+        const delivery = planDeliveryOf(process, decision.stageKey)
         if (delivery === undefined) return false
         if (reserveAndQueue(state, 'plan', delivery)) {
           void domain.markAsked(scope, 'plan', decision.stageKey, delivery.revision)

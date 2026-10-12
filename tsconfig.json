@@ -1,14 +1,17 @@
 {
   "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx"
+  },
   "include": [
     "workprocess/src/**/*.ts",
     "workprocess/tests/**/*.ts",
+    "workprocess/client/**/*.ts",
+    "workprocess/client/**/*.tsx",
     "workprocess-round-driver/src/**/*.ts",
     "workprocess-round-driver/tests/**/*.ts",
     "tool-workprocess/src/**/*.ts",
     "tool-workprocess/tests/**/*.ts",
-    "workprocess/src/**/*.ts",
-    "workprocess/tests/**/*.ts",
     "command-workprocess/src/**/*.ts",
     "command-workprocess/tests/**/*.ts"
   ]

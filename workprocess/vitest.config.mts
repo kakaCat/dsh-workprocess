@@ -21,5 +21,5 @@ export default defineConfig({
       'dsh-workprocess': at('../dsh-workprocess/src/index.ts'),
     },
   },
-  test: { include: ['tests/**/*.test.ts'] },
+  test: { include: ['tests/**/*.spec.ts'] },
 })

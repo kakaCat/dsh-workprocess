@@ -10,8 +10,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import type { WorkChange, WorkEvent } from 'workprocess/domain.js'
-import { applyWorkEvent, decodeWorkEvent, decodeWorkProcess, foldWorkProcess, processAllowsClose, sameProcess, workProgressOf } from 'workprocess/fold.js'
-import { checkWorkInvariants } from 'workprocess/invariant.js'
+import { applyWorkEvent, checkWorkInvariants, decodeWorkEvent, decodeWorkProcess, foldWorkProcess, processAllowsClose, sameProcess, workProgressOf } from 'workprocess/fold.js'
 import { WorkError } from 'workprocess/runtime.js'
 import type { WorkProcess, WorkStageDraft } from 'workprocess/types.js'
 import {
@@ -342,6 +341,22 @@ describe('服务层 · 读写收口', () => {
     await expect(createWorkTask(deps, 'ws-a', { stageKey: 'prep', objective: 'a' }))
       .rejects.toMatchObject({ code: 'WORK_NO_PROCESS' })
     expect(st.writes).toBe(0)
+  })
+
+  it('域层**允许**给后续阶段先落任务**（刻意的能力，不是漏洞）：驱动器按"计划先落任务、开工归驱动器"用它', async () => {
+    // 与工具面的纪律（`WORK_TOOL_REGISTRY` 的 create_worktask 自述 / 策略段"不要提前给后续阶段建任务"）
+    // **分开看**：那条纪律是 agent 行为面的，牙长在工具面（`WORK_NOT_CURRENT_STAGE`）；域是通用引擎，
+    // 不该把 agent 的纪律变成状态规则（驱动器的环测、service/view 的读投影都依赖这个能力）。
+    const st = storeOf({ 'ws-a': { updatedAt: 1 } })
+    const deps = { store: st as never, now: () => 1_000 }
+    await createWorkProcess(deps, 'ws-a', { objective: 'x', stages: STAGES })
+    await startWorkStage(deps, 'ws-a', 'prep')
+    expect(await createWorkTask(deps, 'ws-a', { stageKey: 'train', objective: '先拆好' })).toBe(true)
+    const process = await workProcessOf(deps, 'ws-a')
+    expect(process?.stages.map((s) => [s.key, s.state, s.tasks.length]))
+      .toEqual([['prep', 'active', 0], ['train', 'pending', 1], ['release', 'pending', 0]])
+    // 严格解码（持久化边界用的同一份规则）接受它——所以它不会被判成坏数据。
+    expect(() => decodeWorkProcess(process)).not.toThrow()
   })
 
   it('视图：计数与许可派生自归属记录（不另存第二份）', async () => {

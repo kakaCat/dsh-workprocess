@@ -2,8 +2,9 @@
  * workprocess 服务本体（对齐宿主 `@deepseek-ai/dsh-goal/src/index.ts`：宿主在该文件装配服务，
  * 这里装配流程读写；区别是宿主用 cordis 注入，本包用**结构化端口契约**注入）。
  *
- * 分层：`types`（纯类型）→ `domain`（事件词汇）→ `fold`（纯折叠/判据）→ `runtime`（构造器/常量）
- * → `invariant`（不变量）→ 本文件（I/O 编排 + 幂等 + 身份分配）。
+ * 分层：`types`（纯类型）→ `domain`（事件词汇）→ `fold`（纯折叠/判据/不变量）→ `runtime`（构造器/常量）
+ * → 本文件（I/O 编排 + 幂等 + 身份分配）。`invariant.ts` 不是本层的一环：它是**伴生插件入口**
+ * （`workprocess/invariant`），只有宿主挂了 `invariants` 服务时才装载。
  *
  * 【流程挂在哪】一个**归属对象**（scope）一条当前 `WorkProcess`（挂该对象的记录字段 `workProcess`）——
  * 与宿主"一会话一 goal"同构，只是归属键由调用方给。**两层的写共用同一个 CAS revision**：
@@ -18,9 +19,8 @@
  * @module workprocess/kernel
  */
 import {
-  allTasksOf, applyWorkEvent, clearedTaskIdsOf, decodeWorkProcess, workProgressOf,
+  allTasksOf, applyWorkEvent, assertWorkInvariants, clearedTaskIdsOf, decodeWorkProcess, workProgressOf,
 } from './fold.js'
-import { assertWorkInvariants } from './invariant.js'
 import { WORK_CHANGE_VERSION, WorkError, WorkProcessId, WorkTaskId } from './runtime.js'
 import type { WorkChangedNotification, WorkEvent } from './domain.js'
 import type {
@@ -42,7 +42,10 @@ export type {
 } from './domain.js'
 export * from './fold.js'
 export * from './runtime.js'
-export * from './invariant.js'
+// 【故意不再导出 `./invariant.js`】那个文件现在是**伴生插件入口**（对齐宿主
+// `dsh-goal/lib/invariant.js`）：它 import cordis / 事件总线、并 `inject: ['invariants']`，
+// 从领域入口再导出会把"要装载伴生件才需要的东西"拖进普通消费方的依赖图。
+// 不变量本身（`checkWorkInvariants` / `assertWorkInvariants`）已随 `export * from './fold.js'` 露出。
 // 阶段表投影（当前阶段 / 串行顺序 / 串行门前半）：驱动与工具面读的同一份判据。
 export * from './stages.js'
 

@@ -37,6 +37,7 @@ async function seeded() {
   })
   await startWorkStage(deps, 'session-1', 'repro')
   await createWorkTask(deps, 'session-1', { stageKey: 'repro', objective: '抓栈', maxRounds: 5 })
+  // 域层允许给后续阶段先落任务（工具面才拦 agent 这么做）——读投影必须吃得下这个状态。
   await createWorkTask(deps, 'session-1', { stageKey: 'fix', objective: '改码' })
   return { store, service: createWorkprocessService({ store, now: () => 1_000 }) }
 }

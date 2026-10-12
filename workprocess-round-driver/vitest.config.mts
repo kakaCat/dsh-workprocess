@@ -19,5 +19,5 @@ export default defineConfig({
       'tool-workprocess': at('../tool-workprocess/src/index.ts'),
     },
   },
-  test: { include: ['tests/**/*.test.ts'] },
+  test: { include: ['tests/**/*.spec.ts'] },
 })

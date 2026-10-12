@@ -31,6 +31,8 @@ export type { WorkChangedPayload } from './events.js'
 export { storageDomainStoreOf, workprocessDomain, WORKPROCESS_DOMAIN, WORKPROCESS_DOMAIN_VERSION } from './storage.js'
 export { createWorkprocessService } from './service.js'
 export type { WorkprocessService, WorkprocessStatus } from './service.js'
+export { workWireOf } from './view.js'
+export type { WorkStageWire, WorkTaskWire, WorkWire } from './view.js'
 export type { StorageDomainCtx, DomainTableHandle } from './storage.js'
 
 /** 插件名（日志前缀与装载层条目 id 同源）。 */

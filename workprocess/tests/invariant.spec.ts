@@ -10,7 +10,7 @@
 import { describe, it, expect } from 'vitest'
 import { createWorkProcess, startWorkStage } from 'workprocess'
 import type { WorkChangedPayload } from 'workprocess'
-import { apply, inject, name } from 'workprocess/invariant-plugin.js'
+import { apply, inject, name } from 'workprocess/invariant.js'
 import type { WorkRecordLike } from 'workprocess'
 
 /** 假 store（记录要先存在，与内核测试同口径）。 */

@@ -1,4 +1,6 @@
 node_modules/
 dist/
+# 浏览器半的产物目录：`lib/client.js` 由 `client/*.tsx` 经 tsdown 编译（源码在 client/）
+lib/
 *.log
 .DS_Store
