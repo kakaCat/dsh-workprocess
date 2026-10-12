@@ -19,7 +19,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-session-projection'
 import type {} from '@deepseek-ai/dsh-llm'
-import { WorkError } from 'workprocess'
+import { WorkToolError } from './codes.js'
 import type { WorkStageClosePolicy } from 'workprocess'
 import type { WorkHumanAsk, WorkHumanVerdict } from './tools.js'
 
@@ -146,12 +146,12 @@ export function isActionAuthorized(
   return !HUMAN_ONLY.has(action)
 }
 
-/** 放行判定；不放行则抛结构化错误（`WorkError`，机器可路由）。 */
+/** 放行判定；不放行则抛**工具面政策拒绝**（`WorkToolError`，带 `WORK_TOOL_*` 码，机器可路由）。 */
 export function requireActionAuthority(
   action: WorkAuthorityAction, authority: WorkToolAuthority, ctx?: WorkAuthorityContext,
 ): void {
   if (isActionAuthorized(action, authority, ctx)) return
-  throw new WorkError(
+  throw new WorkToolError(
     action === 'stage_done'
       ? '本阶段收口策略是 `human`（人工确认）：agent 自行 stage_done 等于替人判定"这一段算不算成了"'
         + '——请由人在宿主界面上确认，或由人把该阶段改成 auto（close_policy）后自动收口'
@@ -163,7 +163,7 @@ export function requireActionAuthority(
             + '——请由人直接发起（如 `/work edit <目标>`，命令行会以人的名义把这句交给 agent）'
           : '`' + action + '` 需要人显式发起（agent 自行 ' + action + ' 会推翻人的意图或越权确认）'
             + '——请由人在宿主界面上确认，或由人直接调本工具',
-    'WORK_NO_PERMISSION',
+    'WORK_TOOL_AUTHORITY_REQUIRED',
   )
 }
 

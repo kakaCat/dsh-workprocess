@@ -40,11 +40,21 @@ async function seededDomain() {
   return domain
 }
 
-/** 假请求：只带 url 与 close 监听。 */
-function mockReq(url: string): IncomingMessage & { close(): void } {
+/**
+ * 假请求：url + headers + close 监听。
+ * 缺省带头 =「本机同源」（Host 127.0.0.1:3000，无 Origin / Sec-Fetch-Site）——访问判据放行的形态；
+ * 要测被拦的形态就显式传 headers。
+ */
+function mockReq(
+  url: string,
+  headers: Record<string, string> = { host: '127.0.0.1:3000' },
+  method = 'GET',
+): IncomingMessage & { close(): void } {
   const listeners = new Map<string, () => void>()
   const req = {
     url,
+    method,
+    headers,
     on(ev: string, cb: () => void) {
       listeners.set(ev, cb)
       return req
@@ -183,5 +193,72 @@ describe('GET /workprocess/api/events（SSE）', () => {
     expect(res.status).toBe(200)
     const first = res.body.split('data: ')[1]
     expect(JSON.parse(first)).toEqual({ scope: 'nope', process: null })
+  })
+})
+
+describe('访问判据（本机数据面：跨源 / 跨站 / 非本机 Host 一律拦）', () => {
+  const call = async (
+    headers: Record<string, string>,
+    hosts?: readonly string[],
+    url = '/workprocess/api/stages?scope=session-1',
+    method = 'GET',
+  ) => {
+    const domain = await seededDomain()
+    const res = mockRes()
+    createWorkprocessApiHandler(domain, mockSubscribe().subscribe, hosts === undefined ? undefined : { hosts })(
+      mockReq(url, headers, method), res as unknown as ServerResponse)
+    await flush()
+    return res
+  }
+
+  it('同源（Origin 与 Host 同源）+ loopback Host ⇒ 放行', async () => {
+    const res = await call({ host: '127.0.0.1:3000', origin: 'http://127.0.0.1:3000' })
+    expect(res.status).toBe(200)
+    expect(await call({ host: 'localhost:3000' })).toMatchObject({ status: 200 })
+    expect(await call({ host: '[::1]:3000' })).toMatchObject({ status: 200 })   // IPv6 字面量
+  })
+
+  it('跨源 Origin ⇒ 403 cross-origin（任意网页读不到本机流程）', async () => {
+    const res = await call({ host: '127.0.0.1:3000', origin: 'http://evil.example' })
+    expect(res.status).toBe(403)
+    expect(JSON.parse(res.body).error).toBe('cross-origin')
+  })
+
+  it('跨站（Sec-Fetch-Site: cross-site）⇒ 403，即便 Host 看着是本机', async () => {
+    const res = await call({ host: '127.0.0.1:3000', 'sec-fetch-site': 'cross-site' })
+    expect(res.status).toBe(403)
+    expect(JSON.parse(res.body).error).toBe('cross-site')
+  })
+
+  it('非 loopback Host（DNS rebinding 的形态）⇒ 403，消息点名 apiHosts', async () => {
+    const res = await call({ host: 'evil.example:3000', origin: 'http://evil.example:3000' })
+    expect(res.status).toBe(403)
+    const body = JSON.parse(res.body)
+    expect(body.error).toBe('host-not-allowed')
+    expect(body.message).toContain('apiHosts')
+  })
+
+  it('缺 Host ⇒ 403 missing-host（浏览器必带 Host）', async () => {
+    const res = await call({})
+    expect(res.status).toBe(403)
+    expect(JSON.parse(res.body).error).toBe('missing-host')
+  })
+
+  it('装载层把主机名列进 apiHosts 就放行；`*` = 全放行', async () => {
+    expect((await call({ host: 'mybox.lan:8080', origin: 'http://mybox.lan:8080' }, ['mybox.lan:8080'])).status).toBe(200)
+    expect((await call({ host: 'mybox.lan:8080' }, ['mybox.lan'])).status).toBe(200)     // 名单写名，端口随意
+    expect((await call({ host: 'evil.example:3000' }, ['*'])).status).toBe(200)
+    // 放行 Host ≠ 放行跨源：Origin 仍须与 Host 同源。
+    expect((await call({ host: 'mybox.lan:8080', origin: 'http://evil.example' }, ['mybox.lan:8080'])).status).toBe(403)
+  })
+
+  it('非 http(s) 的 Origin（Electron 壳 / 扩展）放行：网页伪造不出这种来源', async () => {
+    expect((await call({ host: '127.0.0.1:3000', origin: 'app://dsh' })).status).toBe(200)
+  })
+
+  it('只读面：非 GET/HEAD ⇒ 405', async () => {
+    const res = await call({ host: '127.0.0.1:3000' }, undefined, '/workprocess/api/stages?scope=session-1', 'POST')
+    expect(res.status).toBe(405)
+    expect(JSON.parse(res.body).error).toBe('method-not-allowed')
   })
 })

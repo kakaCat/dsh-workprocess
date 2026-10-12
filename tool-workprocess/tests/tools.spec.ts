@@ -10,11 +10,12 @@
  *      取数来源点名到具体工具、语义只写一处（`update_*` 的权限/不可逆性归 `action` 的 enum）。
  */
 import { describe, it, expect } from 'vitest'
-import { WORK_TOOL_REGISTRY, workPolicyText } from 'tool-workprocess'
+import { readFileSync, readdirSync } from 'node:fs'
+import { WORK_TOOL_CODES, WORK_TOOL_REGISTRY, workPolicyText } from 'tool-workprocess'
 import { STAGE_ACTIONS, WORK_TOOL_FACTORIES } from 'tool-workprocess'
 import type { WorkToolDeps } from 'tool-workprocess'
 import type { WorkRecordLike, WorkStoreLike } from 'workprocess'
-import { createWorkprocessService, startWorkStage } from 'workprocess'
+import { WORK_ERROR_CODES, createWorkprocessService, startWorkStage } from 'workprocess'
 
 interface ToolLike {
   name?: string
@@ -140,9 +141,9 @@ describe('工具壳 · 协议面走通', () => {
     await agent.createWorkstage.execute({ scope: 'ws-a', objective: 'x', stages: STAGES })
     await agent.createWorktask.execute({ scope: 'ws-a', stage_key: 'prep', objective: '清洗数据' })
 
-    expect((await agent.updateWorkstage.execute({ scope: 'ws-a', stage_key: 'prep', action: 'done' })).code).toBe('WORK_NO_PERMISSION')
-    expect((await agent.updateWorktask.execute({ scope: 'ws-a', task_id: 'wt:prep:1', action: 'resume' })).code).toBe('WORK_NO_PERMISSION')
-    expect((await agent.updateWorktask.execute({ scope: 'ws-a', task_id: 'wt:prep:1', action: 'edit', objective: 'x' })).code).toBe('WORK_NO_PERMISSION')
+    expect((await agent.updateWorkstage.execute({ scope: 'ws-a', stage_key: 'prep', action: 'done' })).code).toBe('WORK_TOOL_AUTHORITY_REQUIRED')
+    expect((await agent.updateWorktask.execute({ scope: 'ws-a', task_id: 'wt:prep:1', action: 'resume' })).code).toBe('WORK_TOOL_AUTHORITY_REQUIRED')
+    expect((await agent.updateWorktask.execute({ scope: 'ws-a', task_id: 'wt:prep:1', action: 'edit', objective: 'x' })).code).toBe('WORK_TOOL_AUTHORITY_REQUIRED')
   })
 })
 
@@ -225,6 +226,16 @@ describe('模型面措辞 · 对齐宿主 tool-goal 的写法', () => {
     }
   })
 
+  it('create_workstage 的 stages 描述必须带那两条真陷阱（静默改策略 / 必然被拒的替换）', () => {
+    // 两条都是**真实行为**（fold 的 stage-define），不写在参数上模型只能靠踩：
+    // ① 整体替换时"定义以草案为准" ⇒ close_policy 不写就把上一版 auto 改回 human（"该自动却停手等人"）；
+    // ② 会丢掉"已经有任务"的阶段的替换一律被拒 ⇒ 不写就是提交一个必然失败的替换、白跑一轮。
+    const desc = String(propsOf(toolsWith(), 'createWorkstage').stages?.description ?? '')
+    expect(desc).toContain('close_policy 不写就回到缺省的 human')
+    expect(desc).toContain('非空')
+    expect(desc).toContain('被拒')
+  })
+
   it('block 门槛数字由配置渲染（自述与策略段同源，不写死 3）', () => {
     const tools = toolsWith()
     const at = (tools: Record<string, ToolLike>) => String(propsOf(tools, 'updateWorktask').action?.description ?? '')
@@ -237,5 +248,48 @@ describe('模型面措辞 · 对齐宿主 tool-goal 的写法', () => {
     expect(at(five).includes('3 轮')).toBe(false)
     expect(workPolicyText(5)).toContain('撑过 5 轮')
     expect(workPolicyText(5).includes('3 轮')).toBe(false)
+  })
+})
+
+describe('两套词汇：域码（WORK_*）与工具码（WORK_TOOL_*）各回各家', () => {
+  /** 工具面源码（扫码字面量用）。 */
+  const TOOL_SRC = ['codes.ts', 'tools.ts', 'authority.ts', 'http.ts', 'index.ts']
+
+  it('登记表自洽：码唯一、工具码一律 WORK_TOOL_ 前缀、域码里不许混进工具码', () => {
+    expect(new Set(WORK_TOOL_CODES).size).toBe(WORK_TOOL_CODES.length)
+    for (const code of WORK_TOOL_CODES) expect(code.startsWith('WORK_TOOL_'), code).toBe(true)
+    expect(new Set(WORK_ERROR_CODES).size).toBe(WORK_ERROR_CODES.length)
+    for (const code of WORK_ERROR_CODES) expect(code.startsWith('WORK_'), code).toBe(true)
+    // 两本不许串门（又合回一本 = 这次的分工白做）。
+    expect(WORK_ERROR_CODES.filter((c) => c.startsWith('WORK_TOOL_'))).toEqual([])
+    // 域码里也不许留"工具政策"码：`WORK_NO_PERMISSION` 已按宿主口径改成
+    // `WORK_TOOL_AUTHORITY_REQUIRED`（授权是工具面的牙，不是状态规则）。
+    expect(WORK_ERROR_CODES as readonly string[]).not.toContain('WORK_NO_PERMISSION')
+  })
+
+  it('工具面不许手写未登记的码：源码里的独立码字面量必须落在两本表里', () => {
+    const known = [...WORK_ERROR_CODES, ...WORK_TOOL_CODES] as readonly string[]
+    const seen: string[] = []
+    for (const file of TOOL_SRC) {
+      const src = readFileSync(new URL('../src/' + file, import.meta.url), 'utf8')
+      // 独立字面量（`'WORK_X'` 这样整串带引号）才算码；长文案里顺手提一句不算。
+      // `http.ts` 的 wire 级错误名（`missing-host` / `cross-origin`…）是小写 kebab，不在此列。
+      for (const match of src.matchAll(/'((?:WORK|GOAL)_[A-Z_]+)'/g)) {
+        const code = match[1] ?? ''
+        seen.push(file + ':' + code)
+        expect(known, file + ' 里的 ' + code).toContain(code)
+      }
+    }
+    expect(seen.length, '扫描没扫到任何码字面量——守卫本身失效了').toBeGreaterThan(5)
+  })
+
+  it('域侧不知道工具码：workprocess/src 里没有工具码字面量（两本各回各家）', () => {
+    const dir = new URL('../../workprocess/src/', import.meta.url)
+    const files = readdirSync(dir).filter((f) => f.endsWith('.ts'))
+    expect(files.length).toBeGreaterThan(5)
+    for (const file of files) {
+      const src = readFileSync(new URL('../../workprocess/src/' + file, import.meta.url), 'utf8')
+      expect(src.match(/'WORK_TOOL_[A-Z_]+'/g) ?? [], file).toEqual([])
+    }
   })
 })

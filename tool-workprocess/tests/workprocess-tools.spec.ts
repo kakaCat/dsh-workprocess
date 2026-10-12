@@ -79,7 +79,7 @@ describe('授权口径（对齐宿主 update 政策）', () => {
     }
   })
 
-  it('越权时抛结构化错误（WORK_NO_PERMISSION，指路宿主界面 / 策略开关）', () => {
+  it('越权时抛结构化错误（WORK_TOOL_AUTHORITY_REQUIRED，指路宿主界面 / 策略开关）', () => {
     expect(() => requireActionAuthority('stage_done', { kind: 'autonomous' }))
       .toThrowError(/本阶段收口策略是 `human`/)
     expect(() => requireActionAuthority('stage_done', { kind: 'autonomous' }, { stageClosePolicy: 'auto' })).not.toThrow()
@@ -87,7 +87,7 @@ describe('授权口径（对齐宿主 update 政策）', () => {
       requireActionAuthority('task_resume', { kind: 'autonomous' })
       throw new Error('应当抛错')
     } catch (err) {
-      expect((err as { code?: string }).code).toBe('WORK_NO_PERMISSION')
+      expect((err as { code?: string }).code).toBe('WORK_TOOL_AUTHORITY_REQUIRED')
     }
   })
 
@@ -121,9 +121,11 @@ describe('授权口径（对齐宿主 update 政策）', () => {
 describe('层1 处理器 · 阶段', () => {
   it('get_workstage：缺参 / 无流程（明说的缺失）/ 建好之后读到两层结构', async () => {
     const deps = depsOf({ 'ws-a': { updatedAt: 1 } })
-    expect((await getWorkstage(deps, {})).error).toContain('缺少 scope')
+    // 缺参 = 工具面的参数拒绝（工具码）；无流程 = **域码**原样搬进回执（两本码表各回各家）。
+    expect((await getWorkstage(deps, {})).code).toBe('WORK_TOOL_INVALID_ARGS')
     expect(await getWorkstage(deps, { scope: 'ws-a' })).toEqual({
-      success: false, scope: 'ws-a', error: '该归属域还没有流程（先调 create_workstage 建流程）',
+      success: false, scope: 'ws-a', code: 'WORK_NO_PROCESS',
+      error: '该归属域还没有流程（先调 create_workstage 建流程）',
     })
 
     const created = await createWorkstage(deps, { scope: 'ws-a', objective: '把模型发上线', stages: STAGES })
@@ -171,7 +173,7 @@ describe('层1 处理器 · 阶段', () => {
     expect(String(badAction.error)).toContain('阶段开工是驱动器的动作')
 
     const denied = await updateWorkstage(agent, { scope: 'ws-a', stage_key: 'prep', action: 'done' }, {})
-    expect(denied.code).toBe('WORK_NO_PERMISSION')
+    expect(denied.code).toBe('WORK_TOOL_AUTHORITY_REQUIRED')
 
     const notStarted = await updateWorkstage(human, { scope: 'ws-a', stage_key: 'prep', action: 'done' }, {})
     expect(notStarted.success).toBe(true)
@@ -218,7 +220,7 @@ describe('层1 处理器 · 阶段', () => {
     await startWorkStage(agent, 'ws-a', 'train')
     await updateWorktask(agent, { scope: 'ws-a', task_id: 'wt:train:1', action: 'complete' })
     const denied = await updateWorkstage(agent, { scope: 'ws-a', stage_key: 'train', action: 'done' })
-    expect(denied.code).toBe('WORK_NO_PERMISSION')
+    expect(denied.code).toBe('WORK_TOOL_AUTHORITY_REQUIRED')
     expect(String(denied.error)).toContain('close_policy')
   })
 
@@ -231,7 +233,7 @@ describe('层1 处理器 · 阶段', () => {
 
     // 自撤流程 = 越权：会抹掉"这里曾经有一条流程"这段历史
     const denied = await updateWorkstage(agent, { scope: 'ws-a', action: 'discard' })
-    expect(denied.code).toBe('WORK_NO_PERMISSION')
+    expect(denied.code).toBe('WORK_TOOL_AUTHORITY_REQUIRED')
     expect(String(denied.error)).toContain('不可逆')
 
     // 人删：不需要 stage_key；删完读不到流程（明说的缺失）
@@ -258,7 +260,7 @@ describe('层1 处理器 · 阶段', () => {
 
     // agent 自行改目标 = 越权：改的是"这条流程要达成什么"
     const denied = await updateWorkstage(agent, { scope: 'ws-a', action: 'edit', objective: '顺手改成别的' })
-    expect(denied.code).toBe('WORK_NO_PERMISSION')
+    expect(denied.code).toBe('WORK_TOOL_AUTHORITY_REQUIRED')
     expect(String(denied.error)).toContain('改流程目标')
 
     // 缺 objective 当场拒（不静默当"没变"）
@@ -319,7 +321,7 @@ describe('人机确认（工具自己问人：对齐宿主 plan-mode 的 exit �
   it('人选「还要补做」⇒ 不收口，把人的话转达给模型', async () => {
     const { deps } = await seededAsk({ kind: 'declined', feedback: '还要加触控' })
     const out = await updateWorkstage(deps, { scope: 'ws-a', stage_key: 'prep', action: 'done' })
-    expect(out.code).toBe('WORK_HUMAN_DECLINED')
+    expect(out.code).toBe('WORK_TOOL_HUMAN_DECLINED')
     expect(String(out.error)).toContain('还要加触控')
     expect(((await getWorkstage(deps, { scope: 'ws-a' })).stages as Array<{ state: string }>)[0]).toMatchObject({ state: 'active' })
   })
@@ -327,14 +329,14 @@ describe('人机确认（工具自己问人：对齐宿主 plan-mode 的 exit �
   it('人打断了去说话 ⇒ 不收口，也不当成同意', async () => {
     const { deps } = await seededAsk({ kind: 'cancelled', reason: 'ASK_CANCELLED' })
     const out = await updateWorkstage(deps, { scope: 'ws-a', stage_key: 'prep', action: 'done' })
-    expect(out.code).toBe('WORK_HUMAN_UNAVAILABLE')
+    expect(out.code).toBe('WORK_TOOL_HUMAN_UNAVAILABLE')
     expect(((await getWorkstage(deps, { scope: 'ws-a' })).stages as Array<{ state: string }>)[0]).toMatchObject({ state: 'active' })
   })
 
   it('没弹框通道 ⇒ 退回原来的"拒绝并指路"（不假装问过）', async () => {
     const { deps } = await seededAsk({ kind: 'no-channel' })
     const out = await updateWorkstage(deps, { scope: 'ws-a', stage_key: 'prep', action: 'done' })
-    expect(out.code).toBe('WORK_NO_PERMISSION')
+    expect(out.code).toBe('WORK_TOOL_AUTHORITY_REQUIRED')
     expect(String(out.error)).toContain('close_policy')
   })
 
@@ -346,7 +348,7 @@ describe('人机确认（工具自己问人：对齐宿主 plan-mode 的 exit �
     await startWorkStage(deps, 'ws-a', 'prep')
     await createWorktask(deps, { scope: 'ws-a', stage_key: 'prep', objective: '清洗数据' })
     const out = await updateWorkstage(deps, { scope: 'ws-a', stage_key: 'prep', action: 'done' })
-    expect(out.code).toBe('WORK_NO_PERMISSION')      // 先判权：越权者不因为"没做完"拿到别的口径
+    expect(out.code).toBe('WORK_TOOL_AUTHORITY_REQUIRED')      // 先判权：越权者不因为"没做完"拿到别的口径
     expect(asked).toBe(0)
   })
 })
@@ -433,12 +435,12 @@ describe('层2 处理器 · 任务', () => {
     expect((await createWorktask(deps, { scope: 'ws-a', stage_key: 'prep' })).error).toContain('objective')
   })
 
-  it('create_worktask：给**后续阶段**建任务被工具拒（WORK_NOT_CURRENT_STAGE）——域层允许，纪律的牙在工具面', async () => {
+  it('create_worktask：给**后续阶段**建任务被工具拒（WORK_TOOL_NOT_CURRENT_STAGE）——域层允许，纪律的牙在工具面', async () => {
     const deps = await seeded(true)
     // 域层自己不会拒（"计划先落任务"是它刻意支持的能力），所以这条拒必须由工具面给出，
     // 而且必须**说得出理由**（域层的静默 false 只会让模型拿同一个阶段键反复试）。
     const rejected = await createWorktask(deps, { scope: 'ws-a', stage_key: 'train', objective: '先拆好' })
-    expect(rejected).toMatchObject({ success: false, code: 'WORK_NOT_CURRENT_STAGE', stage_key: 'train' })
+    expect(rejected).toMatchObject({ success: false, code: 'WORK_TOOL_NOT_CURRENT_STAGE', stage_key: 'train' })
     expect(String(rejected.error)).toContain('当前阶段（现在是 prep）')
     expect((await getWorktask(deps, { scope: 'ws-a' })).tasks).toEqual([])      // 零写入
     // 当前阶段（哪怕还没开工的 pending）照常可建：规划轮问的就是它。
@@ -472,8 +474,8 @@ describe('层2 处理器 · 任务', () => {
 
     const bad = await updateWorktask(agent, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'finish' })
     expect(String(bad.error)).toContain('action 非法')
-    expect((await updateWorktask(agent, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'resume' })).code).toBe('WORK_NO_PERMISSION')
-    expect((await updateWorktask(agent, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'edit', objective: '改口径' })).code).toBe('WORK_NO_PERMISSION')
+    expect((await updateWorktask(agent, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'resume' })).code).toBe('WORK_TOOL_AUTHORITY_REQUIRED')
+    expect((await updateWorktask(agent, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'edit', objective: '改口径' })).code).toBe('WORK_TOOL_AUTHORITY_REQUIRED')
 
     // edit：至少要给一项；真人才放行。
     const empty = await updateWorktask(human, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'edit' })
@@ -503,8 +505,8 @@ describe('层2 处理器 · 任务', () => {
     expect((await updateWorktask(human, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'block', reason: '等人裁', reason_code: 'wait-human' })).changed).toBe(true)
   })
 
-  it('block 门槛：跑满 3 轮后自治回合才允许落 block（判据用耐久回合计数）', async () => {
-    const records = { 'ws-a': { updatedAt: 1, rounds: { started: 3 } } }
+  it('block 门槛：这个任务跑满 3 轮后自治回合才允许落 block（判据用它自己的回合账）', async () => {
+    const records = { 'ws-a': { updatedAt: 1, rounds: { started: 9, tasks: { 'wt:prep:1': { rounds: 3, grants: 0 } } } } }
     const agent = depsOf(records)
     await createWorkstage(agent, { scope: 'ws-a', objective: '把模型发上线', stages: STAGES })
     await startWorkStage(agent, 'ws-a', 'prep')
@@ -513,6 +515,14 @@ describe('层2 处理器 · 任务', () => {
     expect(blocked.changed).toBe(true)
     const read = await tools.getWorktask(agent, { scope: 'ws-a', task_id: 'wt:prep:1' })
     expect(JSON.stringify(read)).toContain('blocked')   // 相位与阻塞原因都该在回执里
+
+    // 反过来：**全流程累计数**已达 9 轮，但新任务自己一轮没跑 ⇒ 照样拒。
+    // （旧实现读的就是累计数，这里会变成 allowed ⇒ 这条断言就是防它回退的。）
+    await createWorktask(agent, { scope: 'ws-a', stage_key: 'prep', objective: '另一个任务' })
+    const fresh = await updateWorktask(agent, { scope: 'ws-a', task_id: 'wt:prep:2', action: 'block', reason: '等依赖', reason_code: 'wait-dep' })
+    expect(fresh.success).toBe(false)
+    expect(fresh.code).toBe('WORK_TOOL_BLOCK_THRESHOLD')
+    expect(String(fresh.error)).toContain('这个任务上跑满 3 轮（当前 0 轮）')
   })
 
   it('update_worktask：CAS 用旧 revision 改 → WORK_CONFLICT；clear 后按 id 读不到', async () => {

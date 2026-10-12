@@ -35,7 +35,12 @@ const recordSchema = z.object({
   workProcess: z.unknown().optional(),
   updatedAt: z.number().optional(),
   rounds: z
-    .object({ started: z.number().optional(), activation: z.enum(['armed', 'disarmed']).optional() })
+    .object({
+      started: z.number().optional(),
+      // 逐任务回合账（预算按任务计）：`rounds` = 该任务已准入回合数，`grants` = 人追加的预算份数。
+      tasks: z.record(z.string(), z.object({ rounds: z.number(), grants: z.number() })).optional(),
+      activation: z.enum(['armed', 'disarmed']).optional(),
+    })
     .optional(),
   asked: z
     .object({
@@ -84,10 +89,27 @@ export interface DomainTableHandle {
  *
  * `open` 只在这里调一次（域打开是异步的，句柄随插件生命周期存活）；
  * 读是内存同步读，写等后端确认耐久后才 resolve——与内核"写成功才发通知"的口径一致。
+ *
+ * **`mutate` 按 scope 串行**：`get → 改草稿 → put` 中间隔着真的 I/O（`await`），两个写者并发时
+ * 会各读一份旧草稿、后写的把先写的盖掉（丢更新）——内核的 CAS 也就成了摆设。写者有三处
+ * （工具面 / 命令行 / 驱动器）同在一个进程里，故串行化就放在这一层（唯一安排读写次序的地方）。
  */
 export function storageDomainStoreOf(ctx: StorageDomainCtx): WorkStoreLike {
   const opened = ctx.storageDomain.open(workprocessDomain)
   const tableOf = async (): Promise<DomainTableHandle> => (await opened).table('processes')
+  /** 每个 scope 一条串行链（前一个写完才轮到下一个；前一个失败不阻塞后一个）。 */
+  const chains = new Map<string, Promise<unknown>>()
+  const serialize = <T>(scope: string, run: () => Promise<T>): Promise<T> => {
+    const previous = chains.get(scope) ?? Promise.resolve()
+    const next = previous.then(run, run)
+    const settled: Promise<unknown> = next.catch(() => undefined)
+    chains.set(scope, settled)
+    // 链尾没人等 ⇒ 把表项摘掉（别让 Map 按 scope 无限长；摘之前先确认它还是当前链尾）。
+    void settled.then(() => {
+      if (chains.get(scope) === settled) chains.delete(scope)
+    })
+    return next
+  }
   return {
     async get(scope: string) {
       const record = (await tableOf()).get(scope)
@@ -102,15 +124,17 @@ export function storageDomainStoreOf(ctx: StorageDomainCtx): WorkStoreLike {
         ? enumerate.call(table) as IterableIterator<readonly [string, WorkRecordLike]>
         : [][Symbol.iterator]()
     },
-    async mutate(scope: string, fn: (draft: WorkRecordLike) => unknown) {
-      const table = await tableOf()
-      const current = table.get(scope) as WorkRecordLike | undefined
-      const draft: WorkRecordLike = current === undefined ? {} : { ...current }
-      const out = fn(draft) as { changed?: boolean } | undefined
-      // 幂等是硬语义：纯函数说没变，就不落盘（域后端也不会收到写请求）。
-      if (out?.changed !== true) return { changed: false }
-      await table.put(scope, draft)
-      return { changed: true }
+    mutate(scope: string, fn: (draft: WorkRecordLike) => unknown) {
+      return serialize(scope, async () => {
+        const table = await tableOf()
+        const current = table.get(scope) as WorkRecordLike | undefined
+        const draft: WorkRecordLike = current === undefined ? {} : { ...current }
+        const out = fn(draft) as { changed?: boolean } | undefined
+        // 幂等是硬语义：纯函数说没变，就不落盘（域后端也不会收到写请求）。
+        if (out?.changed !== true) return { changed: false }
+        await table.put(scope, draft)
+        return { changed: true }
+      })
     },
   }
 }

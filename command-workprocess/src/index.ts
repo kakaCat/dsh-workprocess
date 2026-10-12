@@ -105,7 +105,11 @@ function taskLine(task: WorkTask): string {
 /** 状态排版：走到哪了 / 谁该动 / 能做什么。 */
 export function renderWorkStatus(title: string, status: WorkprocessStatus): WorkCommandResult {
   const current = status.stages.find((s) => s.key === status.currentStageKey)
-  const rounds = String(status.roundsStarted) + (status.maxRounds === undefined ? '' : '/' + String(status.maxRounds))
+  // 回合预算**按任务计**：本任务花掉的 / 它自己的上限；累计数另说（它是"整条流程真跑过几轮"）。
+  const rounds = status.taskRounds === undefined
+    ? String(status.roundsStarted)
+    : String(status.taskRounds) + (status.maxRounds === undefined ? '' : '/' + String(status.maxRounds))
+      + '（全程累计 ' + String(status.roundsStarted) + '）'
   const whoActs = status.closedAt !== undefined
     ? ['流程已收口（' + new Date(status.closedAt).toLocaleString() + '）：记录终止，写被拒；重开新流程用 /work <目标>（旧流程须先 /work clear）。']
     : current === undefined
@@ -139,41 +143,52 @@ export function renderWorkStatus(title: string, status: WorkprocessStatus): Work
 /**
  * **建成指令**：把"人给的目标"转成一条给 agent 的活。
  *
- * 只交代"要什么 + 边界在哪"，**不预设阶段表**——怎么拆是模型该做的判断；
- * 但它必须知道两条硬口径：任务不该越阶段预建、收口策略按"能不能自动判定"选。
+ * 只交代"要什么 + 怎么做才算好 + 边界在哪"，**不预设阶段表**——怎么拆是模型该做的判断。
+ *
+ * 【写作纪律（范本 = 宿主 `dsh-goal-round-driver` 的 `renderGoalRoundPrompt`）】
+ *   · **形状照范本**：一行数据（目标）+ **一段连贯散文**。不用 `##` 标题、不做"字段清单"式规格书——
+ *     范本通篇也没有标题与列表；
+ *   · **不替工具 schema 说话**：字段名与取值范围（`stages` 里那四个字段、`close_policy` 的缺省、
+ *     替换阶段表的两条陷阱）归 `create_workstage` 的**参数描述**——那是模型调工具时读到的唯一来源。
+ *     投递里再抄一份 = 给 schema 建了个会过期的副本（上一版正是这么写的，抄了四个字段 + `stage_key`）；
+ *   · **要教"怎么算好"**（范本的精髓所在）：范本里有一整句工作方式纪律——"treat the current workspace,
+ *     tool results, and durable session state as **authoritative; inspect them instead of assuming earlier
+ *     narration is still current**…**verify** the result"。本面照此给三条：拆段前先看现状、每段要有
+ *     能收口的边界、判据要写成"别人照着能跑"；
+ *   · **必带停手条件**：这一轮只建、不要动手做（理由一行：任务轮的回合预算与 `block` 门槛按任务轮计数）。
+ *     与规划轮同源的真机坑——写成"建完直接动手"，两阶段流程跑完 `rounds.started` 还是 0；
+ *   · **不交代"这是人敲的命令"**：授权面读的是**消息来源**（`source: { kind: 'user' }`，见 `deliver`），
+ *     不是正文；这一轮的动作（`create_workstage` / `create_worktask`）也不需真人授权，写了只是噪声。
  */
 export function createInstruction(objective: string): string {
   return [
-    '请用 workprocess 工具为这条会话建立一条流程（人在输入框敲了 `/work`，下面是它给的目标）。',
-    '',
     '流程目标：' + objective,
     '',
-    '要求：',
-    '1. 用 `create_workstage` 建流程（objective 用上面这句），并**自己拆阶段**：3–5 段，key 短（小写英文），',
-    '   statement 说清这段做什么，done_criteria 写**可核验**的判据（跑什么、看到什么算过）。',
-    '2. 收口策略按需选：能自动判定"任务全完成"的阶段给 `close_policy: auto`；需要人点头的留缺省（human）。',
-    '3. 只建**当前阶段**该做的任务，不要把后续阶段的任务一次建满（阶段是串行的；',
-    '   后续阶段到达时驱动器会再提醒你规划那一段）。',
-    '4. 建完用一句话回报：分了哪几段、当前该做什么。',
+    '用 `create_workstage` 为这条目标建流程，阶段表**自己拆**：每段一个能收口的边界（几段由你定）——`statement` 说清',
+    '这段做什么，`done_criteria` 写成别人照着能跑的判据（跑什么、看到什么算过）。拆之前先看工作区与会话里',
+    '已经确立的事实，别按早先的叙述假设。`close_policy` 看"这段的产出要不要人点头"：要人验收或取舍的留缺省，',
+    '机器判据一过就能收的写 `auto`。随后用 `create_worktask` 给**当前阶段**建任务（一个任务一个可核验的判据；拆几个由你定）——只建这一段，',
+    '后续阶段到了驱动器会提醒你规划。这一轮只把计划落下来：不要动手做任务，活由驱动器投递的任务轮来干',
+    '（任务轮的回合预算与 block 门槛才对得上）。建完停手，用一句话回报分了哪几段、当前该做什么。',
   ].join('\n')
 }
 
 /**
  * **改目标指令**：`/work edit <目标>` 投给 agent 的活。
  *
- * 目标本身是**真人专属**动作（`update_workstage action=edit`）；命令以人的名义发起这一轮，故它能落章。
+ * 目标本身是**真人专属**动作（`update_workstage action=edit`）；命令以人的名义发起这一轮（消息来源自署
+ * `user`，见 `deliver`），故它能落章——**正文里不需要再交代"这是人敲的"**：授权面读来源，不读文本。
+ *
+ * 与建成指令同一套纪律（形状照范本、不替 schema 说话、必带停手条件）：重排阶段表是**条件动作**
+ * （新目标真要求重排才做），而"会丢掉非空阶段的替换会被拒"这类约束归 `create_workstage` 的参数描述。
  */
 export function editInstruction(objective: string): string {
   return [
-    '请用 workprocess 工具改这条会话的流程目标（人在输入框敲了 `/work edit`）。',
-    '',
     '新目标：' + objective,
     '',
-    '要求：',
-    '1. 用 `update_workstage`（`action: edit`，`objective` = 新目标）落目标——阶段与任务**原样保留**。',
-    '2. 若阶段表也得跟着新目标重排，再用 `create_workstage` 整体替换（同名阶段保留其任务与态；',
-    '   会被丢掉任务的阶段会被内核拒——先想清楚再换）。',
-    '3. 回报改了什么。',
+    '用 `update_workstage`（`action: "edit"`，`objective` 照抄上面那句）改这条流程的目标——阶段与任务',
+    '**原样保留**。新目标若真要求阶段表跟着重排，再调 `create_workstage` 整体替换；不需要就别动它。',
+    '改完停手，用一句话回报改了什么（别顺手重开流程）。',
   ].join('\n')
 }
 

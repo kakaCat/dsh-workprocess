@@ -345,7 +345,7 @@ describe('服务层 · 读写收口', () => {
 
   it('域层**允许**给后续阶段先落任务**（刻意的能力，不是漏洞）：驱动器按"计划先落任务、开工归驱动器"用它', async () => {
     // 与工具面的纪律（`WORK_TOOL_REGISTRY` 的 create_worktask 自述 / 策略段"不要提前给后续阶段建任务"）
-    // **分开看**：那条纪律是 agent 行为面的，牙长在工具面（`WORK_NOT_CURRENT_STAGE`）；域是通用引擎，
+    // **分开看**：那条纪律是 agent 行为面的，牙长在工具面（`WORK_TOOL_NOT_CURRENT_STAGE`）；域是通用引擎，
     // 不该把 agent 的纪律变成状态规则（驱动器的环测、service/view 的读投影都依赖这个能力）。
     const st = storeOf({ 'ws-a': { updatedAt: 1 } })
     const deps = { store: st as never, now: () => 1_000 }
@@ -485,8 +485,8 @@ describe('阶段收口策略（human 人工确认 / auto 自动收口）', () =>
 })
 
 describe('丢弃流程（连根拔掉，不是状态迁移）', () => {
-  it('丢弃后读不到流程、回合计数归零、再建是 revision 1 的新流程；重放幂等', async () => {
-    const st = storeOf({ 'ws-a': { updatedAt: 1, rounds: { started: 7, activation: 'armed' } } })
+  it('丢弃后读不到流程、整本回合账（含许可）随之消失、再建是 revision 1 的新流程；重放幂等', async () => {
+    const st = storeOf({ 'ws-a': { updatedAt: 1, rounds: { started: 7, activation: 'disarmed' } } })
     const deps = { store: st as never, now: () => 1_000 }
     await createWorkProcess(deps, 'ws-a', { objective: 'x', stages: STAGES })
     await startWorkStage(deps, 'ws-a', 'prep')
@@ -494,9 +494,11 @@ describe('丢弃流程（连根拔掉，不是状态迁移）', () => {
     expect(await discardWorkProcess(deps, 'ws-a')).toBe(true)
     expect(st.writes).toBe(before + 1)
     expect(await workProcessOf(deps, 'ws-a')).toBeUndefined()
-    // 记录还在（归属没变），但流程没了、回合计数归零
+    // 记录还在（归属没变），但流程没了、整本回合账也没了：留下的任何一格都是**上一个对象**的结论
+    //（`disarmed` 最坏：重建的流程一开就静默停住）。缺省值由派生读给（`?? 0` / `?? 'armed'`）。
     expect(st.records['ws-a'].workProcess).toBeUndefined()
-    expect(st.records['ws-a'].rounds?.started).toBe(0)
+    expect(st.records['ws-a'].rounds).toBeUndefined()
+    expect(await workActivationOf(deps, 'ws-a')).toBeUndefined()   // 没有流程 ⇒ 没有可授权的对象
     // 幂等：没有流程 ⇒ 零写入
     const after = st.writes
     expect(await discardWorkProcess(deps, 'ws-a')).toBe(false)

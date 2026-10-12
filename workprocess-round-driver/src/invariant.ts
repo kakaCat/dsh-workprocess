@@ -33,7 +33,7 @@ import { isDeepStrictEqual } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
 import { currentStageOf, stageClosePolicyOf, workprocessOf } from 'workprocess'
 import type { WorkprocessService, WorkProcess } from 'workprocess'
-import { askDeliveryOf, DEFAULT_BLOCKED_AFTER_ROUNDS, DEFAULT_MAX_ROUNDS, planDeliveryOf, roundDeliveryOf, wrapupDeliveryOf } from './index.js'
+import { askDeliveryOf, DEFAULT_BLOCKED_AFTER_ROUNDS, DEFAULT_MAX_ROUNDS, effectiveMaxRoundsOf, planDeliveryOf, roundDeliveryOf, wrapupDeliveryOf } from './index.js'
 import type { RoundDelivery, WorkRoundMessageSource } from './index.js'
 
 /** 伴生插件名（宿主同款命名：`<包>-invariant`）。 */
@@ -167,11 +167,13 @@ function reconstructDelivery(
       return fail('任务轮无法重建：投递时的任务修订（' + source.revision + '）已前进到 ' + anchor
         + '——发布那一刻锚必须成立（旧轮次的消息走启动重放口径）')
     }
-    // 生效上限 / 落 block 门槛：来源自署优先（投递时算好的那份）；旧消息没有该字段 ⇒
-    // 回落任务自身 maxRounds ?? 缺省 20、以及缺省门槛（装载层改过缺省值的老日志可能误报，认）。
+    // 生效上限 / 落 block 门槛：来源自署优先（投递时算好的那份，**含人追加的预算份数**——那部分
+    // 在归属记录里，伴生件看不到）；旧消息没有该字段 ⇒ 回落任务自身 maxRounds ?? 缺省 20、
+    // 以及缺省门槛（装载层改过缺省值的老日志可能误报，认）。
+    const task = currentStageOf(process)?.tasks.find((t) => t.id === source.taskId)
     const delivery = roundDeliveryOf(
       process, source.taskId, source.round - 1,
-      source.maxRounds ?? DEFAULT_MAX_ROUNDS,
+      source.maxRounds ?? (task === undefined ? DEFAULT_MAX_ROUNDS : effectiveMaxRoundsOf(task)),
       source.blockedAfterRounds ?? DEFAULT_BLOCKED_AFTER_ROUNDS,
     )
     if (delivery === undefined) return fail('任务轮重建失败：任务 ' + source.taskId + ' 不在当前阶段')

@@ -18,7 +18,7 @@ import type {
   WorkBlockReason, WorkProcess, WorkProcessId, WorkStageDraft, WorkTaskDraft, WorkTaskId,
 } from './types.js'
 
-/** 层0（流程）与层1（阶段）的动词。 */
+/** 流程（聚合根）与阶段（层1）的动词。 */
 export type WorkProcessOperation = 'init' | 'objective-edit' | 'stage-define' | 'stage-start' | 'stage-done'
 
 /** 层2（任务）的动词（逐条对齐宿主 `GoalOperation`：create/edit/pause/resume/block/complete/clear）。 */
@@ -122,3 +122,47 @@ export interface WorkRejection {
   readonly changed: false
   readonly reason: string
 }
+
+/**
+ * **域错误码**（闭联合；随 {@link WorkError} 抛出）——域边界能给的**全部**机器可路由分类。
+ *
+ * 【为什么住在这里】对齐宿主 `@deepseek-ai/dsh-goal`：`GoalErrorCode` 就写在域词汇表
+ * `goal/src/domain.ts` 里（与 `GoalOperation` 同一处），`runtime.ts` 只 `import type` 进来给
+ * `GoalError` 用。**工具面的政策码不在这里**——宿主那边是 `GOAL_TOOL_*` 前缀、抛在判据旁边；
+ * 本仓对应的那本表在 `tool-workprocess/src/codes.ts`（`WORK_TOOL_*` 闭联合）。
+ * 两套词汇的判据：**域码 = 状态规则说"这样不成"；工具码 = 工具面自己加的牙**（授权、纪律、
+ * 参数形状）。写在 const 数组里（而不是裸联合）是为了让守卫能机械检查两件事：
+ * 每个码都带 `WORK_` 前缀、且没有一个 `WORK_` 码混进 `WORK_TOOL_` 那一本。
+ */
+export const WORK_ERROR_CODES = [
+  /** 该归属域没有流程（读/写的前提不成立）。 */
+  'WORK_NO_PROCESS',
+  /** 按 id 找不到任务 / 阶段。 */
+  'WORK_NOT_FOUND',
+  /** 建流程/建任务却没给陈述（空 objective 写进去就是自造坏记录）。 */
+  'WORK_OBJECTIVE_REQUIRED',
+  /** 同一个 id 想建成另一个东西（身份冲突）。 */
+  'WORK_IDENTITY_CONFLICT',
+  /** CAS 失败：调用方拿着旧 revision 在改（对齐宿主 `goalRef` 的乐观锁拒绝）。 */
+  'WORK_CONFLICT',
+  /** 阶段键不存在 / 重复 / 非法。 */
+  'WORK_STAGE_NOT_FOUND',
+  'WORK_STAGE_DUPLICATE',
+  /** 串行门：前序阶段没全 done，本阶段不许开工。 */
+  'WORK_STAGE_SERIAL_BLOCKED',
+  /** 阶段收口条件不满足（本阶段还有没 complete 的任务）。 */
+  'WORK_STAGE_NOT_READY',
+  /** 整体替换阶段表会丢掉已有任务的阶段（静默丢任务是最坏的一类缺陷，故拒）。 */
+  'WORK_STAGE_HAS_TASKS',
+  /** 任务相位迁移不成立（终态不可逆 / 非 active 不许 pause 等）。 */
+  'WORK_TASK_PHASE',
+  /** block 没给结构化原因。 */
+  'WORK_REASON_REQUIRED',
+  /** 耐久快照/变更流解码失败：字段缺漏、类型不符或迁移链断裂（对齐宿主严格解码器）。 */
+  'WORK_CORRUPT',
+  /** 折叠结果违反域不变量（INV-1~6）——规则实现坏了，不是业务拒绝。 */
+  'WORK_INVARIANT',
+] as const
+
+/** 域错误码（{@link WORK_ERROR_CODES} 的联合）。 */
+export type WorkErrorCode = (typeof WORK_ERROR_CODES)[number]

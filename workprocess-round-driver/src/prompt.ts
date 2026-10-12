@@ -38,7 +38,7 @@ function stageSection(stage: StageProjection, emptyNote: string): string[] {
 
 /** 一轮提示词的输入（由适配器从归属记录投影成窄事实）。 */
 export interface WorkRoundPromptInput {
-  /** 层0：流程目标。 */
+  /** 流程（聚合根）：目标。 */
   readonly processObjective: string
   /** 层1：当前阶段（键 + 陈述 + 达成判据 + 收口策略）。 */
   readonly stage: StageProjection
@@ -97,7 +97,7 @@ export function renderWorkRoundPrompt(input: WorkRoundPromptInput): string {
     '      update_worktask { task_id: "' + input.task.id + '", action: "complete" }',
     '',
     '  然后停手——不要顺手开新任务，后续轮次由驱动器投给你。',
-    '- 推不动：卡点写进回执，**先撑满 ' + String(blockedAfter) + ' 轮**（不足会被拒）；'
+    '- 推不动：卡点写进回执，**在本任务上先撑满 ' + String(blockedAfter) + ' 轮**（不足会被拒）；'
       + '满 ' + String(blockedAfter) + ' 轮仍推不动才调：',
     '',
     '      update_worktask { task_id: "' + input.task.id + '", action: "block", reason: "被什么挡住、等谁" }',
@@ -108,7 +108,7 @@ export function renderWorkRoundPrompt(input: WorkRoundPromptInput): string {
 
 /** 阶段规划轮的输入（本阶段已开工但还没有任务）。 */
 export interface WorkPlanPromptInput {
-  /** 层0：流程目标。 */
+  /** 流程（聚合根）：目标。 */
   readonly processObjective: string
   /** 层1：当前阶段（键 + 陈述 + 达成判据）。 */
   readonly stage: StageProjection
@@ -133,8 +133,9 @@ export function renderWorkPlanPrompt(input: WorkPlanPromptInput): string {
     ...stageSection(input.stage, '本阶段未登记达成判据——按阶段陈述拆任务'),
     '',
     '## 现在要做的唯一一件事',
-    '本阶段已开工、**还没有任务**。用 `create_worktask`（`stage_key: "' + input.stage.key + '"`）建 **1–3 个**：',
-    '- objective 写成**可核验**的陈述（跑什么、看到什么算过）。',
+    '本阶段已开工、**还没有任务**。用 `create_worktask`（`stage_key: "' + input.stage.key + '"`）把本阶段拆成任务：',
+    '- 一个任务一个判据：objective 写成**可核验**的陈述（跑什么、看到什么算过）——一条判据能算清的别拆成两条，',
+    '  要不同判据的别塞进一个；**拆几个由你定**。',
     '**只建任务，这一轮不要动手**：建完就停手，任务轮会由驱动器投给你（带 `<workprocess_round>` 标签）。',
     '（理由一行：回合预算与 block 门槛都按任务轮计数——在这一轮把活干掉，预算等于没启用。）',
     '',
@@ -146,7 +147,7 @@ export function renderWorkPlanPrompt(input: WorkPlanPromptInput): string {
 
 /** **收口确认轮**的输入（阶段级 / 流程级两种）。 */
 export interface WorkAskPromptInput {
-  /** 层0：流程目标。 */
+  /** 流程（聚合根）：目标。 */
   readonly processObjective: string
   /** `stage-done` = 请人确认本阶段收口；`close` = 全阶段已收口，请人判流程成没成。 */
   readonly kind: 'stage-done' | 'close'
@@ -201,9 +202,9 @@ export function renderWorkAskPrompt(input: WorkAskPromptInput): string {
     '**工具会自己弹框请人确认**（不用你先用 `ask_user_question` 问一遍——人的答复只有走这个工具',
     '才落得下章：答复记在工具结果里，会话事件里没有"人说过话"的痕迹）。三种结果：',
     '- 人确认收口 ⇒ 工具落 done，本阶段收口，下一阶段由驱动器开工；',
-    '- 人选「还要补做」（或写了补充）⇒ 工具回 `WORK_HUMAN_DECLINED` 并转达人的话：',
+    '- 人选「还要补做」（或写了补充）⇒ 工具回 `WORK_TOOL_HUMAN_DECLINED` 并转达人的话：',
     '  按人说的用 `create_worktask` 补任务，**不要**再提请收口；',
-    '- 人没答 / 打断了去说话 ⇒ 工具回 `WORK_HUMAN_UNAVAILABLE`：停手等人开口，别自己收口。',
+    '- 人没答 / 打断了去说话 ⇒ 工具回 `WORK_TOOL_HUMAN_UNAVAILABLE`：停手等人开口，别自己收口。',
     '',
     '## 边界',
     '- 不要用 `ask_user_question` 代替这个工具来做收口确认：答复不走工具，授权面不认，白跑一轮。',
@@ -213,7 +214,7 @@ export function renderWorkAskPrompt(input: WorkAskPromptInput): string {
 
 /** **终局收束轮**的输入：流程收口（complete）或停住等人（blocked）。 */
 export interface WorkWrapupPromptInput {
-  /** 层0：流程目标。 */
+  /** 流程（聚合根）：目标。 */
   readonly processObjective: string
   /** `complete` = 全阶段收口、流程落幕；`blocked` = 机器停住了，等人裁。 */
   readonly kind: 'complete' | 'blocked'

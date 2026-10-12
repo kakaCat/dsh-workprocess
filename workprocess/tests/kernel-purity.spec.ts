@@ -45,4 +45,16 @@ describe('内核纯度：内核模块不 import 任何东西（合并后的模�
         .not.toMatch(/export \* from '\.\/invariant\.js'/)
     }
   })
+
+  it('错误码的家在**域词汇表**：码表定义在 domain.ts，runtime.ts 只 import（对齐宿主 GoalErrorCode）', () => {
+    const domainSource = readFileSync(new URL('../src/domain.ts', import.meta.url), 'utf8')
+    expect(domainSource).toMatch(/export const WORK_ERROR_CODES = \[/)
+    const runtimeSource = readFileSync(new URL('../src/runtime.ts', import.meta.url), 'utf8')
+    // 宿主 `goal/src/runtime.ts` 就是这一句：`import type { GoalErrorCode } from './domain.ts'`
+    expect(runtimeSource).toMatch(/import type \{ WorkErrorCode \} from '\.\/domain\.js'/)
+    expect(runtimeSource).not.toMatch(/export const WORK_ERROR_CODES/)
+    // 工具面的政策码不许在域侧定义（两本各回各家；文案里提一句不算）。
+    expect(runtimeSource).not.toMatch(/'WORK_TOOL_/)
+    expect(domainSource).not.toMatch(/'WORK_TOOL_/)
+  })
 })

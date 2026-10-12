@@ -37,9 +37,10 @@ export type {
   WorkProcessId as WorkProcessIdType, WorkTaskId as WorkTaskIdType,
 } from './types.js'
 export type {
-  WorkChange, WorkChangedNotification, WorkEvent, WorkEventKind, WorkMessageSource, WorkOperation,
-  WorkProcessOperation, WorkRejection, WorkTaskOperation,
+  WorkChange, WorkChangedNotification, WorkErrorCode, WorkEvent, WorkEventKind, WorkMessageSource,
+  WorkOperation, WorkProcessOperation, WorkRejection, WorkTaskOperation,
 } from './domain.js'
+export { WORK_ERROR_CODES } from './domain.js'
 export * from './fold.js'
 export * from './runtime.js'
 // 【故意不再导出 `./invariant.js`】那个文件现在是**伴生插件入口**（对齐宿主
@@ -54,8 +55,8 @@ export interface WorkRecordLike {
   /** **当前流程**（一个归属对象至多一条；缺失 = 未启用 workprocess 能力）。 */
   workProcess?: WorkProcess
   updatedAt?: number
-  /** 回合事实（已准入回合数 + 进程内续跑许可）：**真相在归属记录**，本包只做派生读。 */
-  rounds?: { started?: number; activation?: WorkActivation }
+  /** 回合账本（累计准入数 + 逐任务回合账 + 续跑许可）：**真相在归属记录**，本包只做派生读。 */
+  rounds?: WorkRoundLedger
   /**
    * **已经问过**的耐久记号（每种轮次一个槽）：`{ key, revision }` —— 只有当前流程修订与之相符时才算数，
    * 于是任何状态变更（stage 建了任务 / 进入下一阶段 / 表被替换）都会**自动作废**旧记号，
@@ -91,6 +92,39 @@ export interface WorkAskedMark {
 export interface WorkAskedState {
   readonly plan?: WorkAskedMark
   readonly ask?: WorkAskedMark
+}
+
+/**
+ * 单个任务的**回合账**。
+ *
+ * 【为什么必须按任务记】回合预算（任务的 `max_rounds`）数的是**这个任务自己**花掉的回合。
+ * 早先只留一个全流程计数、拿它去比任务的上限 ⇒ 第二个任务继承前一个花掉的额度，一开拍就判到顶
+ * （阶段越多越明显）；"被挡下后 resume 再跑"也因此成了空头支票。故：计数按任务分开，
+ * 全流程那个数（{@link WorkRoundLedger.started}）只留给"跑满 N 轮才许宣告被挡"这类门槛。
+ */
+export interface WorkTaskRounds {
+  /** 该任务已准入的回合数（单调；跨重启耐久）。 */
+  readonly rounds: number
+  /**
+   * 人**追加的预算份数**（`resume` 一个 `blocked` 任务时 +1）。
+   *
+   * 生效上限 = 任务基础上限 × (1 + grants)：基数是任务自己的 `max_rounds`（没写则装载层兜底），
+   * 而装载配置不在持久状态里——故这里只记**份数**，换算归驱动器。
+   */
+  readonly grants: number
+}
+
+/** 回合账本（归属记录的 `rounds` 字段）。 */
+export interface WorkRoundLedger {
+  /**
+   * 全流程**累计**准入回合数（跨任务累加）。
+   * `block` 的轮数门槛（"先撑满 N 轮"）与看板读数用它——**轮号按任务从 1 起，跨任务不可比**。
+   */
+  started?: number
+  /** 逐任务的回合账（键 = 任务 id）：回合预算数这里。 */
+  tasks?: Readonly<Record<string, WorkTaskRounds>>
+  /** 续跑许可（控制面读数，不进事件表、不发 `work/changed`）。 */
+  activation?: WorkActivation
 }
 
 /** 服务依赖（对齐宿主服务构造期注入的 ctx 面）。 */
@@ -139,27 +173,28 @@ async function emitChanged(deps: WorkDeps, scope: string, event: WorkEvent, proc
 }
 
 /**
- * 两层的**公共写路径**：CAS 前置 → 严格解码 → 事件折叠 → 不变量 → 幂等 → 通知。
+ * 两层的**公共写路径**：CAS → 严格解码 → 事件折叠 → 不变量 → 幂等 → 通知。
  *
  * `buildEvent` 在拿到当前快照后才构造事件（任务身份 `wt:<stage>:<seq>` 要按现有任务与墓碑分配）；
  * 它可以抛 `WorkError`（如"还没有流程"）——写前拒，不落半份状态。
+ *
+ * 【CAS 为什么在**临界区里**】校验与写在同一次读-改-写里（`store.mutate` 按 scope 串行）：
+ * 放区外做，两个并发写者会各自读到同一个旧 revision、双双通过——"校验通过"就不再意味着
+ * "写下去的那一刻仍然成立"（那时它只是个装饰）。
  */
 async function mutateWork(
   deps: WorkDeps, scope: string,
   buildEvent: (prev: WorkProcess | undefined) => WorkEvent,
   expectedRevision?: number,
 ): Promise<boolean> {
-  // CAS 在 mutate **之前**校验（写前拒，而不是写完再回滚）。
-  if (expectedRevision !== undefined) {
-    const current = await deps.store.get(scope)
-    assertRevision(decodeExisting(current?.workProcess), expectedRevision)
-  }
   let changed = false
   let next: WorkProcess | undefined
   let event: WorkEvent | undefined
   await deps.store.mutate(scope, (r) => {
     // 写前严格解码既有快照：记录损坏当场抛 WORK_CORRUPT，零写入。
     const prev = decodeExisting(r.workProcess)
+    // CAS 与写同区：拒在这里，一个字节都不会落盘（异常先于 `put` 冒出去）。
+    assertRevision(prev, expectedRevision)
     const ev = buildEvent(prev)
     const result = applyWorkEvent(prev, ev)
     // 不变量接线（对齐宿主不变量伴生插件）：折叠违反 INV-1~6 → 抛 WORK_INVARIANT，零写入。
@@ -231,13 +266,10 @@ export async function editWorkObjective(
 export async function setWorkActivation(
   deps: WorkDeps, scope: string, activation: WorkActivation, expectedRevision?: number,
 ): Promise<boolean> {
-  if (expectedRevision !== undefined) {
-    const current = await deps.store.get(scope)
-    assertRevision(decodeExisting(current?.workProcess), expectedRevision)
-  }
   let changed = false
   await deps.store.mutate(scope, (r) => {
     const prev = decodeExisting(r.workProcess)
+    assertRevision(prev, expectedRevision)          // CAS 与写同区（理由见 `mutateWork`）
     if (prev === undefined) return undefined
     if ((r.rounds?.activation ?? 'armed') === activation) return undefined
     r.rounds = { ...r.rounds, activation }
@@ -287,6 +319,68 @@ export async function workActivationOf(deps: WorkDeps, scope: string): Promise<W
   return record?.rounds?.activation ?? 'armed'
 }
 
+/** 读**逐任务**回合账（没有流程 ⇒ 空账；一本账读给驱动器一次用够）。 */
+export async function workTaskRoundsAllOf(
+  deps: WorkDeps, scope: string,
+): Promise<Readonly<Record<string, WorkTaskRounds>>> {
+  const record = await deps.store.get(scope)
+  if (decodeExisting(record?.workProcess) === undefined) return {}
+  return record?.rounds?.tasks ?? {}
+}
+
+/**
+ * 记一个**被接手的回合**（按任务计；全流程累计数同步前进）。
+ *
+ * 幂等是硬语义：同一回合（`round <= 已记`）重复观察零写入。累计数按**增量**前进
+ * （`round - 已记`）——轮号按任务从 1 起，跨任务累加才得到"整条流程真跑过几轮"这个数。
+ */
+export async function recordWorkRound(
+  deps: WorkDeps, scope: string, taskId: string, round: number,
+): Promise<boolean> {
+  if (taskId === '' || !Number.isSafeInteger(round) || round < 1) return false
+  let changed = false
+  await deps.store.mutate(scope, (r) => {
+    if (decodeExisting(r.workProcess) === undefined) return undefined
+    const ledger = r.rounds ?? {}
+    const used = ledger.tasks?.[taskId]?.rounds ?? 0
+    if (round <= used) return undefined
+    r.rounds = {
+      ...ledger,
+      started: (ledger.started ?? 0) + (round - used),
+      tasks: { ...ledger.tasks, [taskId]: { rounds: round, grants: ledger.tasks?.[taskId]?.grants ?? 0 } },
+    }
+    r.updatedAt = deps.now()
+    changed = true
+    return { changed: true }
+  })
+  return changed
+}
+
+/**
+ * **追加一份回合预算**（`grants` +1）：人 `resume` 一个被 `round-limit` 挡下的任务时调用。
+ *
+ * 没有这一条，恢复路径是空头支票——任务已达上限，`resume` 让它重新 `active`，下一拍又判到顶。
+ * 每次 `resume` 都是一次显式的人授权，故本函数不做去重（幂等性由"谁来调"定）。
+ */
+export async function grantWorkTaskRounds(
+  deps: WorkDeps, scope: string, taskId: string,
+): Promise<boolean> {
+  let changed = false
+  await deps.store.mutate(scope, (r) => {
+    if (decodeExisting(r.workProcess) === undefined) return undefined
+    const ledger = r.rounds ?? {}
+    const entry = ledger.tasks?.[taskId]
+    r.rounds = {
+      ...ledger,
+      tasks: { ...ledger.tasks, [taskId]: { rounds: entry?.rounds ?? 0, grants: (entry?.grants ?? 0) + 1 } },
+    }
+    r.updatedAt = deps.now()
+    changed = true
+    return { changed: true }
+  })
+  return changed
+}
+
 /**
  * 整体替换阶段表（同名阶段保留其任务与态；会被丢掉的非空阶段一律拒）。
  * 幂等：同值零写入。
@@ -317,16 +411,17 @@ export async function startWorkStage(
 export async function discardWorkProcess(
   deps: WorkDeps, scope: string, expectedRevision?: number,
 ): Promise<boolean> {
-  if (expectedRevision !== undefined) {
-    const current = await deps.store.get(scope)
-    assertRevision(decodeExisting(current?.workProcess), expectedRevision)
-  }
   let changed = false
   await deps.store.mutate(scope, (r) => {
     const prev = decodeExisting(r.workProcess)
+    assertRevision(prev, expectedRevision)          // CAS 与写同区（理由见 `mutateWork`）
     if (prev === undefined) return undefined
     delete r.workProcess
-    if (r.rounds !== undefined) r.rounds = { ...r.rounds, started: 0 }
+    // **整本回合账随流程一起没**（累计数 / 逐任务账 / 续跑许可）：它们都是"这条流程的"读数，
+    // 留下任何一格都会让**下一条**流程继承上一个对象的结论——`disarmed` 是最坏的那种：
+    // 宿主重启 resume 自动收许可，随后重建的流程一开就静默停住（真机踩过）。
+    // 许可的缺省值在派生读里（`?? 'armed'`），故这里直接摘掉整格即可，不需要写回 'armed'。
+    delete r.rounds
     // "已经问过"的记号随流程一起清：否则重建的流程可能撞上旧记号（同阶段键 + 同 revision）。
     delete r.asked
     r.updatedAt = deps.now()
@@ -442,6 +537,45 @@ export async function workStageOf(
   deps: Pick<WorkDeps, 'store'>, scope: string, stageKey: string,
 ): Promise<WorkStage | undefined> {
   return (await workProcessOf(deps, scope))?.stages.find((s) => s.key === stageKey)
+}
+
+/**
+ * **归属记录级审计**（纯函数，零 I/O）：这条记录自洽吗——快照严格解码 / 归属边界 / 读数合法。
+ * 返回问题清单（空 = 全过）。
+ *
+ * 【为什么必须是内核里的一个函数】同一套判据有三个消费方：进程内 `ctx.workprocess.audit()`、
+ * 装载自审、以及"不需要宿主"的 `scripts/audit-storage.mjs`。各写一份必然漂移——**已经漂过**：
+ * 逐任务回合账加进来时，脚本那份漏了这条（脚本头注释还写着"与内核/服务同口径"）。
+ * 故判据只此一处，其余都是调用方（脚本从 `dist/index.js` import 本函数）。
+ */
+export function auditWorkRecord(scope: string, record: WorkRecordLike | undefined): readonly string[] {
+  const snapshot = record?.workProcess
+  if (snapshot === undefined) return []                 // 空记录（只有 rounds）：不是流程
+  let process: WorkProcess
+  try {
+    process = decodeWorkProcess(snapshot)
+  } catch (err) {
+    return ['快照过不了严格解码：' + String((err as Error)?.message ?? err)]
+  }
+  const findings: string[] = []
+  if (process.id !== WorkProcessId(scope)) {
+    findings.push('归属边界不符：快照 id ' + JSON.stringify(process.id) + ' 与记录键不一致')
+  }
+  const started = record?.rounds?.started
+  if (started !== undefined && (!Number.isSafeInteger(started) || started < 0)) {
+    findings.push('回合计数不合法：' + JSON.stringify(started))
+  }
+  for (const [taskId, entry] of Object.entries(record?.rounds?.tasks ?? {})) {
+    if (!Number.isSafeInteger(entry?.rounds) || entry.rounds < 0
+      || !Number.isSafeInteger(entry?.grants) || entry.grants < 0) {
+      findings.push('任务回合账不合法：' + taskId + ' ' + JSON.stringify(entry))
+    }
+  }
+  const activation = record?.rounds?.activation
+  if (activation !== undefined && activation !== 'armed' && activation !== 'disarmed') {
+    findings.push('续跑许可不合法：' + JSON.stringify(activation))
+  }
+  return findings
 }
 
 /** 某任务读（无 ⇒ undefined）。 */

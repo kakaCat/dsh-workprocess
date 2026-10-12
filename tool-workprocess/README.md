@@ -58,7 +58,7 @@ workprocess 的**工具面**：两层各三工具（`src/tools.ts` 顶部的登�
 ### 纪律与牙的位置：任务只属于当前阶段
 
 策略段那条「不要提前给后续阶段建任务」的牙长在**本包**（`create_worktask` 写前拒，
-`WORK_NOT_CURRENT_STAGE`），**不在内核**——这是刻意的分工：
+`WORK_TOOL_NOT_CURRENT_STAGE`），**不在内核**——这是刻意的分工：
 
 - **域是通用引擎**：`createTask` 允许给任何未收口的阶段落任务（"计划先落任务、开工归驱动器"），
   驱动器的环测与 `service.view` / `workWireOf` 的读投影都按这个状态写。把 agent 的纪律做成状态规则，
@@ -85,12 +85,36 @@ workprocess 的**工具面**：两层各三工具（`src/tools.ts` 顶部的登�
 | 裁决 | 工具回什么 | 效果 |
 |---|---|---|
 | `approved` | 正常落章 | 阶段 done（与"人直接在会话里说一句"等价） |
-| `declined`（选了别的 / 自定义输入） | `WORK_HUMAN_DECLINED` + 人的原话 | 不收口，模型按人说的补任务 |
-| `cancelled`（打断去说话 / 中止） | `WORK_HUMAN_UNAVAILABLE` | 不收口，停手等人开口 |
-| `no-channel`（没弹框通道 / 没人接这一问） | 退回 `WORK_NO_PERMISSION`（带指路） | CLI / 无头 / 子 agent 场景的原口径 |
+| `declined`（选了别的 / 自定义输入） | `WORK_TOOL_HUMAN_DECLINED` + 人的原话 | 不收口，模型按人说的补任务 |
+| `cancelled`（打断去说话 / 中止） | `WORK_TOOL_HUMAN_UNAVAILABLE` | 不收口，停手等人开口 |
+| `no-channel`（没弹框通道 / 没人接这一问） | 退回 `WORK_TOOL_AUTHORITY_REQUIRED`（带指路） | CLI / 无头 / 子 agent 场景的原口径 |
 
 **顺序纪律**：先判权、再判状态——越权者不会因为"阶段没做完"拿到另一个口径；而"确实做得成"
 （active 且任务全达成）才会去打扰人。
+
+## 错误码：两本各回各家（对齐宿主 goal）
+
+宿主 goal 的分法是**两本词汇、各有一个家**：**域规则**的码是 `GoalErrorCode`（`GOAL_*`，闭联合，
+住在域词汇表 `goal/src/domain.ts`，随 `GoalError` 抛出）；**工具面政策**的码一律 `GOAL_TOOL_*`，
+抛在判据旁边（`tool-goal` 的 `authority.ts` / `index.ts`），**不并进域联合**。本仓照此办理：
+
+| 本 | 码 | 家 | 谁抛 / 谁回 |
+|---|---|---|---|
+| **域码** | `WORK_*`（`WORK_ERROR_CODES`，闭联合） | `workprocess/src/domain.ts`（`runtime.ts` 只 `import type`，与宿主 `runtime.ts` 逐字同形） | 内核状态规则；工具面把它**原样搬进回执**（不重造同义的第二个码） |
+| **工具码** | `WORK_TOOL_*`（`WORK_TOOL_CODES`，闭联合） | **本包** `src/codes.ts` | 工具面自己拦的：`WORK_TOOL_AUTHORITY_REQUIRED`（越权）/ `WORK_TOOL_CALLER_REQUIRED`（调用者不是活跃根 agent）/ `WORK_TOOL_INVALID_ARGS`（参数形状）/ `WORK_TOOL_NOT_CURRENT_STAGE`（agent 纪律）/ `WORK_TOOL_BLOCK_THRESHOLD`（撑满 N 轮）/ `WORK_TOOL_HUMAN_DECLINED`、`WORK_TOOL_HUMAN_UNAVAILABLE`（弹框结局） |
+
+**回执里的码** = 两本的并集（`WorkReceiptCode`）：域码从 `WorkError` 冒泡，工具码由 `denyTool()` 给。
+两处的选择由**类型**守着——`denyTool()` 只收 `WorkToolCode`，`denyDomain()` 只收 `WorkErrorCode`；
+拒绝点不再有裸字面量（真发生过：`WORK_NO_PERMISSION` 是工具的政策却住在域联合里，
+`WORK_NOT_CURRENT_STAGE` 是工具纪律却起了个域码的名字，两条都已按宿主口径改名）。
+
+**机械守卫**（`tests/tools.spec.ts` 的「两套词汇」那组 + `workprocess/tests/kernel-purity.spec.ts`）：
+两本表各自的码唯一且前缀正确、域码里不许混进 `WORK_TOOL_*`、工具面源码里的独立码字面量必须已登记、
+`workprocess/src` 里不许出现工具码字面量、码表定义必须住在 `domain.ts`。
+
+> 第三套词是**浏览器数据面**的 wire 级错误名（`missing-host` / `cross-origin` / `cross-site` /
+> `host-not-allowed` / `method-not-allowed` / `missing-scope` / `no-process` / `unknown-path`，
+> 小写 kebab）：那是客户端协议，不是给模型看的回执码，故不收进两本（见 `src/codes.ts` 的说明）。
 
 ## 模型面指令（对齐宿主 `dsh-tool-goal` 的另两种提示词）
 
@@ -120,7 +144,7 @@ workprocess 的**工具面**：两层各三工具（`src/tools.ts` 顶部的登�
 - **agent 可发起**：`task_pause` / `task_block` / `task_complete` / `task_clear`。
 - `authorityFromEvents(...)`：从开放回合的事件切面判定"本轮是人打的字"还是"**精确命中**的续跑回合"
   （`taskId + revision + round` 三项全对；旧回合、改过的目标一律不授自治权）。
-- 越权抛 `WorkError('WORK_NO_PERMISSION')`，回执里给出路（由人在宿主界面确认 / 由人直接调 /
+- 越权抛 `WorkToolError('WORK_TOOL_AUTHORITY_REQUIRED')`，回执里给出路（由人在宿主界面确认 / 由人直接调 /
   `human` 策略下落不了的阶段，由人把 `close_policy` 改成 `auto`）。
 
 ## 结构（3 个模块，与宿主 `dsh-tool-goal` 同粒度）
@@ -138,11 +162,33 @@ workprocess 的**工具面**：两层各三工具（`src/tools.ts` 顶部的登�
 
 **配置**（装载层 `config` 段）：`policySection`（缺省 true，策略段是否注册）、
 `blockedAfterRounds`（缺省 3，自治回合落 `block` 的前置轮数，对齐宿主 goal 的 `blockedAfterConsecutiveRounds`；
-**同时决定策略段与 `update_worktask` action 自述里写的那个数**，且必须与
-`workprocess-round-driver` 的同名配置同值——见上面「门槛数字不许写死」）。
+判据读**这个任务自己**已准入的回合数（`rounds.tasks[<task_id>].rounds`）——早先读的是全流程累计数
+`rounds.started`，那等于"别的任务跑过的轮数"也给这个任务当资格（新任务第一轮就能宣告被挡住；
+与回合预算同一类错误）。**同时决定策略段与 `update_worktask` action 自述里写的那个数**，且必须与
+`workprocess-round-driver` 的同名配置同值——见上面「门槛数字不许写死」）、
+`apiHosts`（缺省空，浏览器只读数据面的**额外允许主机名**，见下节）。
+
+## 浏览器只读数据面（HTTP + SSE）：默认只服务本机
+
+`src/http.ts` 惰性注入宿主 `webServer`，注册 `GET /workprocess/api/stages?scope=`（全量 JSON）与
+`GET /workprocess/api/events?scope=`（SSE：首帧全量 → 变更推全量 → 25s 心跳）；宿主没有 web 载体时零行为。
+客户端半（`workprocess/lib/client.js`）走的是**相对路径**，故与界面同源。
+
+**这条面读的是本机流程数据，所以门口有判据**（`checkApiAccess`，纯函数可单测）：
+
+| 请求形态 | 裁决 |
+|---|---|
+| 缺 `Host` | 403 `missing-host`（浏览器必带 Host） |
+| `Host` 非 loopback（`localhost` / `127.0.0.1` / `::1`）且不在 `apiHosts` 里 | 403 `host-not-allowed`——挡 **DNS rebinding**（攻击者域名解析到 127.0.0.1，浏览器看来是"同源"，CORS 帮不上忙）；消息里点名 `apiHosts` |
+| `Sec-Fetch-Site: cross-site` | 403 `cross-site` |
+| `Origin` 是 http(s) 且与 `Host` 不同源 | 403 `cross-origin`——挡**跨源读**（网页 `fetch` / `EventSource` 都带 Origin）。非 http(s) 的 Origin（Electron 壳 `app://`）放行：网页伪造不出那种来源 |
+| 非 `GET` / `HEAD` | 405（只读面） |
+
+`apiHosts` 是**显式开的口子**：从局域网地址 / 隧道域名 / 反代域名打开界面时，把那个主机名（可带端口）
+列进来即可；`'*'` = 全放行（自己清楚暴露面时用）。放行 Host **不等于**放行跨源——Origin 仍须与 Host 同源。
 
 ## 测试
 
 ```bash
-cd workprocess/tool-workprocess && pnpm test   # 52 条：登记表自洽 / 模型面措辞（单行·无术语·取数点名·语义只写一处·门槛随配置）/ 授权口径（含收口策略与 process_edit）/ 六工具行为（含"任务只属于当前阶段"的写前拒）/ 回执 CAS 可用性 / 人机确认（userQuestions）/ 工具通告（deferContext 适配）
+cd workprocess/tool-workprocess && pnpm test   # 64 条：登记表自洽 / 模型面措辞（单行·无术语·取数点名·语义只写一处·门槛随配置）/ 授权口径（含收口策略与 process_edit）/ 六工具行为（含"任务只属于当前阶段"的写前拒）/ 回执 CAS 可用性 / 人机确认（userQuestions）/ 工具通告（deferContext 适配）/ 数据面访问判据（跨源·跨站·非本机 Host·只读方法）/ **两套词汇的机械守卫**（码表自洽·不许串门·不许手写未登记的码）
 ```

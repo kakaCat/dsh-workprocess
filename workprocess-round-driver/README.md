@@ -87,13 +87,19 @@
 | 问题 | 落在哪 |
 |---|---|
 | 该会话归属吗 | `work.sessionKey` vs `scope.ownerSessionId`（两侧都缺 = 放行，只有明确不等才拦） |
-| 现在该不该跑 | 六道闸：内存闭锁 → 退避 → 进程级上游 → 人工确认/弹框（wait-human）→ 起链预算 |
+| 现在该不该跑 | 闸只有三道，都是"这件事问过没有"：阶段规划轮已问过 / 收口确认已问过 / 流程自动收口（`autoClose`） |
 | **层1**：阶段开工了吗 / 该收口了吗 | 阶段 `pending` 且串行门放行 → `start-stage`；全阶段 `done` → `ask-close`；任务全 `complete` → 策略 `auto` 则 `close-stage`（自动收口），策略 `human`（缺省）则 `ask-stage-done`（请人确认）。两种 ask 都是**请人拍板**：组合根各投一轮让 agent 开口（闸 `humanAskBlocked` 保证同一件事只问一次） |
-| **层2**：这一轮跑哪个任务 | `active` 任务 → `drive`；回合作顶 → `block-task`（落盘）；`paused/blocked` → `wait-human`；**本阶段一个任务都没有 → `plan-stage`**（投一轮让 agent 建任务） |
+| **层2**：这一轮跑哪个任务 | `active` 任务 → `drive`；**回合作顶**（任务自己的 `rounds` ≥ 它的生效上限 `maxRounds`）→ `block-task`（落盘）；`paused/blocked` → `wait-human`；**本阶段一个任务都没有 → `plan-stage`**（投一轮让 agent 建任务） |
+
+**回合预算按任务计**：`TaskFacts.rounds` = **这个任务**已准入的回合数（归属记录 `rounds.tasks[<id>].rounds`），
+闸比的是它而不是全流程累计数——早先拿累计数当每任务上限，第二个任务会继承前一个的消耗、一开拍就判到顶。
+`TaskFacts.maxRounds` 是**生效上限** = 任务基础上限 × (1 + `grants`)（`grants` = 人 `resume` 追加的预算份数，
+`effectiveCapOf` 一处换算）。全流程累计数（`rounds.started`）现在只有一个读者：`/work` 的"全程累计"读数
+（落 block 的轮数门槛也改成读**该任务的账**——同一类错误的第二处：全局计数替按任务问的问题答话）。
 
 **决策层不臆造任务，但会把"这个阶段是空的"交给 agent**：阶段串行 ⇒ 任务只属于当前阶段 ⇒
 **每过一个阶段边界，新阶段必然没有任务**；此时若只是 `hold`，自动推进会在每个阶段边界上停死。
-故落 `plan-stage`（投一轮"用 `create_worktask` 给本阶段建 1–3 个任务"）；
+故落 `plan-stage`（投一轮"用 `create_worktask` 给本阶段建任务"——建几个由 agent 定）；
 同一阶段**只问一次**（闸 `stagePlanBlocked`，组合根按阶段键记），问过就转 `wait-human`——不空转。
 
 ## 导出
@@ -102,16 +108,16 @@
 |---|---|
 | `decideWorkRound(input)` | 纯决策树（零 I/O，可穷举单测）；结论穷尽十态 |
 | `renderWorkRoundPrompt(input)` | 纯提示词渲染：流程目标 / 当前阶段与判据 / 本轮任务 / 边界（含"不越阶段开工"与**收口策略**写的"请人确认 / 自动收口"）/ 停手条件 |
-| `renderWorkPlanPrompt(input)` | **阶段规划轮**提示词：本阶段开工了却没任务 ⇒ 请 agent 用 `create_worktask` 给本阶段建任务并直接动手 |
+| `renderWorkPlanPrompt(input)` | **阶段规划轮**提示词：本阶段开工了却没任务 ⇒ 请 agent 用 `create_worktask` 给本阶段建任务（**只建、不动手**：动手会绕过任务轮的回合预算与 block 门槛） |
 | `renderWorkAskPrompt(input)` | **收口确认轮**提示词（三种投递都包在 `<workprocess_round>` / `<workprocess_plan>` / `<workprocess_ask>` 标签里，与宿主 `<goal_round>` 同款：便于模型分清「自动回合」与「人说的话」）：任务全达成（策略 `human`）或全阶段 done ⇒ 请 agent 向人拍板（`ask_user_question`），并给回落章路径 |
 | 契约类型 | `RoundScopeFacts` / `GateFacts` / `WorkFacts` / `StageFacts` / `TaskFacts` / `DecideInput` / `RoundDecision` |
 
 ## 决策顺序（顺序即纪律）
 
 ```
-归属 → 可驱动（意图 + 健康 + 无暂停告警） → 闭锁 → 退避 → 上游闸
-     → 人工确认 / 弹框在途（wait-human，等人不是故障）
-     → 起链预算 → 层1（串行门 / 收口：按阶段收口策略分流） → 层2（相位机 / 回合上限）
+归属 → 可驱动（意图 + 健康 + 无暂停告警）
+     → 闸（规划轮已问过 / 确认轮已问过 / 流程自动收口）
+     → 层1（串行门 / 收口：按阶段收口策略分流） → 层2（相位机 / 回合上限）
 ```
 
 **收口分流的判据只有一条**：任务非空且全 `complete` 之后，看当前阶段的 `closePolicy`——
@@ -122,11 +128,12 @@
 
 **副作用由组合根落**（驱动器是纯函数，不下笔）：`start-stage` ⇒ `startWorkStage`、
 `close-stage` ⇒ `completeWorkStage`、`block-task` ⇒ `blockWorkTask`。
-本仓的组合根就是 `workprocess`（回合边界驱动 `src/driver.ts`；`drive` 的投递也在那里
+本仓的组合根就是 `workprocess`（本包只**注入**它提供的 `ctx.workprocess`：一拍读现状、
+副作用经它下笔；`drive` 的投递在本包装配的**回合边界触发器**里
 （`agent.followup` + 自署 `work` 来源；`drive` 与 `plan-stage` 两种投递都在那里）。
 
 ## 测试
 
 ```bash
-cd workprocess/workprocess-round-driver && pnpm test   # 68 条：闸顺序 / 串行门 / 收口策略 / 相位机 / 回合上限 / 规划轮 / 提示词（含门槛随配置）/ 不变量伴生件（含门槛自署）
+cd workprocess/workprocess-round-driver && pnpm test   # 72 条：闸顺序 / 串行门 / 收口策略 / 相位机 / 回合上限（**按任务计**）/ 规划轮 / 提示词（含门槛随配置）/ 不变量伴生件（含门槛自署）
 ```

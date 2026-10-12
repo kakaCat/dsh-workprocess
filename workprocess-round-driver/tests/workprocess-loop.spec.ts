@@ -12,12 +12,12 @@
  */
 import { describe, it, expect } from 'vitest'
 import {
-  completeWorkStage, completeWorkTask, createWorkProcess, createWorkTask, currentStageOf,
-  processAllowsClose, stageAllowsStart, startWorkStage, workProcessOf,
+  completeWorkStage, completeWorkTask, createWorkProcess, createWorkTask, createWorkprocessService,
+  currentStageOf, processAllowsClose, stageAllowsStart, startWorkStage, workProcessOf,
 } from 'workprocess'
 import type { WorkProcess, WorkRecordLike } from 'workprocess'
 import {
-  decideWorkRound, DEFAULT_MAX_ROUNDS, factsOf as projectedFactsOf,
+  decideWorkRound, DEFAULT_MAX_ROUNDS, factsOf as projectedFactsOf, tickWorkprocess,
   renderWorkPlanPrompt, renderWorkRoundPrompt, renderWorkWrapupPrompt,
 } from 'workprocess-round-driver'
 import type { RoundDecision, WorkFacts, RoundScopeFacts } from 'workprocess-round-driver'
@@ -42,7 +42,7 @@ function storeOf(records: Record<string, WorkRecordLike>) {
  * `defaultMaxRounds`（缺省 20）——**刹车是适配器给的，不是纯层给的**。要照抄请抄生产那份
  * （见本文件 `事实投影：刹车由适配器给` 那组用例的对照）。
  */
-function factsOf(process: WorkProcess): WorkFacts {
+function factsOf(process: WorkProcess, taskRounds: Record<string, number> = {}): WorkFacts {
   const current = currentStageOf(process)
   return {
     processId: process.id,
@@ -59,6 +59,7 @@ function factsOf(process: WorkProcess): WorkFacts {
         tasks: current.tasks.map((t) => ({
           id: t.id, objective: t.objective, phase: t.phase, revision: t.revision,
           ...(t.maxRounds === undefined ? {} : { maxRounds: t.maxRounds }),
+          rounds: taskRounds[t.id] ?? 0,       // 预算按任务计：这个任务自己花掉的轮数
         })),
       },
     }),
@@ -111,13 +112,38 @@ describe('事实投影：刹车由适配器给（纯层缺省不限）', () => {
     // 生产投影：到顶 ⇒ 落盘 block（自动续跑不会跑飞）
     const projected = decideWorkRound({
       now: 1_000, scope: SCOPE, gates: {},
-      work: projectedFactsOf(process, 'sess-1'), roundsStarted: DEFAULT_MAX_ROUNDS,
+      work: projectedFactsOf(process, 'sess-1', DEFAULT_MAX_ROUNDS, {
+        'wt:prep:1': { rounds: DEFAULT_MAX_ROUNDS, grants: 0 },
+      }),
     })
     expect(projected.kind).toBe('block-task')
     // 本文件的简化样本：没有上限 ⇒ 纯层按"缺省不限"放行（这就是两份样本的差别）
     expect(decideWorkRound({
-      now: 1_000, scope: SCOPE, gates: {}, work: factsOf(process), roundsStarted: DEFAULT_MAX_ROUNDS,
+      now: 1_000, scope: SCOPE, gates: {}, work: factsOf(process),
     }).kind).toBe('drive')
+  })
+
+  it('人追加的预算份数：生效上限 = 基础 × (1+grants)——resume 一个到顶的任务才真的能再跑', async () => {
+    const records = { 'ws-a': { updatedAt: 1 } }
+    const deps = { store: storeOf(records) as never, now: () => 1_000 }
+    await createWorkProcess(deps, 'ws-a', { objective: 'x', stages: [{ key: 'prep', statement: '准备' }] })
+    await createWorkTask(deps, 'ws-a', { stageKey: 'prep', objective: '清洗数据', maxRounds: 2 })
+    await startWorkStage(deps, 'ws-a', 'prep')
+    const process = (await workProcessOf(deps, 'ws-a'))!
+
+    // 到顶：不再起轮（block 后由人 resume —— 那份授权在服务面落成 grants）
+    expect(decideWorkRound({
+      now: 1_000, scope: SCOPE, gates: {},
+      work: projectedFactsOf(process, 'sess-1', DEFAULT_MAX_ROUNDS, {
+        'wt:prep:1': { rounds: 2, grants: 0 },
+      }),
+    }).kind).toBe('block-task')
+    // 人 resume 过（grants=1）⇒ 上限 2 → 4，同一份持久状态下重新起轮
+    const granted = projectedFactsOf(process, 'sess-1', DEFAULT_MAX_ROUNDS, {
+      'wt:prep:1': { rounds: 2, grants: 1 },
+    })
+    expect(granted.currentStage!.tasks![0].maxRounds).toBe(4)
+    expect(decideWorkRound({ now: 1_000, scope: SCOPE, gates: {}, work: granted }).kind).toBe('drive')
   })
 })
 
@@ -135,6 +161,7 @@ describe('端到端 · 驱动器环', () => {
     await createWorkTask(deps, 'ws-a', { stageKey: 'train', objective: '调参' })
 
     const seen: string[] = []
+    const spent: Record<string, number> = {}
     let rounds = 0
     let ticks = 0
     for (;;) {
@@ -142,7 +169,7 @@ describe('端到端 · 驱动器环', () => {
       expect(ticks).toBeLessThan(20)   // 环不收敛就是缺陷，不许无限跑
       const process = await workProcessOf(deps, 'ws-a')
       expect(process).toBeDefined()
-      const decision = decideWorkRound({ now: 1_000, scope: SCOPE, gates: {}, work: factsOf(process!), roundsStarted: rounds })
+      const decision = decideWorkRound({ now: 1_000, scope: SCOPE, gates: {}, work: factsOf(process!, spent) })
       seen.push(label(decision))
 
       if (decision.kind === 'ask-close') break
@@ -151,6 +178,7 @@ describe('端到端 · 驱动器环', () => {
         await completeWorkStage(deps, 'ws-a', decision.stageKey) // 策略 auto：驱动器自己落 done，不等人
       } else if (decision.kind === 'drive') {
         rounds += 1                                   // 准入了一个回合
+        spent[decision.taskId] = (spent[decision.taskId] ?? 0) + 1
         await completeWorkTask(deps, 'ws-a', decision.taskId)   // 该回合真的把任务干完了
       } else if (decision.kind === 'ask-stage-done') {
         await completeWorkStage(deps, 'ws-a', decision.stageKey) // 这里模拟的是**人**确认
@@ -189,20 +217,23 @@ describe('端到端 · 驱动器环', () => {
     await createWorkTask(deps, 'ws-a', { stageKey: 'train', objective: '调参' })
 
     const seen: string[] = []
+    const spent: Record<string, number> = {}
     let ticks = 0
     for (;;) {
       ticks += 1
       expect(ticks).toBeLessThan(20)
       const process = await workProcessOf(deps, 'ws-a')
       const decision = decideWorkRound({
-        now: 1_000, scope: SCOPE, gates: {}, work: factsOf(process!), roundsStarted: ticks,
+        now: 1_000, scope: SCOPE, gates: {}, work: factsOf(process!, spent),
       })
       seen.push(label(decision))
       if (decision.kind === 'ask-close') break
       if (decision.kind === 'start-stage') await startWorkStage(deps, 'ws-a', decision.stageKey)
       else if (decision.kind === 'close-stage') await completeWorkStage(deps, 'ws-a', decision.stageKey)
-      else if (decision.kind === 'drive') await completeWorkTask(deps, 'ws-a', decision.taskId)
-      else if (decision.kind === 'ask-stage-done') await completeWorkStage(deps, 'ws-a', decision.stageKey)
+      else if (decision.kind === 'drive') {
+        spent[decision.taskId] = (spent[decision.taskId] ?? 0) + 1
+        await completeWorkTask(deps, 'ws-a', decision.taskId)
+      } else if (decision.kind === 'ask-stage-done') await completeWorkStage(deps, 'ws-a', decision.stageKey)
       else throw new Error('驱动拍给出了不该出现的结论：' + label(decision))
     }
 
@@ -237,6 +268,77 @@ describe('端到端 · 驱动器环', () => {
     expect(decideWorkRound({ now: 1_000, scope: SCOPE, gates: {}, work: factsOf(one!) }))
       .toEqual({ kind: 'drive', processId: 'wp:ws-a', stageKey: 'prep', taskId: 'wt:prep:1' })
     expect((await workProcessOf(deps, 'ws-a'))!.stages[1].state).toBe('pending')
+  })
+
+  it('预算按任务计：前一段花光自己的额度，不妨碍下一段的新任务（真机坑：第二个任务一开拍就判到顶）', async () => {
+    const records = { 'ws-a': { updatedAt: 1 } }
+    const deps = { store: storeOf(records) as never, now: () => 1_000 }
+    await createWorkProcess(deps, 'ws-a', {
+      objective: '把模型发上线',
+      stages: [
+        { key: 'prep', statement: '准备数据', closePolicy: 'auto' },
+        { key: 'train', statement: '训练模型', closePolicy: 'auto' },
+      ],
+    })
+    await createWorkTask(deps, 'ws-a', { stageKey: 'prep', objective: '清洗数据', maxRounds: 2 })
+    await createWorkTask(deps, 'ws-a', { stageKey: 'train', objective: '调参', maxRounds: 2 })
+
+    const seen: string[] = []
+    const spent: Record<string, number> = {}
+    let ticks = 0
+    for (;;) {
+      ticks += 1
+      expect(ticks).toBeLessThan(20)
+      const process = (await workProcessOf(deps, 'ws-a'))!
+      const decision = decideWorkRound({ now: 1_000, scope: SCOPE, gates: {}, work: factsOf(process, spent) })
+      seen.push(label(decision))
+      if (decision.kind === 'ask-close') break
+      if (decision.kind === 'start-stage') await startWorkStage(deps, 'ws-a', decision.stageKey)
+      else if (decision.kind === 'close-stage') await completeWorkStage(deps, 'ws-a', decision.stageKey)
+      else if (decision.kind === 'drive') {
+        spent[decision.taskId] = (spent[decision.taskId] ?? 0) + 1
+        // 用满自己的额度（第 2 轮）才完成——这正是"前一段把预算花光"的形态
+        if (spent[decision.taskId] >= 2) await completeWorkTask(deps, 'ws-a', decision.taskId)
+      } else throw new Error('驱动拍给出了不该出现的结论：' + label(decision))
+    }
+
+    // 每一段都把自己的 2 轮用满；旧口径（全流程一个计数）下 train 会继承 prep 的消耗，一开拍就 block。
+    expect(seen).toEqual([
+      'start-stage:prep', 'drive:wt:prep:1', 'drive:wt:prep:1', 'close-stage:prep',
+      'start-stage:train', 'drive:wt:train:1', 'drive:wt:train:1', 'close-stage:train',
+      'ask-close',
+    ])
+    expect(spent).toEqual({ 'wt:prep:1': 2, 'wt:train:1': 2 })
+  })
+
+  it('适配器口径（tickWorkprocess 实测）：全流程累计回合数不吃新任务的额度', async () => {
+    // 归属记录里写着"整条流程已跑 9 轮"（**累计数**），而当前这个任务自己一轮没花 ⇒ 必须起轮。
+    // 旧实现把累计数当每任务上限比 ⇒ 这里会落 block-task（真机症状：第二个任务一开拍就判到顶）。
+    const records = {
+      'ws-a': {
+        updatedAt: 1,
+        rounds: { started: 9, tasks: { 'wt:prep:1': { rounds: 2, grants: 0 } } },
+      },
+    }
+    const store = storeOf(records)
+    const deps = { store: store as never, now: () => 1_000 }
+    await createWorkProcess(deps, 'ws-a', {
+      objective: 'x',
+      stages: [
+        { key: 'prep', statement: '准备', closePolicy: 'auto' },
+        { key: 'train', statement: '训练', closePolicy: 'auto' },
+      ],
+    })
+    await createWorkTask(deps, 'ws-a', { stageKey: 'prep', objective: '清洗数据', maxRounds: 2 })
+    await createWorkTask(deps, 'ws-a', { stageKey: 'train', objective: '调参', maxRounds: 2 })
+    await startWorkStage(deps, 'ws-a', 'prep')
+    await completeWorkTask(deps, 'ws-a', 'wt:prep:1')   // prep 的额度已用满（账里 rounds = 2）
+    await completeWorkStage(deps, 'ws-a', 'prep')       // 串行门放行下一段
+    await startWorkStage(deps, 'ws-a', 'train')
+
+    const service = createWorkprocessService({ store, now: () => 1_000 })
+    const decision = await tickWorkprocess({ domain: service }, 'ws-a', 'sess-1')
+    expect(decision).toMatchObject({ kind: 'drive', taskId: 'wt:train:1' })
   })
 })
 

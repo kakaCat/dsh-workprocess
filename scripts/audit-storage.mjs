@@ -8,53 +8,32 @@
  * 而"已落盘的状态还自洽吗"这件事本身值得随时能查——于是把它做成命令：
  * 不需要宿主、不需要服务、不需要重启，读一遍盘就出裁决。
  *
- * 【检查项（与内核/服务同口径）】
+ * 【判据在哪】**内核的纯函数 `auditWorkRecord`**（`workprocess/dist`），本脚本只读盘 + 排版。
+ * 这里曾经抄过一份规则，抄漏了"逐任务回合账"那条（头注释还写着"与内核/服务同口径"）——
+ * 同一个判据三处副本必然漂移，故判据只此一处，本脚本只做调用方。
  *   ① 严格解码：形状 / 阶段串行 / id 唯一性 / 墓碑一致性（`decodeWorkProcess`）
  *   ② 归属边界：`workProcess.id` 必须等于 `wp:<记录键>`
- *   ③ 读数合法：`rounds.started` 是非负安全整数；`rounds.activation` ∈ {armed, disarmed}
+ *   ③ 读数合法：`rounds.started` 与逐任务回合账（`rounds.tasks`）是非负安全整数；
+ *      `rounds.activation` ∈ {armed, disarmed}
  *
+ * 前置：先 `pnpm build`（本脚本 import 的是构建产物，与宿主加载的是同一份）。
  * 用法：node scripts/audit-storage.mjs [存储文件路径]
  * 退出码：0 = 全部通过（含"没有流程"）；1 = 有发现。
  */
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { decodeWorkProcess } from '../workprocess/dist/index.js'
+import { auditWorkRecord } from '../workprocess/dist/index.js'
 
 const file = process.argv[2] ?? join(homedir(), '.dsh', 'storages', 'workprocess.json')
 const raw = JSON.parse(readFileSync(file, 'utf8'))
 const records = raw?.tables?.processes ?? {}
 
-/** 审计一条记录。@returns 发现列表（空 = 全过）。 */
-function auditRecord(scope, record) {
-  const findings = []
-  const snapshot = record?.workProcess
-  if (snapshot === undefined) return findings          // 空记录（只有 rounds）：不是流程
-  let process
-  try {
-    process = decodeWorkProcess(snapshot)
-  } catch (err) {
-    return ['快照过不了严格解码：' + String(err?.message ?? err)]
-  }
-  if (process.id !== 'wp:' + scope) {
-    findings.push('归属边界不符：快照 id ' + JSON.stringify(process.id) + ' ≠ ' + JSON.stringify('wp:' + scope))
-  }
-  const started = record?.rounds?.started
-  if (started !== undefined && (!Number.isSafeInteger(started) || started < 0)) {
-    findings.push('回合计数不合法：' + JSON.stringify(started))
-  }
-  const activation = record?.rounds?.activation
-  if (activation !== undefined && activation !== 'armed' && activation !== 'disarmed') {
-    findings.push('续跑许可不合法：' + JSON.stringify(activation))
-  }
-  return findings
-}
-
 let problems = 0
 let flows = 0
 console.log('审计文件：' + file)
 for (const [scope, record] of Object.entries(records)) {
-  const findings = auditRecord(scope, record)
+  const findings = auditWorkRecord(scope, record)
   const hasFlow = record?.workProcess !== undefined
   if (hasFlow) flows += 1
   if (findings.length === 0) {

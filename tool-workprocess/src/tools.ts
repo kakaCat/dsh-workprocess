@@ -16,11 +16,12 @@ import {
   stageClosePolicyOf, stageIsFinishable,
 } from 'workprocess'
 import type { WorkprocessService } from 'workprocess'
-import type { WorkStage, WorkStageClosePolicy, WorkStageDraft, WorkTask } from 'workprocess'
+import type { WorkErrorCode, WorkStage, WorkStageClosePolicy, WorkStageDraft, WorkTask } from 'workprocess'
 import {
   isActionAuthorized, requireActionAuthority, workToolExecution,
   type WorkAuthorityAction, type WorkAuthorityContext, type WorkRoundRef, type WorkToolAuthority,
 } from './authority.js'
+import { WorkToolError, type WorkToolCode } from './codes.js'
 
 export interface WorkToolRegistryEntry {
   /** 处理器键（`handlers.ts` 的导出名，门禁用逐字扫它；也是 `WORK_TOOL_FACTORIES` 的键）。 */
@@ -233,12 +234,29 @@ function notice(deps: WorkToolDeps, exec: unknown, summary: string, text: string
   deps.deferNotice?.(exec, { summary, text })
 }
 
-/** 内核错误 → 结构化回执（不吞不编）。 */
+/**
+ * **工具码**拒绝（参数形状 / agent 纪律 / 人机结局）：码必须已登记（`WORK_TOOL_CODES`）。
+ * 与 `denyDomain` 分开是刻意的：两本码表各回各家，调用点一眼看出这是"工具面自己加的牙"。
+ */
+function denyTool(code: WorkToolCode, error: string, extra: Record<string, unknown> = {}): WorkToolReply {
+  return { success: false, ...extra, code, error }
+}
+
+/**
+ * **域码**拒绝：工具面把域的分类原样搬进回执（**不重造**一个同义的工具码）。
+ * 用于"状态规则说这样不成"的那些前置读（无流程 / 找不到任务或阶段）。
+ */
+function denyDomain(code: WorkErrorCode, error: string, extra: Record<string, unknown> = {}): WorkToolReply {
+  return { success: false, ...extra, code, error }
+}
+
+/** 内核错误 → 结构化回执（不吞不编）；工具面自己的政策拒绝同样带码。 */
 async function guarded(fn: () => Promise<WorkToolReply>): Promise<WorkToolReply> {
   try {
     return await fn()
   } catch (err) {
-    if (err instanceof WorkError) return { success: false, code: err.code, error: err.message }
+    if (err instanceof WorkError) return denyDomain(err.code, err.message)
+    if (err instanceof WorkToolError) return denyTool(err.code, err.message)
     throw err
   }
 }
@@ -293,10 +311,10 @@ const KEBAB = /^[a-z0-9]+(-[a-z0-9]+)*$/
  */
 export async function getWorkstage(deps: WorkToolDeps, args: Record<string, unknown>, exec?: unknown): Promise<WorkToolReply> {
   const scope = scopeOf(args, deps, exec)
-  if (scope === undefined) return { success: false, error: '缺少 scope（归属域键：这条流程挂在谁名下；未接默认归属时请显式给）' }
+  if (scope === undefined) return denyTool('WORK_TOOL_INVALID_ARGS', '缺少 scope（归属域键：这条流程挂在谁名下；未接默认归属时请显式给）')
   const process = await deps.domain.process(scope)
   if (process === undefined) {
-    return { success: false, scope, error: '该归属域还没有流程（先调 create_workstage 建流程）' }
+    return denyDomain('WORK_NO_PROCESS', '该归属域还没有流程（先调 create_workstage 建流程）', { scope })
   }
   const activation = await deps.domain.activation(scope)
   // 当前阶段 = 串行顺序里第一个非 done 的阶段（口径在 stages.js 单点，工具面不自己找）。
@@ -331,23 +349,23 @@ export async function createWorkstage(
   deps: WorkToolDeps, args: Record<string, unknown>, exec?: unknown,
 ): Promise<WorkToolReply> {
   const scope = scopeOf(args, deps, exec)
-  if (scope === undefined) return { success: false, error: '缺少 scope（归属域键：这条流程挂在谁名下；未接默认归属时请显式给）' }
+  if (scope === undefined) return denyTool('WORK_TOOL_INVALID_ARGS', '缺少 scope（归属域键：这条流程挂在谁名下；未接默认归属时请显式给）')
   const callerBad = callerRejection(deps, exec)
-  if (callerBad !== undefined) return { success: false, scope, error: callerBad }
+  if (callerBad !== undefined) return denyTool('WORK_TOOL_CALLER_REQUIRED', callerBad, { scope })
   const stages = parseStages(args)
-  if (typeof stages === 'string') return { success: false, scope, error: stages }
+  if (typeof stages === 'string') return denyTool('WORK_TOOL_INVALID_ARGS', stages, { scope })
   const objective = args.objective === undefined ? '' : String(args.objective)
   const revision = typeof args.revision === 'number' ? args.revision : undefined
   return guarded(async () => {
     const existing = await deps.domain.process(scope)
     if (existing === undefined) {
       if (objective.trim() === '') {
-        return { success: false, scope, error: '建流程需要 objective（写清这条流程要达成什么）' }
+        return denyTool('WORK_TOOL_INVALID_ARGS', '建流程需要 objective（写清这条流程要达成什么）', { scope })
       }
       const changed = await deps.domain.createProcess(scope, { objective, stages })
-      // **新建 = 许可打开**（限本轮由人发起时）：新流程是"人明确要开一条"，
-      // 但归属记录里可能残留着上一条流程的 `disarmed`（真机场景：宿主重启 ⇒ resume 自动 disarm；
-      // 随后新建的流程会一开就静默停住——真机复现过）。自治回合不动这个开关：不许自己给自己发通行证。
+      // **新建 = 许可打开**（限本轮由人发起时）：新流程是"人明确要开一条"，不该带着上一个对象的结论。
+      // 域层现在也会在 `discard` 时把整本回合账（含许可）摘掉，这里是**兜底**：老记录（上一版留下的
+      // 残留 `disarmed`）也要被这一次人发起的动作纠正过来。自治回合不动这个开关：不许自己给自己发通行证。
       if (changed && authorityOf(deps, exec).kind === 'direct-human') {
         await deps.domain.setActivation(scope, 'armed')
       }
@@ -408,26 +426,25 @@ export async function updateWorkstage(
   deps: WorkToolDeps, args: Record<string, unknown>, exec?: unknown,
 ): Promise<WorkToolReply> {
   const scope = scopeOf(args, deps, exec)
-  if (scope === undefined) return { success: false, error: '缺少 scope（归属域键：这条流程挂在谁名下；未接默认归属时请显式给）' }
+  if (scope === undefined) return denyTool('WORK_TOOL_INVALID_ARGS', '缺少 scope（归属域键：这条流程挂在谁名下；未接默认归属时请显式给）')
   const stageKey = args.stage_key === undefined ? '' : String(args.stage_key)
   const action = String(args.action ?? '')
   const objective = args.objective === undefined ? '' : String(args.objective)
   // stage_key 只对 done 必需：edit / arm / disarm 改的都是整条流程，discard 丢的是整条流程。
   if (action === 'done' && stageKey.trim() === '') {
-    return { success: false, scope, error: '缺少 stage_key（收口哪个阶段；edit / discard 才不需要）' }
+    return denyTool('WORK_TOOL_INVALID_ARGS', '缺少 stage_key（收口哪个阶段；edit / discard 才不需要）', { scope })
   }
   if (action === 'edit' && objective.trim() === '') {
-    return { success: false, scope, action, error: 'edit 需要 objective（这条流程改成要达成什么）' }
+    return denyTool('WORK_TOOL_INVALID_ARGS', 'edit 需要 objective（这条流程改成要达成什么）', { scope, action })
   }
   if (!(STAGE_ACTIONS as readonly string[]).includes(action)) {
-    return {
-      success: false, scope, stage_key: stageKey, action,
-      error: 'action 非法（只认 ' + STAGE_ACTIONS.join(' / ') + '；**阶段开工是驱动器的动作**——'
-        + '串行门放行后由驱动器开工，不经工具面。实际给的是 ' + JSON.stringify(action) + '）',
-    }
+    return denyTool('WORK_TOOL_INVALID_ARGS',
+      'action 非法（只认 ' + STAGE_ACTIONS.join(' / ') + '；**阶段开工是驱动器的动作**——'
+      + '串行门放行后由驱动器开工，不经工具面。实际给的是 ' + JSON.stringify(action) + '）',
+      { scope, stage_key: stageKey, action })
   }
   const callerBad = callerRejection(deps, exec)
-  if (callerBad !== undefined) return { success: false, scope, error: callerBad }
+  if (callerBad !== undefined) return denyTool('WORK_TOOL_CALLER_REQUIRED', callerBad, { scope })
   const revision = typeof args.revision === 'number' ? args.revision : undefined
   return guarded(async () => {
     if (action === 'discard') {
@@ -465,7 +482,7 @@ export async function updateWorkstage(
     // 先读目标阶段：授权判据要按它的收口策略判（策略不在参数里，在流程里）。
     const process = await deps.domain.process(scope)
     const stage = process?.stages.find((s) => s.key === stageKey)
-    if (stage === undefined) return { success: false, scope, stage_key: stageKey, error: '阶段不存在' }
+    if (stage === undefined) return denyDomain('WORK_STAGE_NOT_FOUND', '阶段不存在', { scope, stage_key: stageKey })
     const closePolicy = stageClosePolicyOf(stage)
     // 授权：**先判权，再判状态**（越权者不该从回执里读出阶段处于什么态）；
     // 策略 human 且本轮不是人发起的 ⇒ **工具自己问人**（宿主 userQuestions 弹框）。
@@ -490,19 +507,17 @@ export async function updateWorkstage(
           approve: '确认收口',
         })
         if (verdict.kind === 'declined') {
-          return {
-            success: false, scope, stage_key: stageKey, action, code: 'WORK_HUMAN_DECLINED',
-            error: '人在弹框里选了「还要补做」，本阶段不收口'
-              + (verdict.feedback === undefined || verdict.feedback === '' ? '' : '；人的补充：' + verdict.feedback)
-              + '——请按人说的用 create_worktask 补任务，做完再提请收口。',
-          }
+          return denyTool('WORK_TOOL_HUMAN_DECLINED',
+            '人在弹框里选了「还要补做」，本阶段不收口'
+            + (verdict.feedback === undefined || verdict.feedback === '' ? '' : '；人的补充：' + verdict.feedback)
+            + '——请按人说的用 create_worktask 补任务，做完再提请收口。',
+            { scope, stage_key: stageKey, action })
         }
         if (verdict.kind === 'cancelled') {
-          return {
-            success: false, scope, stage_key: stageKey, action, code: 'WORK_HUMAN_UNAVAILABLE',
-            error: '收口确认没问成人（' + verdict.reason + '）：本阶段不收口。'
-              + '若人顺手回了话，先按人说的办；否则请人在会话里回一句。',
-          }
+          return denyTool('WORK_TOOL_HUMAN_UNAVAILABLE',
+            '收口确认没问成人（' + verdict.reason + '）：本阶段不收口。'
+            + '若人顺手回了话，先按人说的办；否则请人在会话里回一句。',
+            { scope, stage_key: stageKey, action })
         }
         if (verdict.kind === 'no-channel') {
           // 没弹框通道：退回原来的拒绝（带指路），不假装问过。
@@ -542,18 +557,18 @@ export async function updateWorkstage(
 /** `get_worktask`：读任务（给 task_id 读一条；给 stage_key 读一阶段；都不给读全部）。 */
 export async function getWorktask(deps: WorkToolDeps, args: Record<string, unknown>, exec?: unknown): Promise<WorkToolReply> {
   const scope = scopeOf(args, deps, exec)
-  if (scope === undefined) return { success: false, error: '缺少 scope（归属域键：这条流程挂在谁名下；未接默认归属时请显式给）' }
+  if (scope === undefined) return denyTool('WORK_TOOL_INVALID_ARGS', '缺少 scope（归属域键：这条流程挂在谁名下；未接默认归属时请显式给）')
   const process = await deps.domain.process(scope)
-  if (process === undefined) return { success: false, scope, error: '该归属域还没有流程' }
+  if (process === undefined) return denyDomain('WORK_NO_PROCESS', '该归属域还没有流程', { scope })
   const taskId = args.task_id === undefined ? undefined : String(args.task_id)
   const stageKey = args.stage_key === undefined ? undefined : String(args.stage_key)
   let tasks: readonly WorkTask[]
   if (taskId !== undefined) {
     tasks = allTasksOf(process).filter((t) => t.id === taskId)
-    if (tasks.length === 0) return { success: false, scope, task_id: taskId, error: '任务不存在（可能已被 clear）' }
+    if (tasks.length === 0) return denyDomain('WORK_NOT_FOUND', '任务不存在（可能已被 clear）', { scope, task_id: taskId })
   } else if (stageKey !== undefined) {
     const stage = process.stages.find((s) => s.key === stageKey)
-    if (stage === undefined) return { success: false, scope, stage_key: stageKey, error: '阶段不存在' }
+    if (stage === undefined) return denyDomain('WORK_STAGE_NOT_FOUND', '阶段不存在', { scope, stage_key: stageKey })
     tasks = stage.tasks
   } else {
     tasks = allTasksOf(process)
@@ -566,13 +581,13 @@ export async function createWorktask(
   deps: WorkToolDeps, args: Record<string, unknown>, exec?: unknown,
 ): Promise<WorkToolReply> {
   const scope = scopeOf(args, deps, exec)
-  if (scope === undefined) return { success: false, error: '缺少 scope（归属域键：这条流程挂在谁名下；未接默认归属时请显式给）' }
+  if (scope === undefined) return denyTool('WORK_TOOL_INVALID_ARGS', '缺少 scope（归属域键：这条流程挂在谁名下；未接默认归属时请显式给）')
   const stageKey = args.stage_key === undefined ? '' : String(args.stage_key)
-  if (stageKey.trim() === '') return { success: false, scope, error: '缺少 stage_key（任务挂在哪个阶段下）' }
+  if (stageKey.trim() === '') return denyTool('WORK_TOOL_INVALID_ARGS', '缺少 stage_key（任务挂在哪个阶段下）', { scope })
   const objective = args.objective === undefined ? '' : String(args.objective)
-  if (objective.trim() === '') return { success: false, scope, error: 'objective 必填：写清这个工作单元要达成什么' }
+  if (objective.trim() === '') return denyTool('WORK_TOOL_INVALID_ARGS', 'objective 必填：写清这个工作单元要达成什么', { scope })
   const callerBad = callerRejection(deps, exec)
-  if (callerBad !== undefined) return { success: false, scope, error: callerBad }
+  if (callerBad !== undefined) return denyTool('WORK_TOOL_CALLER_REQUIRED', callerBad, { scope })
   const maxRounds = typeof args.max_rounds === 'number' ? args.max_rounds : undefined
   const revision = typeof args.revision === 'number' ? args.revision : undefined
   return guarded(async () => {
@@ -589,11 +604,10 @@ export async function createWorktask(
     const active = before === undefined ? undefined : currentStageOf(before)
     const target = before?.stages.find((s) => s.key === stageKey)
     if (active !== undefined && target !== undefined && target.state !== 'done' && active.key !== stageKey) {
-      return {
-        success: false, scope, stage_key: stageKey, code: 'WORK_NOT_CURRENT_STAGE',
-        error: '任务只能挂当前阶段（现在是 ' + active.key + '）：阶段严格串行——' + stageKey
-          + ' 等它成为当前阶段时再拆任务（提前建出来的任务会让阶段表不能再整体替换）。',
-      }
+      return denyTool('WORK_TOOL_NOT_CURRENT_STAGE',
+        '任务只能挂当前阶段（现在是 ' + active.key + '）：阶段严格串行——' + stageKey
+        + ' 等它成为当前阶段时再拆任务（提前建出来的任务会让阶段表不能再整体替换）。',
+        { scope, stage_key: stageKey })
     }
     const changed = await deps.domain.createTask(scope, {
       stageKey, objective, ...(maxRounds === undefined ? {} : { maxRounds }),
@@ -630,18 +644,17 @@ export async function updateWorktask(
   deps: WorkToolDeps, args: Record<string, unknown>, exec?: unknown,
 ): Promise<WorkToolReply> {
   const scope = scopeOf(args, deps, exec)
-  if (scope === undefined) return { success: false, error: '缺少 scope（归属域键：这条流程挂在谁名下；未接默认归属时请显式给）' }
+  if (scope === undefined) return denyTool('WORK_TOOL_INVALID_ARGS', '缺少 scope（归属域键：这条流程挂在谁名下；未接默认归属时请显式给）')
   const taskId = args.task_id === undefined ? '' : String(args.task_id)
-  if (taskId.trim() === '') return { success: false, scope, error: '缺少 task_id' }
+  if (taskId.trim() === '') return denyTool('WORK_TOOL_INVALID_ARGS', '缺少 task_id', { scope })
   const action = String(args.action ?? '')
   if (!(TASK_ACTIONS as readonly string[]).includes(action)) {
-    return {
-      success: false, scope, action,
-      error: 'action 非法（只认 ' + TASK_ACTIONS.join(' / ') + '；实际给的是 ' + JSON.stringify(action) + '）',
-    }
+    return denyTool('WORK_TOOL_INVALID_ARGS',
+      'action 非法（只认 ' + TASK_ACTIONS.join(' / ') + '；实际给的是 ' + JSON.stringify(action) + '）',
+      { scope, action })
   }
   const callerBad = callerRejection(deps, exec)
-  if (callerBad !== undefined) return { success: false, scope, error: callerBad }
+  if (callerBad !== undefined) return denyTool('WORK_TOOL_CALLER_REQUIRED', callerBad, { scope })
   const revision = typeof args.revision === 'number' ? args.revision : undefined
   const reason = args.reason === undefined ? '' : String(args.reason)
   const reasonCode = args.reason_code === undefined ? 'blocked' : String(args.reason_code)
@@ -651,28 +664,29 @@ export async function updateWorktask(
     const act = action as TaskAction
     const base = { scope, task_id: taskId, action: act }
     if (act === 'edit' && objective.trim() === '' && maxRounds === undefined) {
-      return { ...base, success: false, error: 'edit 至少要给一项（objective / max_rounds）' }
+      return denyTool('WORK_TOOL_INVALID_ARGS', 'edit 至少要给一项（objective / max_rounds）', base)
     }
     if (act === 'block' && reason.trim() === '') {
-      return { ...base, success: false, error: 'block 必须给原因（reason）：被什么挡住、等谁' }
+      return denyTool('WORK_TOOL_INVALID_ARGS', 'block 必须给原因（reason）：被什么挡住、等谁', base)
     }
     if (act === 'block' && !KEBAB.test(reasonCode)) {
-      return { ...base, success: false, error: 'reason_code 必须是 lower-kebab-case（如 wait-human）' }
+      return denyTool('WORK_TOOL_INVALID_ARGS', 'reason_code 必须是 lower-kebab-case（如 wait-human）', base)
     }
     const authority = authorityOf(deps, exec)
     authorize(('task_' + act) as WorkAuthorityAction, authority)
     if (act === 'block' && authority.kind !== 'direct-human') {
       // 对齐宿主 goal 的 `GOAL_TOOL_BLOCK_THRESHOLD`：**同一件事至少撑过 N 轮**才允许宣告被挡住。
-      // 判据用归属域已准入回合数（耐久，重启不丢）；真人直接发起不受此限（人在场随时可叫停）。
+      // 判据用**这个任务自己**已准入的回合数（耐久，重启不丢）：早先读的是全流程累计数——那等于
+      // "别的任务跑过的轮数"也给这个任务当资格，新任务第一轮就能宣告被挡住（门槛形同虚设；
+      // 与回合预算同一类错误：全局计数替一个按任务问的问题答了话）。
+      // 真人直接发起不受此限（人在场，随时可以叫停）。
       const threshold = deps.blockedAfterRounds ?? DEFAULT_BLOCKED_AFTER_ROUNDS
-      const rounds = (await deps.domain.roundsStarted(scope)) ?? 0
+      const rounds = (await deps.domain.taskRounds(scope))[taskId]?.rounds ?? 0
       if (rounds < threshold) {
-        return {
-          ...base, success: false,
-          error: `落 block 前至少要跑满 ${threshold} 轮（当前 ${rounds} 轮）——`
-            + '先继续做（把卡点写进回执），或由人直接叫停（真人发起不受此限）。',
-          code: 'WORK_TOOL_BLOCK_THRESHOLD',
-        }
+        return denyTool('WORK_TOOL_BLOCK_THRESHOLD',
+          `落 block 前至少要在这个任务上跑满 ${threshold} 轮（当前 ${rounds} 轮）——`
+          + '先继续做（把卡点写进回执），或由人直接叫停（真人发起不受此限）。',
+          base)
       }
     }
     const changed = act === 'edit'
@@ -790,9 +804,11 @@ export function defineCreateWorkstageTool(deps: WorkToolDeps) {
       type: 'array',
       items: { type: 'object', additionalProperties: true },
       description: '阶段表（数组顺序即执行顺序）：[{ key, statement, done_criteria?, close_policy? }]。'
-        // 这条"陷阱"必须写在这儿：它是**真实存在**的静默行为（`fold` 的 stage-define：定义以草案为准），
-        // 不写就等于让模型在改阶段表时把上一版的 auto 悄悄改回 human（真机踩过的那类"该自动却停手等人"）。
-        + '注意整体替换阶段表时**定义以草案为准**：close_policy 不写就回到缺省的 human（上一版的 auto 不会被留着）。'
+        // 两条"陷阱"必须写在这儿：都是**真实存在**的行为（`fold` 的 stage-define：定义以草案为准 +
+        // would-drop-tasks），不写就等于让模型踩——前者把上一版的 auto 悄悄改回 human，后者提交一个
+        // 必然被拒的替换、白跑一轮。（后者在上一轮改自述时漏掉过一次，别再漏。）
+        + '注意整体替换阶段表时**定义以草案为准**：close_policy 不写就回到缺省的 human（上一版的 auto 不会被留着）；'
+        + '**会丢掉非空阶段**（已经建过任务的阶段）的替换一律被拒。'
         + 'close_policy: human（缺省，人工确认收口）/ auto（任务全完成即自动收口）。',
     },
     revision: STAGE_REVISION_PARAM,
@@ -837,7 +853,7 @@ export function defineGetWorktaskTool(deps: WorkToolDeps) {
 export function defineCreateWorktaskTool(deps: WorkToolDeps) {
   return buildTool(deps, 'createWorktask', {
     scope: SCOPE_PARAM,
-    stage_key: { ...STAGE_KEY_PARAM, description: '任务挂在哪个阶段：给**当前阶段**（从 get_workstage 的 current_stage 取）——给后续阶段会被拒（WORK_NOT_CURRENT_STAGE，阶段严格串行）。' },
+    stage_key: { ...STAGE_KEY_PARAM, description: '任务挂在哪个阶段：给**当前阶段**（从 get_workstage 的 current_stage 取）——给后续阶段会被拒（WORK_TOOL_NOT_CURRENT_STAGE，阶段严格串行）。' },
     objective: TASK_OBJECTIVE_PARAM,
     max_rounds: CREATE_MAX_ROUNDS_PARAM,
     revision: STAGE_REVISION_PARAM,

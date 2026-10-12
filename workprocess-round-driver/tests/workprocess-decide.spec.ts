@@ -1,7 +1,7 @@
 /**
  * workprocess 驱动拍的**决策矩阵**（纯函数穷举）。
  *
- * 【守护什么】顺序即纪律：归属 → 可驱动 → 闸（闭锁/退避/上游/人工确认/预算）→
+ * 【守护什么】顺序即纪律：归属 → 可驱动 → 闸（规划轮 / 确认轮已问过；自动收口）→
  * 层1（串行门 + 收口）→ 层2（相位机 + 回合上限）。任一条被重排都会在这里红。
  */
 import { describe, it, expect } from 'vitest'
@@ -39,30 +39,6 @@ describe('归属与前置', () => {
     expect(decideWorkRound(input({ scope: { ...SCOPE, drivable: false } }))).toEqual({ kind: 'hold', reason: 'not-drivable', processId: 'ws-a' })
     expect(decideWorkRound(input({ scope: { ...SCOPE, pauseReason: 'wait-confirm' } })))
       .toEqual({ kind: 'hold', reason: 'paused:wait-confirm', processId: 'ws-a' })
-  })
-})
-
-describe('闸·顺序即纪律', () => {
-  it('内存闭锁先于退避与上游闸', () => {
-    const r = decideWorkRound(input({ gates: { latchOpen: true, backoffUntil: 9_999, providerLatchOpen: true } }))
-    expect(r).toEqual({ kind: 'hold', reason: 'latch', processId: 'ws-a' })
-  })
-
-  it('退避期内停手；到点放行', () => {
-    expect(decideWorkRound(input({ gates: { backoffUntil: 2_000 } }))).toEqual({ kind: 'hold', reason: 'backoff', processId: 'ws-a' })
-    expect(decideWorkRound(input({ now: 2_000, gates: { backoffUntil: 2_000 } })).kind).toBe('drive')
-  })
-
-  it('人工确认 / 弹框在途 → wait-human（等人不是故障）', () => {
-    expect(decideWorkRound(input({ gates: { humanGateOpen: true, humanGateReason: 'await-approval' } })))
-      .toEqual({ kind: 'wait-human', processId: 'ws-a', reason: 'await-approval' })
-    expect(decideWorkRound(input({ gates: { dialogInFlight: true } })))
-      .toEqual({ kind: 'wait-human', processId: 'ws-a', reason: 'dialog-in-flight' })
-  })
-
-  it('起链预算用尽 → hold（带原因）', () => {
-    expect(decideWorkRound(input({ gates: { chainBudgetAllowed: false, chainBudgetReason: 'no-window' } })))
-      .toEqual({ kind: 'hold', reason: 'chain-budget:no-window', processId: 'ws-a' })
   })
 })
 
@@ -153,16 +129,25 @@ describe('层2 · 相位机与回合上限', () => {
 
   it('回合到顶 → block-task（落盘，不是内存停手）', () => {
     const r = decideWorkRound(input({
-      roundsStarted: 3,
-      work: { processId: 'wp:ws-a', currentStage: stage({ tasks: [task({ maxRounds: 3 })] }) },
+      work: { processId: 'wp:ws-a', currentStage: stage({ tasks: [task({ maxRounds: 3, rounds: 3 })] }) },
     }))
     expect(r.kind).toBe('block-task')
     expect((r as { reason: { code: string } }).reason.code).toBe('round-limit')
   })
 
-  it('未到顶继续跑；上限缺省 = 不限', () => {
-    expect(decideWorkRound(input({ roundsStarted: 2, work: { processId: 'wp:ws-a', currentStage: stage({ tasks: [task({ maxRounds: 3 })] }) } })).kind).toBe('drive')
-    expect(decideWorkRound(input({ roundsStarted: 99, work: { processId: 'wp:ws-a', currentStage: stage({ tasks: [task()] }) } })).kind).toBe('drive')
+  it('未到顶继续跑；没写上限定 = 不限（纯层口径）', () => {
+    expect(decideWorkRound(input({ work: { processId: 'wp:ws-a', currentStage: stage({ tasks: [task({ maxRounds: 3, rounds: 2 })] }) } })).kind).toBe('drive')
+    expect(decideWorkRound(input({ work: { processId: 'wp:ws-a', currentStage: stage({ tasks: [task({ rounds: 99 })] }) } })).kind).toBe('drive')
+  })
+
+  it('预算按任务计：写的是**这个任务**花掉的轮数（不是流程累计数）', () => {
+    // 真机坑：早先拿"全流程已准入回合数"当每任务上限 ⇒ 第二个任务继承前一个的消耗，一开拍就判到顶。
+    // 判据现在只看任务自己的 `rounds`：同样写 maxRounds=2，花掉 2 轮的那个到顶、另一个照跑。
+    const cap = (rounds: number) => decideWorkRound(input({
+      work: { processId: 'wp:ws-a', currentStage: stage({ tasks: [task({ maxRounds: 2, rounds })] }) },
+    })).kind
+    expect(cap(1)).toBe('drive')
+    expect(cap(2)).toBe('block-task')
   })
 
   it('paused / blocked 任务 → wait-human（等人，不故障）', () => {

@@ -9,3 +9,7 @@
       config:
         # 自治回合落 block 的前置轮数（缺省 3，对齐宿主 goal 的 blockedAfterConsecutiveRounds）。
         blockedAfterRounds: 3
+        # 浏览器只读数据面额外允许的 Host（缺省空 = 只认 loopback：localhost / 127.0.0.1 / ::1）。
+        # 从局域网地址 / 隧道域名 / 反代域名打开界面时，把该主机名（可带端口）列进来；
+        # `'*'` = 全放行（自己清楚暴露面时用）。放行 Host 不等于放行跨源（Origin 仍须同源）。
+        # apiHosts: ["mybox.lan:8080"]

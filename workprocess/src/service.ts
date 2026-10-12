@@ -12,14 +12,16 @@
  * @module workprocess/service
  */
 import {
-  blockWorkTask, clearWorkTask, closeWorkProcess, completeWorkStage, completeWorkTask, createWorkProcess,
+  auditWorkRecord, blockWorkTask, clearWorkTask, closeWorkProcess, completeWorkStage, completeWorkTask,
+  createWorkProcess,
   createWorkTask, currentStageOf, defineWorkStages, discardWorkProcess, editWorkObjective, editWorkTask,
-  decodeWorkProcess, markWorkAsked, pauseWorkTask, resumeWorkTask, setWorkActivation, startWorkStage,
-  workActivationOf, workAskedOf, workProcessOf,
+  decodeWorkProcess, grantWorkTaskRounds, markWorkAsked, pauseWorkTask, recordWorkRound, resumeWorkTask,
+  setWorkActivation, startWorkStage,
+  workActivationOf, workAskedOf, workProcessOf, workTaskOf, workTaskRoundsAllOf,
 } from './kernel.js'
 import type {
   CreateWorkProcessRequest, CreateWorkTaskRequest, EditWorkTaskRequest, WorkActivation, WorkAskedState,
-  WorkBlockReason, WorkProcess, WorkStage, WorkStageDraft,
+  WorkBlockReason, WorkProcess, WorkStage, WorkStageDraft, WorkTaskRounds,
 } from './kernel.js'
 import type { WorkDeps } from './kernel.js'
 
@@ -46,12 +48,14 @@ export interface WorkprocessStatus {
   readonly stages: readonly WorkStage[]
   /** 当前阶段（全阶段 done ⇒ 缺省）。 */
   readonly currentStageKey?: string
-  /** 已准入回合数（耐久在归属记录里）。 */
+  /** **全流程累计**已准入回合数（跨任务累加；耐久在归属记录里）。 */
   readonly roundsStarted: number
   /** 流程收口时间戳（缺省 = 未收口）：已收口的流程一切写被内核拒。 */
   readonly closedAt?: number
   /** 当前阶段首个任务生效的回合上限（没写 max_rounds ⇒ 缺省不展示）。 */
   readonly maxRounds?: number
+  /** 当前阶段首个任务**自己**已准入的回合数（预算按任务计；没任务 ⇒ 缺省不展示）。 */
+  readonly taskRounds?: number
   /** **续跑许可**（缺省 `armed`）：`disarmed` 时驱动器不自动往下推（会话 resume 后自动落）。 */
   readonly activation?: WorkActivation
 }
@@ -111,13 +115,18 @@ export interface WorkprocessService {
   markAsked(scope: string, kind: 'plan' | 'ask', key: string, revision: number): Promise<boolean>
 
   // ── 回合计数（驱动器的回合预算判据；耐久在归属记录里）────────────
-  /** 该归属域**已准入回合数**（缺省 = 没记录过）。 */
+  /** 该归属域**累计**已准入回合数（跨任务累加；缺省 = 没记录过）。 */
   roundsStarted(scope: string): Promise<number | undefined>
   /**
-   * 记一个**被接手的回合**（`round` 单调前进；旧回合/重复观察零写入）。
+   * **逐任务**回合账（键 = 任务 id；缺省 = 空账）。
+   * 回合预算（任务的 `max_rounds`）数的是任务自己花掉的回合——驱动器读它判到顶与算轮号。
+   */
+  taskRounds(scope: string): Promise<Readonly<Record<string, WorkTaskRounds>>>
+  /**
+   * 记一个**被接手的回合**（按任务计；同一回合重复观察零写入，累计数按增量前进）。
    * 只有自署 `work` 来源的回合才算——人的消息不是回合（判据在驱动器侧）。
    */
-  observeRound(scope: string, round: number): Promise<void>
+  observeRound(scope: string, round: number, taskId: string): Promise<void>
 
   // ── 人机干预（agent 键；命令面用）──────────────────────────────
   /** 丢弃该 agent 会话的整条流程（幂等：没有流程 ⇒ false）。 */
@@ -163,7 +172,7 @@ export function createWorkprocessService(
   }
   /**
    * 审计整张表。检查项（都只读、不改）：严格解码 / 归属边界（`id === 'wp:' + scope`）/
-   * `rounds.started` 是非负安全整数 / `rounds.activation` 合法。
+   * `rounds.started` 与逐任务回合账是非负安全整数 / `rounds.activation` 合法。
    */
   const audit = async (): Promise<WorkAuditReport> => {
     const findings: WorkAuditFinding[] = []
@@ -172,31 +181,30 @@ export function createWorkprocessService(
     for (const [scope, record] of enumerated ?? []) {
       const raw = record?.workProcess
       if (raw === undefined) continue                    // 空记录（只有 rounds）：不是流程
-      let process: WorkProcess
-      try {
-        process = decodeWorkProcess(raw)
-      } catch (err) {
-        findings.push({ scope, problem: '快照过不了严格解码：' + String((err as Error)?.message ?? err) })
-        continue
-      }
-      if (process.id !== 'wp:' + scope) {
-        findings.push({ scope, problem: '归属边界不符：快照 id ' + JSON.stringify(process.id) + ' 与记录键不一致' })
-      }
-      const started = record?.rounds?.started
-      if (started !== undefined && (!Number.isSafeInteger(started) || started < 0)) {
-        findings.push({ scope, problem: '回合计数不合法：' + JSON.stringify(started) })
-      }
-      const activation = record?.rounds?.activation
-      if (activation !== undefined && activation !== 'armed' && activation !== 'disarmed') {
-        findings.push({ scope, problem: '续跑许可不合法：' + JSON.stringify(activation) })
-      }
-      snapshots.push({ scope, process })
+      // 判据只有一份（内核的纯函数）：进程内这条、装载自审、以及不需要宿主的
+      // `scripts/audit-storage.mjs` 说的是同一套话。
+      const problems = auditWorkRecord(scope, record)
+      for (const problem of problems) findings.push({ scope, problem })
+      // 有问题的记录**不播种**进影子状态（读起来就不可信，别拿它当基准）。解码只在这条干净路径上做。
+      if (problems.length > 0) continue
+      snapshots.push({ scope, process: decodeWorkProcess(raw) })
     }
     return { findings, snapshots }
   }
   const discardProcess = async (scope: string, revision?: number): Promise<boolean> => {
     const changed = await discardWorkProcess(deps, scope, revision)
     if (changed) onCleared?.(scope)
+    return changed
+  }
+  /**
+   * 继续任务。**人 `resume` 一个被挡下的任务 = 追加一份回合预算**（`grants` +1）：
+   * 否则一个已达 `max_rounds` 的任务被 resume 回 `active`，下一拍又判到顶——恢复路径成了空头支票。
+   * `paused` 任务只是继续（不追加预算）；`resumePaused`（只动 paused）同此口径。
+   */
+  const resumeTask = async (scope: string, taskId: string, revision?: number): Promise<boolean> => {
+    const before = await workTaskOf(deps, scope, taskId)
+    const changed = await resumeWorkTask(deps, scope, taskId, revision)
+    if (changed && before?.phase === 'blocked') await grantWorkTaskRounds(deps, scope, taskId)
     return changed
   }
   return {
@@ -207,13 +215,16 @@ export function createWorkprocessService(
       const found = await stageOf(scope)
       if (found === undefined) return undefined
       const activation = await workActivationOf(deps, scope)
-      const cap = found.stage?.tasks[0]?.maxRounds
+      const task = found.stage?.tasks[0]
+      const cap = task?.maxRounds
+      const ledger = (await deps.store.get(scope))?.rounds
       return {
         objective: found.process.objective,
         stages: found.process.stages,
         ...(found.stage === undefined ? {} : { currentStageKey: found.stage.key }),
-        roundsStarted: (await deps.store.get(scope))?.rounds?.started ?? 0,
+        roundsStarted: ledger?.started ?? 0,
         ...(cap === undefined ? {} : { maxRounds: cap }),
+        ...(task === undefined ? {} : { taskRounds: ledger?.tasks?.[task.id]?.rounds ?? 0 }),
         ...(found.process.closedAt === undefined ? {} : { closedAt: found.process.closedAt }),
         ...(activation === undefined ? {} : { activation }),
       }
@@ -227,22 +238,15 @@ export function createWorkprocessService(
     activation: (scope) => workActivationOf(deps, scope),
     setActivation: (scope, activation, revision) => setWorkActivation(deps, scope, activation, revision),
     roundsStarted: async (scope) => (await deps.store.get(scope))?.rounds?.started,
-    async observeRound(scope, round) {
-      await deps.store.mutate(scope, (record) => {
-        const current = record.rounds?.started ?? 0
-        if (round <= current) return undefined   // 旧回合 / 重复观察：零写入
-        record.rounds = { ...record.rounds, started: round }
-        record.updatedAt = deps.now()
-        return { changed: true }
-      })
-    },
+    taskRounds: (scope) => workTaskRoundsAllOf(deps, scope),
+    observeRound: (scope, round, taskId) => recordWorkRound(deps, scope, taskId, round).then(() => undefined),
     defineStages: (scope, stages, revision) => defineWorkStages(deps, scope, stages, revision),
     editObjective: (scope, objective, revision) => editWorkObjective(deps, scope, objective, revision),
     closeStage: (scope, stageKey, revision) => completeWorkStage(deps, scope, stageKey, revision),
     createTask: (scope, request, revision) => createWorkTask(deps, scope, request, revision),
     editTask: (scope, taskId, patch, revision) => editWorkTask(deps, scope, taskId, patch, revision),
     pauseTask: (scope, taskId, revision) => pauseWorkTask(deps, scope, taskId, revision),
-    resumeTask: (scope, taskId, revision) => resumeWorkTask(deps, scope, taskId, revision),
+    resumeTask,
     blockTask: (scope, taskId, reason, revision) => blockWorkTask(deps, scope, taskId, reason, revision),
     completeTask: (scope, taskId, revision) => completeWorkTask(deps, scope, taskId, revision),
     clearTask: (scope, taskId, revision) => clearWorkTask(deps, scope, taskId, revision),

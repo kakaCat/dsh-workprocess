@@ -14,41 +14,35 @@ import type { WorkStageClosePolicy, WorkStageState, WorkTaskPhase } from 'workpr
 /** 归属侧窄投影（驱动拍要读的**有界**事实）。 */
 export interface RoundScopeFacts {
   readonly id: string
-  /** 归属绑定：本会话是不是这条流程的 owner 会话（undefined = 未绑定）。 */
+  /** 归属绑定：本会话是不是这条流程的 owner 会话（undefined = 未绑定）。**生产侧不填**（只有单测在用）。 */
   readonly ownerSessionId?: string
-  /** 人的意图 + 运行时健康。 */
+  /** 人的意图 + 运行时健康。**生产侧恒 `true`**：真正的刹车是 `activation === 'disarmed'`（驱动插件里返回）。 */
   readonly drivable: boolean
-  /** 推进链的暂停告警（非空 ⇒ 不驱动；由归属记录注入）。 */
+  /** 推进链的暂停告警（非空 ⇒ 不驱动；由归属记录注入）。**当前无产出方**。 */
   readonly pauseReason?: string
 }
 
-/** 闸判据的当拍事实（全部由端口注入；缺失 = 该闸未启用）。 */
+/**
+ * 闸判据的当拍事实（全部由端口注入；缺失 = 该闸未启用）。
+ *
+ * 【口径：没有产出方的闸**不留字段**】这里只住生产侧（`tickWorkprocess`）**真的会填**的三道。
+ * 早先还列着宿主 goal 的同名闸族（内存闭锁 / 退避 / 进程级上游 / 人工确认记录态 / 弹框在途 /
+ * 起链预算）——本域没有任何地方会填它们，恒为缺省 = 放行，而**留着一个永不触发的分支就是负债**：
+ * 读代码的人会把它读成"已有的保护"（旧注释自己预判过这种误读，却还是把它们留在了类型里）。
+ * 已按同一条口径删掉；将来真有产出方再加回来——纯层的契约，加回是小事。
+ */
 export interface GateFacts {
-  /** ① 内存闭锁（当拍可信，先于一切记录判据）。 */
-  readonly latchOpen?: boolean
-  /** ② 退避期内（不早于该时刻才允许起轮）。 */
-  readonly backoffUntil?: number
-  /** ③ 进程级上游闸。 */
-  readonly providerLatchOpen?: boolean
-  /** ④ 人工确认（记录态：待确认 / 待批准）。 */
-  readonly humanGateOpen?: boolean
-  readonly humanGateReason?: string
-  /** ④' 弹框在途（内存态：有人正站在框前）。 */
-  readonly dialogInFlight?: boolean
-  /** ⑤ 起链预算闸。 */
-  readonly chainBudgetAllowed?: boolean
-  readonly chainBudgetReason?: string
   /**
-   * ⑥ **阶段规划轮已问过**（内存态：本阶段开工后没任务，已经投过一轮"给本阶段建任务"）。
+   * ① **阶段规划轮已问过**（内存态：本阶段开工后没任务，已经投过一轮"给本阶段建任务"）。
    * 已问过就不再问（否则每个空闲边界都投一轮 = 空转）：停手等人，把"阶段空着"这件事露出来。
    */
   readonly stagePlanBlocked?: boolean
   /**
-   * ⑦ **收口确认已经问过人**（内存态：同一件事只问一次）。
+   * ② **收口确认已经问过人**（内存态：同一件事只问一次）。
    * 问过就不再问——否则每个空闲边界都往会话里投一轮"请人确认"，人还没答就被刷屏。
    */
   readonly humanAskBlocked?: boolean
-  /** ⑧ **流程自动收口**（配置态：`close: 'auto'`）：最后一段 done 后驱动器直接落 close，不问人。 */
+  /** ③ **流程自动收口**（配置态：`close: 'auto'`）：最后一段 done 后驱动器直接落 close，不问人。 */
   readonly autoClose?: boolean
 }
 
@@ -58,8 +52,10 @@ export interface TaskFacts {
   readonly objective: string
   readonly phase: WorkTaskPhase
   readonly revision: number
-  /** 该任务生效的回合上限（缺省 = 由适配器按阶段回落）。 */
+  /** 该任务**生效的**回合上限（缺省 = 由适配器按阶段回落；人追加预算后 > 任务自写的 max_rounds）。 */
   readonly maxRounds?: number
+  /** 该任务**已准入**的回合数（缺省 = 0）。预算按任务计：到顶比的是它，不是流程累计数。 */
+  readonly rounds?: number
 }
 
 /** 层1：当前阶段（第一个非 done 的阶段）。 */
@@ -95,8 +91,6 @@ export interface DecideInput {
   readonly scope?: RoundScopeFacts
   readonly gates?: GateFacts
   readonly work?: WorkFacts
-  /** 已准入回合数（round-limit 闸的计数来源；由归属记录注入）。 */
-  readonly roundsStarted?: number
 }
 
 /** 驱动拍的结论（**穷尽十态**）。 */
@@ -138,19 +132,8 @@ const hold = (reason: string, processId?: string): RoundDecision =>
 function gateStop(input: DecideInput): RoundDecision | undefined {
   const req = input.scope
   if (req === undefined) return hold('no-scope')
-  const g = input.gates
   if (!req.drivable) return hold('not-drivable', req.id)
   if (req.pauseReason !== undefined) return hold('paused:' + req.pauseReason, req.id)
-  if (g?.latchOpen === true) return hold('latch', req.id)
-  if (g?.backoffUntil !== undefined && input.now < g.backoffUntil) return hold('backoff', req.id)
-  if (g?.providerLatchOpen === true) return hold('provider-latch', req.id)
-  if (g?.humanGateOpen === true) {
-    return { kind: 'wait-human', processId: req.id, reason: g.humanGateReason ?? 'human-gate' }
-  }
-  if (g?.dialogInFlight === true) return { kind: 'wait-human', processId: req.id, reason: 'dialog-in-flight' }
-  if (g?.chainBudgetAllowed === false) {
-    return hold('chain-budget:' + (g.chainBudgetReason ?? 'unknown'), req.id)
-  }
   return undefined
 }
 
@@ -187,17 +170,20 @@ function layerBranch(input: DecideInput, processId: string, stage: StageFacts | 
   const { running, waiting } = pick(tasks)
 
   if (running !== undefined) {
-    // round-limit 闸（对齐宿主起轮前的 `roundsStarted >= maxGoalRounds → block`）：
-    // 到顶**不是停手留内存**——落盘 block，重启不失忆、人可见可裁（resume 人专属）。
+    // round-limit 闸：**预算按任务计**——比的是这个任务自己花掉的回合（`running.rounds`），
+    // 不是整条流程的累计数（早先拿全局数当每任务上限，第二个任务一开拍就继承前一个的消耗）。
+    // 到顶**不是停手留内存**——落盘 block，重启不失忆、人可见可裁（`resume` 会追加一份预算）。
     const cap = running.maxRounds
-    if (cap !== undefined && input.roundsStarted !== undefined && input.roundsStarted >= cap) {
+    const used = running.rounds ?? 0
+    if (cap !== undefined && used >= cap) {
       return {
         kind: 'block-task',
         processId,
         taskId: running.id,
         reason: {
           code: 'round-limit',
-          message: '已准入回合数 ' + input.roundsStarted + ' 达到上限 ' + cap + '——该任务不再自动续跑，等人确认',
+          message: '任务 ' + running.id + ' 已准入 ' + used + ' 轮，达到上限 ' + cap
+            + '——不再自动续跑；人 resume 会再给一份同样的预算（或 edit 调大 max_rounds）',
         },
       }
     }

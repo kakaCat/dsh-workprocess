@@ -5,6 +5,7 @@
  * @module workprocess/runtime
  */
 import type { WorkProcessId as WorkProcessIdType, WorkTaskId as WorkTaskIdType } from './types.js'
+import type { WorkErrorCode } from './domain.js'
 
 /** 变更载荷版本（对齐宿主 `GOAL_CHANGE_VERSION`；写入与解码两侧同源）。 */
 export const WORK_CHANGE_VERSION = 1
@@ -27,37 +28,12 @@ export function WorkTaskId(stageKey: string, seq = 1): WorkTaskIdType {
   return 'wt:' + stageKey + ':' + String(seq)
 }
 
-/** workprocess 域的稳定错误码（机器可路由；对齐宿主 `GoalErrorCode` 的形态）。 */
-export type WorkErrorCode =
-  /** 该归属域没有流程（读/写的前提不成立）。 */
-  | 'WORK_NO_PROCESS'
-  /** 按 id 找不到任务 / 阶段。 */
-  | 'WORK_NOT_FOUND'
-  /** 建流程/建任务却没给陈述（空 objective 写进去就是自造坏记录）。 */
-  | 'WORK_OBJECTIVE_REQUIRED'
-  /** 同一个 id 想建成另一个东西（身份冲突）。 */
-  | 'WORK_IDENTITY_CONFLICT'
-  /** CAS 失败：调用方拿着旧 revision 在改（对齐宿主 `goalRef` 的乐观锁拒绝）。 */
-  | 'WORK_CONFLICT'
-  /** 阶段键不存在 / 重复 / 非法。 */
-  | 'WORK_STAGE_NOT_FOUND'
-  | 'WORK_STAGE_DUPLICATE'
-  /** 串行门：前序阶段没全 done，本阶段不许开工。 */
-  | 'WORK_STAGE_SERIAL_BLOCKED'
-  /** 阶段收口条件不满足（本阶段还有没 complete 的任务）。 */
-  | 'WORK_STAGE_NOT_READY'
-  /** 整体替换阶段表会丢掉已有任务的阶段（静默丢任务是最坏的一类缺陷，故拒）。 */
-  | 'WORK_STAGE_HAS_TASKS'
-  /** 任务相位迁移不成立（终态不可逆 / 非 active 不许 pause 等）。 */
-  | 'WORK_TASK_PHASE'
-  /** block 没给结构化原因。 */
-  | 'WORK_REASON_REQUIRED'
-  /** 该动作需要人显式发起（agent 自行调用会推翻人的意图）。 */
-  | 'WORK_NO_PERMISSION'
-  /** 耐久快照/变更流解码失败：字段缺漏、类型不符或迁移链断裂（对齐宿主严格解码器）。 */
-  | 'WORK_CORRUPT'
-  /** 折叠结果违反域不变量（INV-1~6）——规则实现坏了，不是业务拒绝。 */
-  | 'WORK_INVARIANT'
+/**
+ * 域错误码**住在域词汇表**（`domain.ts` 的 `WORK_ERROR_CODES`），本文件只 import 进来给
+ * `WorkError` 用——与宿主 `goal/src/runtime.ts` 逐字同形（那里也是
+ * `import type { GoalErrorCode } from './domain.ts'`）。再导出一次是为了不打断既有消费方。
+ */
+export type { WorkErrorCode } from './domain.js'
 
 /** workprocess 域边界错误（对齐宿主 `GoalError`：message 人话 + code 机器可路由）。 */
 export class WorkError extends Error {

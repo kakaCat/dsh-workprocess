@@ -15,7 +15,7 @@ import { apply, name, inject, storageDomainStoreOf, workprocessDomain } from 'wo
 import { WORK_TOOL_REGISTRY } from 'tool-workprocess'
 import { apply as applyTools } from 'tool-workprocess'
 import { apply as applyDriver } from 'workprocess-round-driver'
-import { applyWorkEvent, startWorkStage } from 'workprocess'
+import { applyWorkEvent, createWorkProcess, editWorkObjective, startWorkStage, workProcessOf } from 'workprocess'
 
 interface ToolLike { execute(args: Record<string, unknown>, exec?: unknown): Promise<Record<string, unknown>> }
 interface HostEvent { type?: string; data?: { source?: { kind?: string; round?: number; taskId?: string; revision?: number } } }
@@ -249,6 +249,52 @@ describe('插件装配面', () => {
     expect(schema.parse({ workProcess: built.next }).workProcess).toBeDefined()
     expect(() => schema.parse({ workProcess: { id: 'wp:x' } })).toThrow()
     expect(() => schema.parse({ workProcess: { ...built.next, revision: 0 } })).toThrow()
+    // 逐任务回合账（回合预算的落点）也是持久化契约：形状对得上就过，坏读数在**审计**那层点名。
+    const ledger = { started: 2, tasks: { 'wt:prep:1': { rounds: 2, grants: 1 } } }
+    expect(schema.parse({ rounds: ledger }).rounds).toEqual(ledger)
+    expect(() => schema.parse({ rounds: { tasks: { 'wt:prep:1': { rounds: 2 } } } })).toThrow()  // 缺 grants
+  })
+
+  it('归属记录的读-改-写是**串行**的（否则两个写者各读一份旧草稿 ⇒ 丢更新）', async () => {
+    // 域后端按真实形状写：`put` 是一次真的 I/O（这里用一拍定时器代表），**每次调用都会让出**——
+    // 不串行化就会出现"两个写者各读一份旧草稿、后写的盖掉先写的"（丢更新）。
+    const table = new Map<string, unknown>()
+    const facility = {
+      async open(): Promise<{ table(n: string): unknown }> {
+        return {
+          table: () => ({
+            get: (k: string): unknown => table.get(k),
+            put: async (k: string, v: unknown): Promise<void> => {
+              await new Promise((resolve) => setTimeout(resolve, 0))
+              table.set(k, v)
+            },
+          }),
+        }
+      },
+    }
+    const store = storageDomainStoreOf({ storageDomain: facility } as never)
+    const bump = (): Promise<{ changed?: boolean }> => store.mutate('s-1', (draft) => {
+      const n = (draft as { n?: number }).n ?? 0
+      ;(draft as { n?: number }).n = n + 1
+      return { changed: true }
+    })
+    await Promise.all([bump(), bump(), bump()])
+    expect((table.get('s-1') as { n: number }).n).toBe(3)
+  })
+
+  it('CAS 在并发下成立：两个写者拿着同一个 revision ⇒ 只有一个能落', async () => {
+    const host = fakeDomainFacility()
+    const store = storageDomainStoreOf({ storageDomain: host.facility } as never)
+    const deps = { store, now: () => 1_000 }
+    await createWorkProcess(deps, 's-1', { objective: 'x', stages: [{ key: 'a', statement: 'a' }] })
+    const revision = (await workProcessOf(deps, 's-1'))!.revision
+    const settled = await Promise.allSettled([
+      editWorkObjective(deps, 's-1', 'A', revision),
+      editWorkObjective(deps, 's-1', 'B', revision),
+    ])
+    expect(settled.filter((r) => r.status === 'fulfilled')).toHaveLength(1)
+    const rejected = settled.find((r) => r.status === 'rejected') as PromiseRejectedResult
+    expect((rejected.reason as { code?: string }).code).toBe('WORK_CONFLICT')
   })
 
   it('归属缺省 = 本会话：不传 scope 也能建流程、建任务、读回来；写真的进了域', async () => {
@@ -281,7 +327,7 @@ describe('真人判定（组合根接线之后）', () => {
     await call('create_worktask', { stage_key: 'prep', objective: '清洗数据' })
     await idleTick()
     await call('update_worktask', { task_id: 'wt:prep:1', action: 'complete' })
-    expect((await call('update_workstage', { stage_key: 'prep', action: 'done' })).code).toBe('WORK_NO_PERMISSION')
+    expect((await call('update_workstage', { stage_key: 'prep', action: 'done' })).code).toBe('WORK_TOOL_AUTHORITY_REQUIRED')
   })
 
   it('本回合有人的消息 ⇒ 授权为 direct-human，收口落章', async () => {
@@ -593,7 +639,7 @@ describe('人机确认接线（工具自己问人：宿主 userQuestions）', ()
     const h = await readyToClose()
     h.setUserAnswers([{ id: 'workprocess-stage-done:prep', selected: ['还要补做'], custom: '再加个暂停' }])
     const out = await h.tools.update_workstage.execute({ stage_key: 'prep', action: 'done' }, h.exec())
-    expect(out).toMatchObject({ success: false, code: 'WORK_HUMAN_DECLINED' })
+    expect(out).toMatchObject({ success: false, code: 'WORK_TOOL_HUMAN_DECLINED' })
     expect(String(out.error)).toContain('再加个暂停')
     expect((await h.tools.get_workstage.execute({}, h.exec())).stages)
       .toMatchObject([{ key: 'prep', state: 'active' }])
@@ -603,7 +649,7 @@ describe('人机确认接线（工具自己问人：宿主 userQuestions）', ()
     const h = await readyToClose()
     h.setUserAnswers(['ASK_CANCELLED'])
     const out = await h.tools.update_workstage.execute({ stage_key: 'prep', action: 'done' }, h.exec())
-    expect(out).toMatchObject({ success: false, code: 'WORK_HUMAN_UNAVAILABLE' })
+    expect(out).toMatchObject({ success: false, code: 'WORK_TOOL_HUMAN_UNAVAILABLE' })
     expect((await h.tools.get_workstage.execute({}, h.exec())).stages)
       .toMatchObject([{ key: 'prep', state: 'active' }])
   })
@@ -612,7 +658,7 @@ describe('人机确认接线（工具自己问人：宿主 userQuestions）', ()
     const h = await readyToClose()
     h.setUserAnswers(['NO_PROVIDER'])
     const out = await h.tools.update_workstage.execute({ stage_key: 'prep', action: 'done' }, h.exec())
-    expect(out).toMatchObject({ success: false, code: 'WORK_NO_PERMISSION' })
+    expect(out).toMatchObject({ success: false, code: 'WORK_TOOL_AUTHORITY_REQUIRED' })
   })
 })
 

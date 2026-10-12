@@ -1,13 +1,14 @@
 # workprocess
 
-workprocess 的**插件入口**（组合根）：把「内核 + 驱动 + 工具面」三个库接成宿主能装载的插件。
+workprocess 的**插件入口**（组合根）：把「内核 + 宿主存储域」接成宿主能装载的插件
+（**驱动器与工具面不在这里**：分别在 `workprocess-round-driver` / `tool-workprocess`，本包都不 import）。
 
 ## 它补的正是那层接线
 
 | 缺口 | 本包怎么补（**只补自己这一层**：其余缺口在兄弟包里，见右列） |
 |---|---|
 | 没有 `store` 实现 | `src/storage.ts` + `src/index.ts`：**用宿主的存储域**（`defineDomain` + `ctx.storageDomain.open`，域 `workprocess` v1、表 `processes`、键 = 归属域）。schema 校验、耐久、`domain/changed` 事件都由宿主后端负责——**不自造文件库**。`workProcess` 的权威校验器仍是**内核**的 `decodeWorkProcess`（schema 的 `superRefine` 调它） |
-| 真人判定 | **本包不判**（保持领域层"只管状态规则"）：判定在 `tool-workprocess/src/authority.ts`（从会话事件切面判本回合由谁发起 + 动作分级），合法性来源在 `command-workprocess`（命令由人敲、投话自署 `user`）。内核只**定义**词汇（错误码 `WORK_NO_PERMISSION`、阶段策略 `closePolicy: 'human' \| 'auto'`），全仓**抛出** `WORK_NO_PERMISSION` 的只有工具面 |
+| 真人判定 | **本包不判**（保持领域层"只管状态规则"）：判定在 `tool-workprocess/src/authority.ts`（从会话事件切面判本回合由谁发起 + 动作分级），合法性来源在 `command-workprocess`（命令由人敲、投话自署 `user`）。内核只**定义域词汇**（**域**错误码 `WORK_ERROR_CODES`，住在 `src/domain.ts`；阶段策略 `closePolicy: 'human' \| 'auto'`）——**授权是工具面的牙**，它的政策码是 `tool-workprocess/src/codes.ts` 里的 `WORK_TOOL_*`（`WORK_TOOL_AUTHORITY_REQUIRED`），不进域联合（对齐宿主：`GoalErrorCode` 在 domain.ts、`GOAL_TOOL_*` 在工具面） |
 | `drive` 的结论没人执行 | 在 `workprocess-round-driver` 包：开工 / auto 收口 / 落盘 block 由 tick 直接落，续跑回合由 `agent.followup` 投递（本包只提供 `ctx.workprocess` 服务面） |
 | 投递会冒充人话 | 在 `workprocess-round-driver/src/index.ts` + `tool-workprocess/src/authority.ts`：往 `@deepseek-ai/dsh-llm` 的 `MessageSourceMap` 加 `work` 一格并**自署来源**——自动回合 = `autonomous`，`human` 策略的收口照样落不了章（省略 source 会被当成 user，那正是"自动回合替人收口"的口子） |
 | 没有插件形状 | `src/index.ts`：`export const name / inject / apply(ctx, config)`（与宿主 `dsh-goal` 同形）；六个工具在 `tool-workprocess`，命令行在 `command-workprocess` |
@@ -131,7 +132,7 @@ ln -sfn <repo>/workprocess ~/.dsh/profiles/desktop/node_modules/workprocess
 
 ## 域**不**执行 agent 的纪律：提前给后续阶段建任务是**有意允许**的
 
-工具面会拒"给非当前阶段建任务"（`WORK_NOT_CURRENT_STAGE`），但**内核不拒**——这是刻意的分工，
+工具面会拒"给非当前阶段建任务"（`WORK_TOOL_NOT_CURRENT_STAGE`），但**内核不拒**——这是刻意的分工，
 别把它当成缺口"补"进 `fold`：
 
 - **域是通用引擎**：`createWorkTask` 允许给任何未收口的阶段落任务（"计划先落任务、开工归驱动器"）。
@@ -148,7 +149,7 @@ ln -sfn <repo>/workprocess ~/.dsh/profiles/desktop/node_modules/workprocess
 ## 测试
 
 ```bash
-pnpm test   # 全仓 255 条；本包 122 条：装配面 / 域声明与内核校验 / 归属缺省 / 真人判定 /
+pnpm test   # 全仓 282 条；本包 128 条：装配面 / 域声明与内核校验 / 归属缺省 / 真人判定 /
             #   空闲边界（开工·auto 收口·running 不动手）/ 续跑投递（自署来源·去重·上限刹车·门槛两处同值）/ **阶段规划轮** / **收口确认轮** /
-            #   服务面 ctx.workprocess（view / pauseActive / resumePaused / discard 幂等）/ 内核（含"域有意允许提前建任务"）
+            #   服务面 ctx.workprocess（view / pauseActive / resumePaused / discard 幂等 / **逐任务回合账 + resume 追加预算**）/ 内核（含"域有意允许提前建任务"）
 ```

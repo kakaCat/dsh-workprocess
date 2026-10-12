@@ -82,7 +82,7 @@ describe('端到端 · 一条三段流程（两层模型）', () => {
     const trainEarly = await human.updateWorkstage.execute({ scope: 'ws-a', stage_key: 'train', action: 'done' })
     expect(String(trainEarly.reason)).toContain('不是 active')
     expect((await agent.updateWorkstage.execute({ scope: 'ws-a', stage_key: 'prep', action: 'done' })).code)
-      .toBe('WORK_NO_PERMISSION')
+      .toBe('WORK_TOOL_AUTHORITY_REQUIRED')
 
     // ④ 逐阶段：开工（驱动器的动作）→ 建两个任务 → 一张完成还不许收口 → 两张都完成 → 由人确认
     for (const stage of ['prep', 'train', 'release']) {

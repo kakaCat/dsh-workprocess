@@ -92,11 +92,63 @@ describe('\`/work\` · 语法与声明（与 /goal 逐字同形）', () => {
     const create = createInstruction('修掉登录偶发 500')
     expect(create).toContain('修掉登录偶发 500')
     expect(create).toContain('create_workstage')
-    expect(create).toContain('自己拆阶段')
+    expect(create).toContain('自己拆')
     expect(create).not.toContain('prep')      // 命令不替模型猜阶段
     const edit = editInstruction('改成另一件事')
     expect(edit).toContain('update_workstage')
     expect(edit).toContain('原样保留')
+  })
+
+  it('建成指令要**教"怎么算好"**（范本 `renderGoalRoundPrompt` 的精髓：工作方式与质量判据）', () => {
+    // 范本里有整句的纪律："treat the current workspace, tool results, and durable session state as
+    // authoritative; inspect them instead of assuming earlier narration is still current…verify the result"。
+    // 本面照此给三条：先看现状 / 每段能收口 / 判据别人照着能跑。
+    const text = createInstruction('修掉登录偶发 500')
+    expect(text).toContain('先看工作区与会话里')          // ① 现状是权威，别照抄旧叙述
+    expect(text).toContain('别按早先的叙述假设')
+    expect(text).toContain('能收口的边界')                // ② 阶段粒度的判据
+    expect(text).toContain('别人照着能跑的判据')          // ③ done_criteria 的质量
+    expect(text).toContain('几段由你定')                  // ④ 段数由 agent 定（不写死数量）
+  })
+
+  it('建成指令**不替工具 schema 说话**：字段清单与取值范围归 `create_workstage` 的参数描述', () => {
+    // 投递里抄一份 schema = 给 schema 建一个会过期的副本（上一版就是这么写的）。
+    const text = createInstruction('修掉登录偶发 500')
+    expect(text).not.toContain('[{ key, statement')   // schema 里的形状字面量
+    expect(text).not.toContain('四个字段')
+    expect(text).not.toContain('stage_key')           // 建任务挂哪一段：照 schema 里参数描述来
+    expect(text).not.toContain('缺省 `human`')        // 缺省值也归 schema
+    // 但"要不要人点头"这个**判断口径**是 schema 说不出来的，必须留在投递里。
+    expect(text).toContain('要不要人点头')
+  })
+
+  it('建成指令必带**停手条件**：这一轮只建、不要动手做（否则任务轮被跳过，预算与门槛形同虚设）', () => {
+    const text = createInstruction('修掉登录偶发 500')
+    expect(text).toContain('不要动手')
+    expect(text).toContain('停手')
+    expect(text).toContain('任务轮')                  // 说明"活"由哪一轮来干（理由一行）
+    // 反面：不能反过来催它"建完就开工"——真机踩过（规划轮曾这么写，rounds.started 一路是 0）。
+    expect(text).not.toContain('建完直接动手')
+    expect(text).not.toContain('建完再做')
+  })
+
+  it('两条指令都不复述策略段、也不交代"这是人敲的命令"（授权面读的是消息来源，不是正文）', () => {
+    for (const text of [createInstruction('x'), editInstruction('x')]) {
+      expect(text).not.toContain('阶段严格串行')      // 策略段已有
+      expect(text).not.toContain('会被工具拒')        // 策略段已有（工具面那条纪律）
+      expect(text).not.toContain('输入框')            // 来源自署 user，正文不必交代
+      expect(text).not.toContain('真人专属')          // 授权口径不在投递里讲
+      expect(text).not.toContain('## ')               // 形状照范本：数据行 + 一段散文，不用标题
+      expect(text.length, '指令是**一次**进上下文，别写成小作文').toBeLessThan(420)
+    }
+  })
+
+  it('改目标指令：先落目标（原样保留），重排是**条件动作**，并给停手条件', () => {
+    const text = editInstruction('改成另一件事')
+    expect(text).toContain('action: "edit"')
+    expect(text).toContain('原样保留')
+    expect(text).toContain('重排')
+    expect(text).toContain('停手')
   })
 })
 
@@ -108,7 +160,8 @@ describe('\`/work\` · 排版（人看的）', () => {
       { key: 'fix', statement: '修根因', doneCriteria: [], state: 'pending', tasks: [], closePolicy: 'auto' },
     ],
     currentStageKey: 'repro',
-    roundsStarted: 2,
+    roundsStarted: 2,        // 全流程累计（跨任务）
+    taskRounds: 1,           // 当前任务自己花掉的（预算按任务计）
     maxRounds: 20,
   }
 
@@ -119,7 +172,7 @@ describe('\`/work\` · 排版（人看的）', () => {
     expect(out.text).toContain('▶ repro：active（收口 human，任务 0/1）—— 复现并定位')
     expect(out.text).toContain('  fix：pending（收口 auto，任务 0/0）—— 修根因')
     expect(out.text).toContain('· wt:repro:1 active —— 抓栈')
-    expect(out.text).toContain('已准入回合：2/20')
+    expect(out.text).toContain('已准入回合：1/20（全程累计 2）')   // 本任务 / 它自己的上限（累计数另说）
     expect(out.text).toContain('自动投递续跑回合')
     expect(out.text).toContain('/work pause')
     expect(out.text).toContain('/work edit <目标>')

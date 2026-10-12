@@ -37,16 +37,17 @@ export const WORK_POLICY_SECTION = 'tool:workprocess'
  */
 export function workPolicyText(blockedAfter: number): string {
   return [
-    '## workprocess（两层工作模型：流程 → 阶段 → 任务）',
+    '## workprocess（一条流程 = 一个目标；阶段串行，阶段下挂任务）',
     '- **阶段严格串行**：前序阶段全部收口后才轮到下一阶段；不要越阶段开工，也不要提前给后续阶段建任务',
-    '  （后者会被工具拒：`WORK_NOT_CURRENT_STAGE`——留到它成为当前阶段再拆）。',
+    '  （后者会被工具拒：`WORK_TOOL_NOT_CURRENT_STAGE`——留到它成为当前阶段再拆）。',
     '- **阶段开工不是你的动作**：串行门放行后由驱动器在空闲边界落；你只管任务（`create_worktask` / `update_worktask`）。',
-    '- **每个阶段开始时驱动器会提醒你规划**该阶段的任务（1–3 个、写成可核验的陈述）。',
+    '- **每个阶段开始时驱动器会提醒你规划**该阶段的任务（写成可核验的陈述；拆几个由你定）。',
     '- **收口策略决定谁落 done**：`human`（缺省）——你**只提议**，由人确认（agent 自写会被拒）；',
     '  `auto`——任务全达成后由驱动器自动收口，你不要自己写。',
-    '- **任务有回合预算**（`max_rounds`，缺省由配置兜底）：到顶会落盘 block，等人裁；不要靠反复重试绕过它。',
-    '- **落 block 有门槛**：至少撑过 ' + String(blockedAfter) + ' 轮（`rounds.started`）才允许宣告"被挡住"——第一轮遇到难处就停手',
-    '  会被拒（真人直接发起不受此限）。到顶被内核落 block 之后，恢复要人来：`update_worktask action=resume`。',
+    '- **任务有回合预算**（`max_rounds`，缺省由配置兜底）：到顶由内核落盘 block、等人裁'
+      + '（恢复要人来：`update_worktask action=resume`）；不要靠反复重试绕过它。',
+    '- **落 block 有门槛**（与预算到顶是两件事）：在**这个任务上**至少撑过 ' + String(blockedAfter) + ' 轮（该任务的回合账）才允许宣告"被挡住"——'
+      + '第一轮遇到难处就停手会被拒（真人直接发起不受此限）。',
     '- 自动续跑回合会以一条带 `<workprocess_round>` / `<workprocess_plan>` / `<workprocess_ask>` 语义的',
     '  指令出现（来源自署 `work`）：只做那一轮说的事，做完停手，下一轮由驱动器投递。',
     '- **收口是写库、不投轮**：所以终局会专门投一条 `<workprocess_done>`（流程落幕）或',
@@ -79,6 +80,14 @@ export interface WorkToolConfig {
    * `blockedAfterConsecutiveRounds`）。真人直接发起不受此限。
    */
   readonly blockedAfterRounds?: number
+  /**
+   * 浏览器只读数据面**额外允许的 Host**（缺省空 = 只认 loopback：`localhost` / `127.0.0.1` / `::1`）。
+   *
+   * 这条面读的是本机流程数据，故默认只服务本机：从局域网地址 / 隧道域名 / 反代域名打开的界面，
+   * 数据面会 403 并在消息里点名本配置项——把该主机名（可带端口，如 `mybox.lan:8080`）写进来即可；
+   * `'*'` = 全放行（自己清楚暴露面时用）。跨源与跨站请求**不因此放行**（Origin 仍须与 Host 同源）。
+   */
+  readonly apiHosts?: readonly string[]
 }
 
 /** 登记顺序（= 登记表顺序，稳定：日志与快照可比）。 */
@@ -108,7 +117,11 @@ export function apply(ctx: Context, config?: WorkToolConfig): void {
     ctx.tools.register(factory(deps) as never)
   }
   // 浏览器只读数据面（惰性注入 webServer；宿主没有 web 载体时零行为）。
-  registerWorkprocessApi(ctx, deps.domain)
+  // 访问判据：默认只认 loopback 主机 + 同源页面（见 http.ts 的 checkApiAccess）；
+  // 要从别的地址访问，把主机名写进 `apiHosts`。
+  registerWorkprocessApi(ctx, deps.domain, {
+    ...(config?.apiHosts === undefined ? {} : { hosts: config.apiHosts }),
+  })
   if (config?.policySection !== false) {
     try {
       ctx.systemPrompt?.section({
@@ -126,5 +139,6 @@ export function apply(ctx: Context, config?: WorkToolConfig): void {
 //#endregion
 
 export * from './authority.js'
+export * from './codes.js'
 export * from './tools.js'
 export * from './http.js'

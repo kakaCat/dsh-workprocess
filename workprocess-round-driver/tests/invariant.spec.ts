@@ -93,7 +93,7 @@ describe('驱动器不变量伴生插件（宿主 goal-round-driver invariant �
   // ── 任务轮 ──────────────────────────────────────────────────
   it('干净的任务轮：内容与重建载荷逐字节一致 ⇒ 放行', async () => {
     const { process, taskId } = await withActiveTask()
-    const delivery = roundDeliveryOf(process, taskId, 0)!
+    const delivery = roundDeliveryOf(process, taskId, 0, DEFAULT_MAX_ROUNDS)!
     const event = messageOf({
       processId: process.id, stageKey: 'prep', taskId,
       revision: delivery.revision, round: delivery.round, maxRounds: delivery.maxRounds,
@@ -121,7 +121,7 @@ describe('驱动器不变量伴生插件（宿主 goal-round-driver invariant �
 
   it('篡改内容 ⇒ 点名（伪造 / 手搓的自动回合）', async () => {
     const { process, taskId } = await withActiveTask()
-    const delivery = roundDeliveryOf(process, taskId, 0)!
+    const delivery = roundDeliveryOf(process, taskId, 0, DEFAULT_MAX_ROUNDS)!
     const event = messageOf({
       processId: process.id, stageKey: 'prep', taskId,
       revision: delivery.revision, round: delivery.round, maxRounds: delivery.maxRounds,
@@ -132,7 +132,7 @@ describe('驱动器不变量伴生插件（宿主 goal-round-driver invariant �
 
   it('来源自称的轮次与内容不符（改写 round 却没改提示词）⇒ 内容比对拦住', async () => {
     const { process, taskId } = await withActiveTask()
-    const delivery = roundDeliveryOf(process, taskId, 0)!
+    const delivery = roundDeliveryOf(process, taskId, 0, DEFAULT_MAX_ROUNDS)!
     const event = messageOf({
       processId: process.id, stageKey: 'prep', taskId,
       revision: delivery.revision, round: (delivery.round ?? 0) + 1, maxRounds: delivery.maxRounds,
@@ -143,7 +143,7 @@ describe('驱动器不变量伴生插件（宿主 goal-round-driver invariant �
 
   it('修订已前进（旧轮次）⇒ 点名：无法从最新快照重建', async () => {
     const { deps, process, taskId } = await withActiveTask()
-    const delivery = roundDeliveryOf(process, taskId, 0)!
+    const delivery = roundDeliveryOf(process, taskId, 0, DEFAULT_MAX_ROUNDS)!
     const event = messageOf({
       processId: process.id, stageKey: 'prep', taskId,
       revision: delivery.revision, round: delivery.round, maxRounds: delivery.maxRounds,
@@ -156,7 +156,7 @@ describe('驱动器不变量伴生插件（宿主 goal-round-driver invariant �
 
   it('processId 与归属流程不符 ⇒ 点名', async () => {
     const { process, taskId } = await withActiveTask()
-    const delivery = roundDeliveryOf(process, taskId, 0)!
+    const delivery = roundDeliveryOf(process, taskId, 0, DEFAULT_MAX_ROUNDS)!
     const event = messageOf({
       processId: 'wp:other', stageKey: 'prep', taskId,
       revision: delivery.revision, round: delivery.round, maxRounds: delivery.maxRounds,
@@ -305,7 +305,7 @@ describe('发布前校验与启动重放（internal/dispatch / sessions 面）',
 
   it('发布前拦下伪造的 work 回合（域状态对得上、内容被改）⇒ 点名', async () => {
     const { process, taskId } = await withActiveTask()
-    const delivery = roundDeliveryOf(process, taskId, 0)!
+    const delivery = roundDeliveryOf(process, taskId, 0, DEFAULT_MAX_ROUNDS)!
     const h = harness()
     h.processes.set(SCOPE, process)
     apply(h.ctx as never)
@@ -320,7 +320,7 @@ describe('发布前校验与启动重放（internal/dispatch / sessions 面）',
 
   it('启动重放：锚还成立的消息内容不符 ⇒ 装载那一刻点名', async () => {
     const { process, taskId } = await withActiveTask()
-    const delivery = roundDeliveryOf(process, taskId, 0)!
+    const delivery = roundDeliveryOf(process, taskId, 0, DEFAULT_MAX_ROUNDS)!
     const tampered = messageOf({
       processId: process.id, stageKey: 'prep', taskId,
       revision: delivery.revision, round: delivery.round, maxRounds: delivery.maxRounds,
@@ -335,7 +335,7 @@ describe('发布前校验与启动重放（internal/dispatch / sessions 面）',
 
   it('启动重放：修订已前进的旧轮次结构上无法重建 ⇒ 跳过（如实承认的覆盖边界）', async () => {
     const { deps, process, taskId } = await withActiveTask()
-    const oldDelivery = roundDeliveryOf(process, taskId, 0)!
+    const oldDelivery = roundDeliveryOf(process, taskId, 0, DEFAULT_MAX_ROUNDS)!
     const oldMessage = messageOf({
       processId: process.id, stageKey: 'prep', taskId,
       revision: oldDelivery.revision, round: oldDelivery.round, maxRounds: oldDelivery.maxRounds,

@@ -116,7 +116,7 @@ def report(scope, record, rows):
     print(f"流程 scope : {scope}")
     print(f"目标       : {process.get('objective')}")
     print(f"修订/收口  : revision={process.get('revision')} closedAt={process.get('closedAt')} "
-          f"耐久回合计数={record['rounds']}")
+          f"回合账（累计 started + 逐任务）= {record['rounds']}")
     print("阶段       :")
     for stage in process.get('stages', []):
         tasks = stage.get('tasks', [])
@@ -141,12 +141,17 @@ def report(scope, record, rows):
     # 信息项：出现了是好事，没出现不算故障（规划轮只在"阶段空着"的边界才投）。
     stages = process.get('stages', [])
     kinds = [row['kind'] for row in rows]
-    rounds = [row['round'] for row in rows if isinstance(row['round'], int)]
+    # 回合号**按任务**从 1 起（回合预算按任务计）：跨任务比"单调不重复"是错的——每个任务都从第 1 轮开始。
+    per_task = {}
+    for row in rows:
+        if isinstance(row['round'], int):
+            per_task.setdefault(row['task'] or '（无任务）', []).append(row['round'])
     unfinished = [s.get('key') for s in stages if s.get('state') != 'done']
     checks = [
         ('流程有阶段表', bool(stages)),
         ('驱动器投过轮（来源自署 work）', bool(rows)),
-        ('回合号单调不重复', not rounds or rounds == sorted(set(rounds))),
+        ('每个任务的回合号从 1 起、不重不漏',
+         all(sorted(v) == list(range(1, len(v) + 1)) for v in per_task.values())),
         (f'所有阶段已收口（未收口：{unfinished or "无"}）', not unfinished),
         ('流程收口（closedAt 已落）', process.get('closedAt') is not None),
     ]

@@ -100,3 +100,47 @@ describe('"已经问过"的记号（服务面）', () => {
     expect(await service.markAsked('session-1', 'plan', 'repro', 1)).toBe(false)
   })
 })
+
+describe('回合账（服务面）：预算按任务计 + 人 resume 追加一份预算', () => {
+  it('observeRound 按任务记；同一回合重复观察零写入；累计数按增量前进', async () => {
+    const { service } = await seeded()
+    await service.observeRound('session-1', 1, 'wt:repro:1')
+    expect(await service.taskRounds('session-1')).toEqual({ 'wt:repro:1': { rounds: 1, grants: 0 } })
+    expect(await service.roundsStarted('session-1')).toBe(1)
+    await service.observeRound('session-1', 1, 'wt:repro:1')          // 重复观察：零写入
+    expect(await service.roundsStarted('session-1')).toBe(1)
+    await service.observeRound('session-1', 2, 'wt:repro:1')
+    expect(await service.roundsStarted('session-1')).toBe(2)
+    // 另一个任务从自己的第 1 轮起：轮号跨任务不可比，**累计数**才是"整条流程真跑过几轮"。
+    await service.observeRound('session-1', 1, 'wt:fix:1')
+    expect(await service.taskRounds('session-1')).toEqual({
+      'wt:repro:1': { rounds: 2, grants: 0 },
+      'wt:fix:1': { rounds: 1, grants: 0 },
+    })
+    expect(await service.roundsStarted('session-1')).toBe(3)
+  })
+
+  it('resume 一个 blocked 任务 ⇒ 追加一份预算（否则一开拍又到顶）；paused 任务只是继续', async () => {
+    const { service } = await seeded()
+    await service.pauseTask('session-1', 'wt:repro:1')
+    expect(await service.resumeTask('session-1', 'wt:repro:1')).toBe(true)
+    expect(await service.taskRounds('session-1')).toEqual({})          // 没有追加
+    await service.blockTask('session-1', 'wt:repro:1', { code: 'round-limit', message: '到顶' })
+    expect(await service.resumeTask('session-1', 'wt:repro:1')).toBe(true)
+    expect((await service.taskRounds('session-1'))['wt:repro:1']).toEqual({ rounds: 0, grants: 1 })
+  })
+
+  it('discard 把整本回合账带走（累计数 / 逐任务账 / 续跑许可）：重建的流程不继承上一个对象的结论', async () => {
+    const { store, service } = await seeded()
+    await service.observeRound('session-1', 2, 'wt:repro:1')
+    // 真机坑：宿主重启 ⇒ resume 自动落 disarmed；随后重建的流程若继承它，就一开就静默停住。
+    await service.setActivation('session-1', 'disarmed')
+    expect(await service.discard(agent)).toBe(true)
+    await createWorkProcess({ store, now: () => 1_000 }, 'session-1', {
+      objective: 'x', stages: [{ key: 's', statement: 's' }],
+    })
+    expect(await service.taskRounds('session-1')).toEqual({})
+    expect(await service.roundsStarted('session-1')).toBeUndefined()   // 缺失 = 没记录过（不是 0：重建后没有上一个对象的读数）
+    expect(await service.activation('session-1')).toBe('armed')
+  })
+})

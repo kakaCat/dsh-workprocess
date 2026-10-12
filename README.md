@@ -19,7 +19,7 @@ workProcess  id=wp:<scope>   revision（两层的写共用同一个 CAS）
 │  stages[]  ← 数组顺序 = 串行顺序
 ├── workStage  key=prep      state: pending → active → done；closePolicy: human / auto（收口由谁落）
 │   ├── workTask  wt:prep:1  phase: active / paused / blocked / complete
-│   └── workTask  wt:prep:2  + objective / revision / maxRounds / blockedReason
+│   └── workTask  wt:prep:2  + objective / revision / maxRounds / blockedReason / **自己的回合账**
 ├── workStage  key=train     ← 串行门：prep 不全 done 就不许开工
 └── workStage  key=release
 ```
@@ -45,7 +45,7 @@ workProcess  id=wp:<scope>   revision（两层的写共用同一个 CAS）
 
 | 包 | 作用 | 依赖 |
 |---|---|---|
-| `workprocess` | **领域插件**（对齐宿主 `dsh-goal`，含不变量伴生入口 `workprocess/invariant`）：内核（两层快照 / 事件表 / 折叠 / 七条不变量 / 严格解码 / 服务：CAS + 幂等 + 身份分配）＋ 归属记录落宿主存储域（`ctx.storageDomain`，域由本插件**独占**打开）/ 回合边界驱动（开工 · auto 收口 · 落盘 block · **续跑投递**）/ 提供 **`ctx.workprocess`**（域 API：读 + 全部写动词 + 人机干预）/ 发 **`work/changed`** typed 宿主事件（对齐 `goal/changed`）。内核纯度守在**模块边界**（内核六文件零外部 import，由 `tests/kernel-purity.spec.ts` 机械守卫） | `workprocess-round-driver`、`@deepseek-ai/dsh-storage-domain`、`@deepseek-ai/dsh-llm`（cordis 与 zod 走 peer：前者是宿主单例符号包，后者是官方存储域钦定 schema 语言——都由官方栈提供） |
+| `workprocess` | **领域插件**（对齐宿主 `dsh-goal`，含不变量伴生入口 `workprocess/invariant`）：内核（两层快照 / 事件表 / 折叠 / 六条不变量 / 严格解码 / 服务：CAS + 幂等 + 身份分配）＋ 归属记录落宿主存储域（`ctx.storageDomain`，域由本插件**独占**打开）/ 提供 **`ctx.workprocess`**（域 API：读 + 全部写动词 + 人机干预 + 逐任务回合账）/ 发 **`work/changed`** typed 宿主事件（对齐 `goal/changed`）。内核纯度守在**模块边界**（内核六文件零外部 import，由 `tests/kernel-purity.spec.ts` 机械守卫）。**驱动器不在这里**（在下一个包；本包不 import 它） | `@deepseek-ai/dsh-storage-domain`（cordis 与 zod 走 peer：前者是宿主单例符号包，后者是官方存储域钦定 schema 语言——都由官方栈提供） |
 | `workprocess-round-driver` | 回合驱动器：纯决策树（闸 → 串行门 → 相位机）+ 提示词渲染 + 不变量伴生入口 `workprocess-round-driver/invariant`（自动回合消息与重建载荷逐字节比对） | `workprocess` |
 | `tool-workprocess` | **工具插件**（对齐宿主 `dsh-tool-goal`：`name`/`inject`/`apply(ctx, config)`）：`get_/create_/update_*` 六个工具 + 授权判据 + 通告（`exec.deferContext`）+ 人机确认（`ctx.userQuestions`）+ 常驻策略段；数据只经 **`ctx.workprocess`** | `workprocess`、`@deepseek-ai/dsh-tools`、`@deepseek-ai/dsh-llm`（cordis/dsh-agent/dsh-session-projection/dsh-system-prompt 走 peer，type-only） |
 | `command-workprocess` | **命令行插件** `/work`（`<目标>` 让 agent 拆阶段建流程 · `edit <目标>` 改目标 · `pause` / `resume` / `clear`）——独立包、独立装载行（对齐宿主 `dsh-command-goal`），只消费 `ctx.workprocess` 的四个人机干预方法，**结构化动作投话给 agent 做** | `workprocess`（类型）、`@deepseek-ai/dsh-llm`（cordis/dsh-commands 走 peer，type-only） |
@@ -83,7 +83,7 @@ client/*.tsx ──────────────── tsdown ─▶ lib/
 | 产物 | tsdown 按入口打成 `lib/index.js`（+ `lib/invariant.js`） | 同形（目录名仍是 `dist/`） | 已对齐 |
 | 测试命名 | `*.spec.ts` | `*.spec.ts` | 已对齐 |
 | 状态真源 | **会话日志**（`session.append('goal/change')` + 会话投影） | 宿主**存储域**（`ctx.storageDomain`） | **学不了**：仓外插件 append 自定义事件没有 `ignorable` 标记，持久化读路径会拒绝解释整条会话日志 |
-| 客户端面 | 会话投影 → 客户端 `useProjection('goal')` | 自建只读数据面（HTTP + SSE） | **学不了**：投影只吃会话事件；转发白名单是宿主自有文件 |
+| 客户端面 | 会话投影 → 客户端 `useProjection('goal')` | 自建只读数据面（HTTP + SSE，**默认只服务本机**：Host 须 loopback + Origin 须同源，见 `tool-workprocess/README.md`） | **学不了**：投影只吃会话事件；转发白名单是宿主自有文件 |
 | 装载行 | 写在宿主 `packages/bundle/base`（仓内 bundle） | 各包自带 `dsh.bundle.patch` | **学不了**：改不了宿主仓内的 bundle |
 
 ## 快速开始
@@ -91,9 +91,9 @@ client/*.tsx ──────────────── tsdown ─▶ lib/
 ```bash
 pnpm install
 pnpm typecheck
-pnpm test          # 243 条（17 个 *.spec.ts）：领域插件 120（内核 58 · 插件 35 · 伴生件 9 · 服务 5
-                   #        · 视图 4 · 客户端 7 · 内核纯度 2）/ 回合驱动器 66（决策 25 · 插件 14
-                   #        · 伴生件 19 · 循环 8）/ 工具面 44（登记表+授权 28 · 工具壳 5 · HTTP 5 · 端到端 2 · 插件 4）/ 命令行 13
+pnpm test          # 282 条（17 个 *.spec.ts）：领域插件 128（内核 59 · 插件 38 · 伴生件 9 · 服务 8
+                   #        · 视图 4 · 客户端 7 · 内核纯度 3）/ 回合驱动器 72（决策 26 · 插件 14
+                   #        · 伴生件 20 · 循环 12）/ 工具面 64（登记表+授权 28 · 工具壳 14 · HTTP 13 · 端到端 2 · 插件 5）/ 命令行 18
                    #   ↑ `pretest` 先跑 `workprocess` 的 `build:client`：客户端契约测试读的是产物 lib/client.js
 pnpm build         # tsc 出中间态 dist/types/（逐模块 + .d.ts），tsdown 按**装载入口**收成
                    # dist/index.js（+ 伴生件 dist/invariant.js）——宿主加载的就是那一个文件
@@ -153,11 +153,29 @@ python3 scripts/observe-workflow.py <会话 id>   # 指定会话
 
 | 谁落 | 门槛 | 恢复 |
 |---|---|---|
-| **agent**（自治回合） | 至少跑满 **3 轮**（`rounds.started`，耐久）才允许宣告"被挡住"；不够 ⇒ 拒并给 `WORK_TOOL_BLOCK_THRESHOLD`（对齐 goal 的 `GOAL_TOOL_BLOCK_THRESHOLD`） | `update_worktask action=resume`（**真人专属**）；或 `update_workstage action=arm` 放回续跑许可 |
+| **agent**（自治回合） | 在**这个任务上**跑满 **3 轮**（该任务的回合账，耐久）才允许宣告"被挡住"；不够 ⇒ 拒并给 `WORK_TOOL_BLOCK_THRESHOLD`（对齐 goal 的 `GOAL_TOOL_BLOCK_THRESHOLD`） | `update_worktask action=resume`（**真人专属**）；或 `update_workstage action=arm` 放回续跑许可 |
 | **真人**（直接发起） | 无门槛（人在场，随时可以叫停） | 同上 |
-| **内核**（回合预算到顶） | 到顶即落盘 block（`round-limit`），不需要"连续"判据 | 同上 |
+| **内核**（回合预算到顶） | 到顶即落盘 block（`round-limit`），不需要"连续"判据 | `update_worktask action=resume`——**resume 一个 blocked 任务会追加一份预算**（见下节），否则放回 `active` 下一拍又到顶 |
 
 阈值可配：工具插件 `blockedAfterRounds`（缺省 3）。
+
+## 回合预算：**按任务计**（不是一个流程一个数）
+
+| 读数 | 落点 | 谁在用 |
+|---|---|---|
+| 任务的回合账 | `rounds.tasks[<taskId>] = { rounds, grants }` | **回合上限闸**（`decideWorkRound` 比 `used` vs 任务自己的 `maxRounds`）；**落 block 的轮数门槛**（"在这个任务上撑满 N 轮"）；轮号（`第 N 轮`，按任务从 1 起） |
+| 全流程累计数 | `rounds.started`（按增量累加，跨任务） | 只有一个读者：`/work` 的"全程累计"读数（"整条流程真跑过几轮"） |
+
+- **生效上限 = 任务基础上限 × (1 + grants)**（`effectiveCapOf`，唯一一处换算）：`grants` 是**人追加的预算份数**，
+  人 `resume` 一个 `blocked` 任务时 +1（`paused` 任务 resume 只是继续，不追加）。不这么算，
+  `resume` 把任务放回 `active`、下一拍又判到顶——恢复路径等于没做。
+- **轮号跨任务不可比**（每个任务从第 1 轮起），所以任何"这个任务撑满 N 轮"的门槛都要读**该任务的账**，
+  不能读全流程累计数、更不能读轮号。
+- 修的是这样一类缺陷（**不是真机暴露的，是评审 + 探针**）：早先只有一个全流程计数、却拿它比任务上限
+  ⇒ 第二个任务继承前一个花掉的额度，一开拍就判到顶（阶段越多越明显），而 README 写的恢复路径
+  `resume` 又是空头支票。真机验收那次没炸，只因任务都在规划轮内做完、`rounds.started` 没前进。
+  防回归：驱动器环里有"前一段花光额度不妨碍下一段"+ "`tickWorkprocess` 实测：累计数不吃新任务额度"
+  两条（把旧口径放回去，它们会红）。
 
 ## 审计（`ctx.workprocess.audit()` + `scripts/audit-storage.mjs`）
 
@@ -165,25 +183,31 @@ python3 scripts/observe-workflow.py <会话 id>   # 指定会话
 |---|---|
 | 快照形状 / 阶段串行 / id 唯一性 / 墓碑一致性 | **存储层 schema 的 `superRefine`**（就是内核严格解码器）——写时拒、载入时由存储层报 |
 | 归属边界（`workProcess.id` == `wp:<记录键>`） | **审计**（schema 不查这条） |
-| `rounds.started` 非负安全整数 / `activation` 合法 | **审计**（`z.number()` 会放过负数与小数） |
+| `rounds.started` 与逐任务回合账（`rounds.tasks`）是非负安全整数 / `activation` 合法 | **审计**（`z.number()` 会放过负数与小数） |
 
 所以审计的增量是**记录级那两件**，不是"抓坏快照"（那件在更早的一层就被拦了）。
 
 真机可验的形态是命令（不需要宿主、不需要服务、不需要重启）：
 
 ```bash
-node scripts/audit-storage.mjs            # 审 ~/.dsh/storages/workprocess.json，逐条打勾
+pnpm build                                 # 先构建（脚本 import 的是 dist/index.js，与宿主加载的是同一份）
+node scripts/audit-storage.mjs             # 审 ~/.dsh/storages/workprocess.json，逐条打勾
 node scripts/audit-storage.mjs <文件>      # 审指定文件（拿副本验证它真会抓问题）
 ```
 
-进程内那份（装载时自审 + `ctx.workprocess.audit()`）保留：装载时发现即记一行警告（不阻断装载）。
+**判据只有一份**：记录级规则抽成内核的纯函数 `auditWorkRecord`，进程内那份（装载时自审 +
+`ctx.workprocess.audit()`）与这个脚本都调它——脚本曾经抄过一份规则，抄漏了"逐任务回合账"那条
+（头注释还写着"与内核/服务同口径"）。同一判据三处副本必然漂移，故现在只留调用方。
+
+进程内那份保留：装载时发现即记一行警告（不阻断装载）；**有问题的记录不播种**进不变量伴生件的影子状态
+（读起来就不可信，别拿它当基准）。
 
 ## 真机才暴露的三个坑（都已修 + 防回归测试）
 
 | 坑 | 症状 | 修法 |
 |---|---|---|
 | 规划轮把任务轮挤掉 | 两阶段跑完 `rounds.started` 仍是 0 ⇒ 回合预算与 block 门槛形同虚设 | 规划轮只建任务、不动手（`458f4f4`） |
-| 重启后新建流程继承残留的 `disarmed` | 新流程一开就静默停住 | 人发起的新建把许可打开；自治回合不动这个开关（`3a3b2f5`） |
+| 重启后新建流程继承残留的 `disarmed` | 新流程一开就静默停住 | **域层**：`discard` 把整本回合账（含许可）一起摘掉（记录里留下的任何一格都是上一个对象的结论）；工具面兜底：人发起的新建再把许可打开（老记录也纠正），自治回合不动这个开关（`3a3b2f5` + 本轮） |
 | 投递即消耗（预约撤得太早） | 任务轮与 blocked 收束轮**同时**到手：预算被烧光、agent 一次手都没动 | 撤预约只在 `agent/status → idle`（真·空闲转换）里做；`drive()` 见预约挂着就直接返回（宿主同款） |
 
 ## 两处去重记号都是耐久的
@@ -191,7 +215,7 @@ node scripts/audit-storage.mjs <文件>      # 审指定文件（拿副本验证
 | 记号 | 落点 | 作废条件 |
 |---|---|---|
 | "已经问过"（规划轮 / 收口确认轮，各一次） | 归属记录 `asked.{plan,ask} = { key, revision }` | 流程修订一变即作废；丢弃流程时清 |
-| 续跑许可（`activation`） | 归属记录 `rounds.activation` | 会话 `resume` 自动置 `disarmed`；人 `arm` 放回 |
+| 续跑许可（`activation`） | 归属记录 `rounds.activation` | 会话 `resume` 自动置 `disarmed`；人 `arm` 放回；**丢弃流程**时整格随账一起没（下一条流程不继承） |
 
 于是"重启后重复打扰"在两处都不存在：同一状态不重问（修订未变），流程一旦往前走该问就问。
 
@@ -222,7 +246,11 @@ node scripts/audit-storage.mjs <文件>      # 审指定文件（拿副本验证
 ## 几条已定的设计决定
 
 - **阶段严格串行**：唯一合法形态 `[done…][active?][pending…]`——跳阶段 / 两个阶段并行 / 后阶段先收口一律拒；
-  **不做阶段间 DAG**。被禁的并行只在**阶段之间**：阶段内的多个任务是并列的。
+  **不做阶段间 DAG**。
+- **阶段内的多个任务是"轮流待跑"，不是并发跑**（口径更正）：一条空闲边界只投**一条**消息，驱动器的
+  选择规则是"数组里第一个 `active` 的任务"（先跑完前面的，才轮到后面的）——它们**各有自己的回合预算**，
+  但续跑是一轮一轮串着来的。要"同时铺开"就得先做投递并发（一次边界多条消息 = 模型同时拿到互相打架的
+  指令），那是另一件事，**本轮不做**；这条口径原先写成"阶段内的任务是并列的"，与实现不符，已改回实话。
 - **阶段收口有两条路**（逐个阶段选，`close_policy`）：`human`（缺省）= **人工确认**——agent 只提议、
   done 由人落；`auto` = **自动收口**——本阶段任务全 `complete` 后由驱动器直接落 done，阶段边界不必等人。
   两条路都要过**同一条判据**（任务非空且全 complete）：策略只决定"谁有权落"，不决定"够不够格落"
@@ -237,3 +265,7 @@ node scripts/audit-storage.mjs <文件>      # 审指定文件（拿副本验证
 - **命令行的两条路**：结构化动作（`/work <目标>`、`/work edit <目标>`）**投话给 agent** 做
   （拆阶段是判断）；机械控制（`pause` / `resume` / `clear`）命令**直接落**领域。
 - **幂等 + CAS**：`changed:false` 的调用零写入；写路径带 `revision` 时旧值即拒。
+  **CAS 与写在同一个临界区**：`store.mutate` 按 scope 串行（`get → 改草稿 → put` 中间隔着真 I/O，
+  不串行化就有两个写者各读一份旧草稿、后写的盖掉先写的——丢更新；三个写者同在一个进程里：
+  工具面 / 命令行 / 驱动器）。校验放区外时它只是装饰：并发下两个写者会双双通过。
+  防回归：`plugin.spec` 的「读-改-写是串行的」「并发同 revision 只有一个能落」两条（旧实现下双双红）。

@@ -35,7 +35,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-projection'
 import { currentStageOf, onWorkChanged, stageAllowsStart, workprocessOf } from 'workprocess'
-import type { WorkProcess, WorkprocessService, WorkTask } from 'workprocess'
+import type { WorkProcess, WorkprocessService, WorkTask, WorkTaskRounds } from 'workprocess'
 import { decideWorkRound } from './decide.js'
 import type { DecideInput, GateFacts, RoundDecision, StageFacts, WorkFacts } from './decide.js'
 import { DEFAULT_BLOCKED_AFTER_ROUNDS, renderWorkAskPrompt, renderWorkPlanPrompt, renderWorkRoundPrompt, renderWorkWrapupPrompt } from './prompt.js'
@@ -80,14 +80,26 @@ declare module '@deepseek-ai/dsh-llm' {
 /** 任务没写 `max_rounds` 时的**生效上限**（缺省 20）：自动续跑必须有刹车，不许默认无限。 */
 export const DEFAULT_MAX_ROUNDS = 20
 
-/** 一个任务的生效回合上限（任务自己写的优先，否则兜底）。 */
+/** 一个任务的**基础**回合上限（任务自己写的优先，否则兜底）。 */
 export function effectiveMaxRoundsOf(task: WorkTask, fallback = DEFAULT_MAX_ROUNDS): number {
   return task.maxRounds ?? fallback
 }
 
-/** 把流程快照投影成驱动拍要读的**窄事实**。 */
+/**
+ * **生效上限** = 基础上限 × (1 + 人追加的预算份数)。
+ *
+ * 人被 `round-limit` 挡下后 `resume` 一次就 +1 份（见服务面 `resumeTask`）：不这么算，
+ * `resume` 把任务放回 `active`、下一拍又判到顶——恢复路径等于没做。份数由归属记录给，
+ * 折算在这里（唯一一处），免得驱动器与工具面各算一套。
+ */
+export function effectiveCapOf(base: number, grants = 0): number {
+  return base * (1 + Math.max(0, grants))
+}
+
+/** 把流程快照投影成驱动拍要读的**窄事实**（`taskRounds` = 归属记录里的逐任务回合账）。 */
 export function factsOf(
   process: WorkProcess, sessionKey?: string, fallbackMaxRounds = DEFAULT_MAX_ROUNDS,
+  taskRounds?: Readonly<Record<string, WorkTaskRounds>>,
 ): WorkFacts {
   const current = currentStageOf(process)
   return {
@@ -103,11 +115,16 @@ export function factsOf(
         state: current.state,
         allowsStart: stageAllowsStart(process, current.key),
         ...(current.closePolicy === undefined ? {} : { closePolicy: current.closePolicy }),
-        tasks: current.tasks.map((t) => ({
-          id: t.id, objective: t.objective, phase: t.phase, revision: t.revision,
-          // 生效上限（缺省回落）：回合上限闸靠它——否则"没写 max_rounds"就成了无限续跑。
-          maxRounds: effectiveMaxRoundsOf(t, fallbackMaxRounds),
-        })),
+        tasks: current.tasks.map((t) => {
+          const ledger = taskRounds?.[t.id]
+          return {
+            id: t.id, objective: t.objective, phase: t.phase, revision: t.revision,
+            // 生效上限（缺省回落 + 人追加的份数）：回合上限闸靠它——否则"没写 max_rounds"就成了无限续跑。
+            maxRounds: effectiveCapOf(effectiveMaxRoundsOf(t, fallbackMaxRounds), ledger?.grants),
+            // **预算按任务计**：闸比的是这个任务自己花掉的回合，不是整条流程的累计数。
+            rounds: ledger?.rounds ?? 0,
+          }
+        }),
       } satisfies StageFacts,
     }),
   }
@@ -143,8 +160,8 @@ export async function tickWorkprocess(
 ): Promise<RoundDecision | undefined> {
   const process = await deps.domain.process(scope)
   if (process === undefined) return undefined
-  const roundsStarted = await deps.domain.roundsStarted(scope)
-  const work = factsOf(process, sessionKey, deps.defaultMaxRounds ?? DEFAULT_MAX_ROUNDS)
+  const taskRounds = await deps.domain.taskRounds(scope)
+  const work = factsOf(process, sessionKey, deps.defaultMaxRounds ?? DEFAULT_MAX_ROUNDS, taskRounds)
   const planAsked = deps.stagePlanAsked
   const askAsked = deps.humanAskAsked
   const gates: GateFacts = {
@@ -165,7 +182,6 @@ export async function tickWorkprocess(
     scope: { id: scope, drivable: true },
     work,
     ...(Object.keys(gates).length === 0 ? {} : { gates }),
-    ...(roundsStarted === undefined ? {} : { roundsStarted }),
   }
   const decision = decideWorkRound(input)
   switch (decision.kind) {
@@ -216,20 +232,22 @@ export interface RoundDelivery {
 }
 
 /**
- * 造"下一轮"的载荷：`round` = 已准入回合数 + 1，提示词由 `renderWorkRoundPrompt` 渲染
- * （流程目标 / 当前阶段与判据 / 本轮任务 / 边界与停手条件）。
+ * 造"下一轮"的载荷：`round` = **该任务**已准入回合数 + 1（轮号按任务从 1 起），
+ * 提示词由 `renderWorkRoundPrompt` 渲染（流程目标 / 当前阶段与判据 / 本轮任务 / 边界与停手条件）。
  * 任务不在当前阶段 / 阶段已收口 ⇒ `undefined`（没得投）。
+ *
+ * @param rounds - 该任务已准入的回合数（归属记录的逐任务账）
+ * @param cap - 该任务的**生效**上限（基础 × (1+grants)，由调用方按 {@link effectiveCapOf} 算好）
  */
 export function roundDeliveryOf(
-  process: WorkProcess, taskId: string, roundsStarted: number,
-  fallbackMaxRounds = DEFAULT_MAX_ROUNDS, blockedAfterRounds = DEFAULT_BLOCKED_AFTER_ROUNDS,
+  process: WorkProcess, taskId: string, rounds: number, cap: number,
+  blockedAfterRounds = DEFAULT_BLOCKED_AFTER_ROUNDS,
 ): RoundDelivery | undefined {
   const stage = currentStageOf(process)
   if (stage === undefined) return undefined
   const task = stage.tasks.find((t) => t.id === taskId)
   if (task === undefined) return undefined
-  const round = roundsStarted + 1
-  const maxRounds = effectiveMaxRoundsOf(task, fallbackMaxRounds)
+  const round = rounds + 1
   const prompt = renderWorkRoundPrompt({
     processObjective: process.objective,
     stage: {
@@ -238,12 +256,12 @@ export function roundDeliveryOf(
     },
     task: { id: task.id, objective: task.objective },
     round,
-    maxRounds,
+    maxRounds: cap,
     blockedAfterRounds,
   })
   return {
     processId: process.id, taskId: task.id, stageKey: stage.key, revision: task.revision,
-    round, maxRounds, blockedAfterRounds, prompt,
+    round, maxRounds: cap, blockedAfterRounds, prompt,
   }
 }
 
@@ -418,7 +436,8 @@ interface State {
 interface SessionEventLike {
   readonly type?: string
   readonly data?: {
-    readonly source?: { readonly kind?: string; readonly round?: number }
+    /** 任务轮的来源要 `taskId` 才记得上账（**预算按任务计**）。 */
+    readonly source?: { readonly kind?: string; readonly round?: number; readonly taskId?: string }
   }
 }
 
@@ -553,8 +572,12 @@ export function apply(ctx: Context, config?: WorkRoundDriverConfig): void {
         if (!driveEnabled) return false
         const process = await domain.process(scope)
         if (process === undefined) return false
-        const roundsStarted = (await domain.roundsStarted(scope)) ?? 0
-        const delivery = roundDeliveryOf(process, decision.taskId, roundsStarted, defaultMaxRounds, blockedAfterRounds)
+        const task = currentStageOf(process)?.tasks.find((t) => t.id === decision.taskId)
+        if (task === undefined) return false
+        const ledger = (await domain.taskRounds(scope))[decision.taskId]
+        // 轮号与上限都按**这个任务**算：`round` = 它已准入的回合数 + 1，上限 = 基础 × (1+grants)。
+        const cap = effectiveCapOf(effectiveMaxRoundsOf(task, defaultMaxRounds), ledger?.grants)
+        const delivery = roundDeliveryOf(process, decision.taskId, ledger?.rounds ?? 0, cap, blockedAfterRounds)
         if (delivery === undefined) return false
         // 同一轮只投一次（`taskId:revision:round`）：宿主靠 goal 服务的耐久回合计数挡住重复，
         // 我们额外在进程内挡一道——域没变（没有 work/changed）时这一轮就是"已投出去的那一轮"。
@@ -694,12 +717,14 @@ export function apply(ctx: Context, config?: WorkRoundDriverConfig): void {
     })
   }
 
-  /** 回合被**接手**了 ⇒ 计数前进（`rounds.started`，耐久）。只有我们自署来源的回合才算。 */
+  /** 回合被**接手**了 ⇒ 计数前进（逐任务账 + 累计数，都耐久）。只有我们自署来源的回合才算。 */
   async function observeRound(scope: string, event: unknown): Promise<void> {
     const ev = event as SessionEventLike | undefined
     const source = ev?.data?.source
-    if (ev?.type !== 'user/message' || source?.kind !== 'work' || typeof source.round !== 'number') return
-    await domain.observeRound(scope, source.round)
+    // 任务轮才有 `round` 与 `taskId`（规划轮/确认轮不消耗任何任务的预算，不该计数）。
+    if (ev?.type !== 'user/message' || source?.kind !== 'work') return
+    if (typeof source.round !== 'number' || typeof source.taskId !== 'string') return
+    await domain.observeRound(scope, source.round, source.taskId)
   }
 
   ctx.effect(function* () {

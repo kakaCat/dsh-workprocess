@@ -43,7 +43,8 @@ function harness(options: {
     followup: (message: Sent): void => { sent.push(message) },
   }
   let activation = options.activation ?? 'armed'
-  let roundsStarted = 0
+  /** 逐任务回合账（与归属记录同形：预算按任务计）。 */
+  let taskRounds: Record<string, { rounds: number; grants: number }> = {}
   let asked: { plan?: { key: string; revision: number }; ask?: { key: string; revision: number } } | undefined
     = options.asked
   const disarms: string[] = []
@@ -64,8 +65,14 @@ function harness(options: {
       return true
     },
     process: async (): Promise<unknown> => process,
-    roundsStarted: async (): Promise<number> => roundsStarted,
-    observeRound: async (): Promise<void> => {},
+    roundsStarted: async (): Promise<number> =>
+      Object.values(taskRounds).reduce((sum, entry) => sum + entry.rounds, 0),
+    taskRounds: async (): Promise<typeof taskRounds> => taskRounds,
+    observeRound: async (_scope: string, round: number, taskId: string): Promise<void> => {
+      const used = taskRounds[taskId]?.rounds ?? 0
+      if (round <= used) return
+      taskRounds = { ...taskRounds, [taskId]: { rounds: round, grants: taskRounds[taskId]?.grants ?? 0 } }
+    },
     startStage: async (): Promise<boolean> => false,
     closeStage: async (): Promise<boolean> => false,
     blockTask: async (): Promise<boolean> => false,
@@ -110,7 +117,12 @@ function harness(options: {
     competing: (message: unknown) => { (agent.inbox as { nextTurn: unknown[] }).nextTurn.push(message) },
     disarms,
     marks,
-    setRounds: (n: number) => { roundsStarted = n },
+    setRounds: (n: number, taskId = 't-1') => {
+      taskRounds = { ...taskRounds, [taskId]: { rounds: n, grants: taskRounds[taskId]?.grants ?? 0 } }
+    },
+    setGrants: (n: number, taskId = 't-1') => {
+      taskRounds = { ...taskRounds, [taskId]: { rounds: taskRounds[taskId]?.rounds ?? 0, grants: n } }
+    },
     fire: async (event: string, payload: unknown): Promise<void> => {
       for (const h of handlers.get(event) ?? []) await h(payload)
       await settle()
