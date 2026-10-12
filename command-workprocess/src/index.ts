@@ -29,8 +29,21 @@
  * @module dsh-command-workprocess
  */
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { Context } from '@deepseek-ai/cordis'
+import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
 import type { WorkprocessService, WorkprocessStatus } from 'workprocess'
 import type { WorkStage, WorkTask } from 'workprocess'
+
+/**
+ * cordis 服务类型增强：`ctx.workprocess` 由 `workprocess` 插件 provide（M2 起）；
+ * 这里先声明上，apply 就能用真类型拿到服务，不再手写假 ctx 面。
+ */
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    /** workprocess 领域服务（view / discard / pauseActive / resumePaused）。 */
+    readonly workprocess: WorkprocessService
+  }
+}
 
 /** 插件名（装载行 id 同源）。 */
 export const name = 'command-workprocess'
@@ -68,17 +81,11 @@ export function parseWorkCommand(rawInput: string): WorkCommand {
   return { kind: 'create', objective: input }
 }
 
-/** 命令调用（宿主 `CommandInvocation` 的最小面）。 */
-export interface WorkCommandInvocation {
-  readonly rawInput: string
-  readonly agent: unknown
-}
+/** 命令调用（官方 `CommandInvocation` 的别名：保持本包导出面稳定）。 */
+export type WorkCommandInvocation = CommandInvocation
 
-/** 命令结果（宿主 `CommandResult` 的最小面）。 */
-export interface WorkCommandResult {
-  readonly kind: 'success' | 'error'
-  readonly text: string
-}
+/** 命令结果（官方 `CommandResult` 的别名：保持本包导出面稳定）。 */
+export type WorkCommandResult = CommandResult
 
 /** 命令要投话时的 agent 最小面（宿主 `Agent.followup`）。 */
 interface FollowupAgent {
@@ -255,29 +262,14 @@ export function workCommandHandler(service: WorkprocessService) {
   }
 }
 
-/** 命令注册面的最小形状（宿主 `ctx.commands`）。 */
-export interface WorkCommandSurface {
-  register(definition: {
-    readonly definitionId: unknown
-    readonly name: string
-    readonly description: string
-    readonly input: { readonly hint: string; readonly attachments?: boolean }
-    readonly handler: (invocation: WorkCommandInvocation) => Promise<WorkCommandResult>
-  }): unknown
-}
-
-interface CommandCtx {
-  readonly commands: WorkCommandSurface
-  readonly workprocess: WorkprocessService
-}
-
 /**
- * 注册 `/work`。`definitionId` 在宿主侧是品牌字符串（`CommandDefinitionId(...)`，运行时就是字符串），
- * 这里给同款字面量——不为一行品牌函数引入宿主依赖。
+ * 注册 `/work`（宿主 `dsh-command-goal` 同款形状：直接吃 cordis Context，
+ * `ctx.commands` / `ctx.workprocess` 都是官方类型）。
  */
-export function apply(ctx: CommandCtx): void {
+export function apply(ctx: Context): void {
   ctx.commands.register({
-    definitionId: '@deepseek-ai/dsh-command-workprocess',
+    // 品牌字符串运行时即字符串（宿主同款字面量）；类型面按 CommandDefinitionId 收窄。
+    definitionId: '@deepseek-ai/dsh-command-workprocess' as never,
     name: 'work',
     description: '建/看/干预这条流程（阶段 · 任务 · 回合）：给目标即让 agent 拆阶段建流程',
     input: { hint: '[<目标>|edit <目标>|pause|resume|clear]' },

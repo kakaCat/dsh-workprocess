@@ -46,7 +46,14 @@ function fakeAgent() {
   }
 }
 
-const invocation = (rawInput: string, agent: unknown) => ({ rawInput, agent })
+/** 假调用：官方 CommandInvocation 的形状（commandId / attachments / signal 补齐；品牌字段按运行时口径就是字符串）。 */
+const invocation = (rawInput: string, agent: unknown) => ({
+  rawInput,
+  agent: agent as never,   // 假 agent（真宿主里是 Agent 实例；行为等价物只需 session/followup 面）
+  commandId: 'cmd-test-1' as never,
+  attachments: [] as never,
+  signal: new AbortController().signal,
+})
 
 /** 控制动作不需要 followup（命令直接落领域）。 */
 const AGENTLESS = { session: { id: 'session-1' } }

@@ -37,6 +37,13 @@ goal 的目标是一句话，命令自己就能落库；workprocess 的流程**�
 - 装载：`workprocess/cordis.patch.yml` 里插两行（`workprocess` + `dsh-command-workprocess`），
   与宿主 base bundle 里 `dsh-goal` / `dsh-command-goal` 的关系一致；profile 只需装好这两个包。
 
+## 依赖与类型
+
+- 直接对接官方包：`@deepseek-ai/cordis` 的 `Context`（peer，类型面）、`@deepseek-ai/dsh-commands`
+  的 `CommandInvocation / CommandResult`（peer，类型面）——**两处都是 type-only**，运行时不留引用；
+  运行时唯一的外部引用是 `@deepseek-ai/dsh-llm` 的 `createUserMessage`（投话用）。
+- `ctx.workprocess` 的类型来自 `declare module '@deepseek-ai/cordis'` 增强（由 `workprocess` 插件 provide）。
+
 ## 测试
 
 ```bash
