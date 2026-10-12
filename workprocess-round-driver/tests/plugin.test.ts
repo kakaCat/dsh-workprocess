@@ -38,6 +38,7 @@ function harness(options: { status?: string; process?: unknown; activation?: str
     followup: (message: Sent): void => { sent.push(message) },
   }
   let activation = options.activation ?? 'armed'
+  let roundsStarted = 0
   const disarms: string[] = []
   const domain = {
     activation: async (): Promise<string> => activation,
@@ -48,7 +49,7 @@ function harness(options: { status?: string; process?: unknown; activation?: str
       return true
     },
     process: async (): Promise<unknown> => process,
-    roundsStarted: async (): Promise<number> => 0,
+    roundsStarted: async (): Promise<number> => roundsStarted,
     observeRound: async (): Promise<void> => {},
     startStage: async (): Promise<boolean> => false,
     closeStage: async (): Promise<boolean> => false,
@@ -93,6 +94,7 @@ function harness(options: { status?: string; process?: unknown; activation?: str
     agent,
     competing: (message: unknown) => { (agent.inbox as { nextTurn: unknown[] }).nextTurn.push(message) },
     disarms,
+    setRounds: (n: number) => { roundsStarted = n },
     fire: async (event: string, payload: unknown): Promise<void> => {
       for (const h of handlers.get(event) ?? []) await h(payload)
       await settle()
@@ -199,6 +201,23 @@ describe('驱动器插件：宿主 goal-round-driver 同款设计', () => {
     const text = JSON.stringify(h.sent[0])
     expect(text).toContain('workprocess_done')
     expect(text).toContain('不要再调任何工具')
+  })
+
+  it('预约还挂着时，别的触发不许再投一轮（真机 bug：投递即消耗，预算被烧光）', async () => {
+    const h = harness()
+    apply(h.ctx, { drive: true })
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(1)
+    // 我们投出去的那条消息落进会话、别的插件改了流程……这些**都不是**"上一轮跑完了"的证据：
+    // 此刻 agent 仍是 idle，若在这里撤预约并再拍，就会当场把预算烧光（真机症状：任务轮与
+    // blocked 收束轮同时到手，agent 一次手都没动）。
+    await h.fire('work/changed', { scope: 'session-1', change: undefined })
+    expect(h.sent).toHaveLength(1)                    // ← 关键：旧实现在这里会当场投第 2 轮（预算被烧光）
+    // 真·空闲转换 + 这一轮确实被接手（计数前进）⇒ 才撤预约、投下一轮。
+    h.setRounds(1)
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(2)
+    expect((h.sent[1].source as { round?: number }).round).toBe(2)
   })
 
   it('tick:false ⇒ 一条监听都不挂（等于没装驱动器）', () => {

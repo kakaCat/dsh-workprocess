@@ -594,10 +594,13 @@ export function apply(ctx: Context, config?: WorkRoundDriverConfig): void {
       if (!readyAfterCheckpoint(state)) return
     }
     if (state.attempt !== undefined) {
-      // 上一轮投出去、agent 又空闲了 ⇒ 这一轮已被接手跑完：撤预约，再拍一拍接着推进。
-      state.attempt = undefined
-      state.needsCheckpoint = true
-      state.requested = true
+      // 上一轮**还挂着**（投出去还没被接手 / 还没等到空闲转换）⇒ 一拍都不再投。
+      //
+      // 【为什么撤预约不在这里做】`drive()` 会被很多触发调到，包括**我们自己投递那条消息**
+      // 产生的 `session/event`。那一刻 agent 往往还是 idle，若在这里判"agent 空闲 ⇒ 上一轮跑完了"，
+      // 就会当场撤掉预约、立刻跑下一拍 —— 真机症状：任务轮与 blocked 收束轮**同时**到手，
+      // 回合预算被"投递即消耗"烧光，agent 一次手都没动（第三种真机 bug）。
+      // 宿主的做法是只在 `agent/status → idle`（真·空闲**转换**）里撤预约，本模块照办。
       return
     }
     if (await driveOnce(state)) state.requested = true
@@ -672,6 +675,12 @@ export function apply(ctx: Context, config?: WorkRoundDriverConfig): void {
       if (status !== 'idle') return
       const state = stateFor(agent)
       state.competingQueued = false
+      // **真·空闲转换**（宿主同款）：上一轮（若还挂着）到此为止 —— 撤预约、要求一次耐久检查点，
+      // 然后接着拍。只有这条路径撤预约：`session/event` 之类的触发不许代劳（那是"投递即消耗"的坑）。
+      if (state.attempt !== undefined) {
+        state.attempt = undefined
+        state.needsCheckpoint = true
+      }
       requestDrive(state)
     })
     // **空闲信号与域变更都触发驱动**（对齐宿主 `goal/changed → requestDrive`）：
