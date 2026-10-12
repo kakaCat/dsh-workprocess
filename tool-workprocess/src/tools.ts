@@ -325,6 +325,12 @@ export async function createWorkstage(
         return { success: false, scope, error: '建流程需要 objective（写清这条流程要达成什么）' }
       }
       const changed = await deps.domain.createProcess(scope, { objective, stages })
+      // **新建 = 许可打开**（限本轮由人发起时）：新流程是"人明确要开一条"，
+      // 但归属记录里可能残留着上一条流程的 `disarmed`（真机场景：宿主重启 ⇒ resume 自动 disarm；
+      // 随后新建的流程会一开就静默停住——真机复现过）。自治回合不动这个开关：不许自己给自己发通行证。
+      if (changed && authorityOf(deps, exec).kind === 'direct-human') {
+        await deps.domain.setActivation(scope, 'armed')
+      }
       const built = await deps.domain.process(scope)
       const first = built === undefined ? undefined : currentStageOf(built)
       return {

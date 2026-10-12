@@ -524,3 +524,22 @@ describe('续跑许可（工具面：arm / disarm + get_workstage 显示）', ()
     expect(await tools.getWorkstage(human, { scope: 'ws-a' })).toMatchObject({ activation: 'armed' })
   })
 })
+
+describe('新建流程与续跑许可（重启后不许"一开就静默停住"）', () => {
+  it('人发起的新建 ⇒ 许可打开（清掉残留的 disarmed）；自治回合新建 ⇒ 不动开关', async () => {
+    // 归属记录里带着上一条流程残留的 disarmed（真实场景：宿主重启后 resume）。
+    const records = { 'ws-a': { updatedAt: 1, rounds: { activation: 'disarmed' as const } } }
+    const human = depsOf(records, true)
+    const agent = depsOf(records)
+    const stage = [{ key: 'prep', statement: '准备' }]
+
+    // 自治回合新建：不许自己把许可放回来（否则等于自签通行证）。
+    expect(await createWorkstage(agent, { scope: 'ws-a', objective: 'x', stages: stage })).toMatchObject({ success: true, created: true })
+    expect(await tools.getWorkstage(agent, { scope: 'ws-a' })).toMatchObject({ activation: 'disarmed' })
+
+    // 丢流程（真人专属）后由**人**新建 ⇒ 许可打开，驱动器才会接着推。
+    expect((await updateWorkstage(human, { scope: 'ws-a', action: 'discard' })).changed).toBe(true)
+    expect(await createWorkstage(human, { scope: 'ws-a', objective: 'x', stages: stage })).toMatchObject({ success: true, created: true })
+    expect(await tools.getWorkstage(human, { scope: 'ws-a' })).toMatchObject({ activation: 'armed' })
+  })
+})
