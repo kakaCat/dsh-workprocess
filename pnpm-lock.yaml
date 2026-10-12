@@ -48,7 +48,7 @@ importers:
         specifier: workspace:*
         version: link:../workprocess-round-driver
       zod:
-        specifier: 4.6.6
+        specifier: ^4.4.3
         version: 4.6.6
 
   tool-workprocess:

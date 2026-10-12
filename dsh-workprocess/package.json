@@ -32,8 +32,10 @@
     "@deepseek-ai/dsh-storage-domain": "0.2.0-rc.1",
     "tool-workprocess": "workspace:*",
     "workprocess-core": "workspace:*",
-    "workprocess-round-driver": "workspace:*",
-    "zod": "4.6.6"
+    "workprocess-round-driver": "workspace:*"
+  },
+  "peerDependencies": {
+    "zod": "^4.4.3"
   },
   "dsh": {
     "bundle": {

@@ -4,7 +4,10 @@
 每个阶段装若干**任务**（`workTask`，会被自动续跑推动的工作单元）。
 
 零第三方领域依赖：内核不 import 任何东西；只有工具面依赖宿主工具 SDK（`@deepseek-ai/dsh-tools`）
-用于把工具注册进宿主。
+用于把工具注册进宿主。**运行时依赖只认 `@deepseek-ai` 官方包与工作区包**：唯一的 `zod`
+在 `dsh-workprocess` 走 `peerDependencies`——`@deepseek-ai/dsh-storage-domain` 自己声明
+`zod: ^4.4.3` 且其公开 API `domainTable(schema: ZodType<V>)` 的类型即来自 'zod'，是官方契约
+钦定的 schema 语言，由官方栈提供而非我们自选。
 
 ## 模型
 
@@ -43,7 +46,7 @@ workProcess  id=wp:<scope>   revision（两层的写共用同一个 CAS）
 | `workprocess-core` | 内核：两层快照 / 事件表 / 折叠 / 六条不变量 / 严格解码 / 服务（CAS + 幂等 + 身份分配） | 无 |
 | `workprocess-round-driver` | 回合驱动器：纯决策树（闸 → 串行门 → 相位机）+ 提示词渲染 | `workprocess-core` |
 | `tool-workprocess` | 工具面：`get_/create_/update_*` 六个工具 + 授权判据 + 独立插件入口 | `workprocess-core`、`@deepseek-ai/dsh-tools` |
-| `dsh-workprocess` | **领域插件（组合根）**：归属记录落宿主存储域（`ctx.storageDomain`）/ 真人判定（会话事件切面）/ 回合边界驱动（开工 · auto 收口 · 落盘 block · **续跑投递**）/ 提供 **`ctx.workprocess`** 服务 + `apply(ctx, config)` | 上面三个、`@deepseek-ai/dsh-storage-domain`、`@deepseek-ai/dsh-llm`、`zod` |
+| `dsh-workprocess` | **领域插件（组合根）**：归属记录落宿主存储域（`ctx.storageDomain`）/ 真人判定（会话事件切面）/ 回合边界驱动（开工 · auto 收口 · 落盘 block · **续跑投递**）/ 提供 **`ctx.workprocess`** 服务 + `apply(ctx, config)` | 上面三个、`@deepseek-ai/dsh-storage-domain`、`@deepseek-ai/dsh-llm`（`zod` 走 peer：官方存储域 API 钦定的 schema 语言，由官方栈提供） |
 | `command-workprocess` | **命令行插件** `/work`（`<目标>` 让 agent 拆阶段建流程 · `edit <目标>` 改目标 · `pause` / `resume` / `clear`）——独立包、独立装载行（对齐宿主 `dsh-command-goal`），只消费 `ctx.workprocess`，**结构化动作投话给 agent 做** | `workprocess-core`、`dsh-workprocess`（类型）、`@deepseek-ai/dsh-llm` |
 
 工具面命名与形状对齐宿主 dsh 的 `get_goal / create_goal / update_goal`：

@@ -18,7 +18,10 @@
  * @module dsh-workprocess/domain
  */
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
-import { z } from 'zod'
+// 【依赖口径】zod 由官方栈提供（peerDependencies）：`@deepseek-ai/dsh-storage-domain` 自己声明
+// `zod: ^4.4.3` 且其公开 API `domainTable(schema: ZodType<V>)` 的类型即 `import type { ZodType } from 'zod'`
+// ——存储域的 schema 语言是官方契约钦定的，不是我们自选的三方包。
+import { z, type ZodType } from 'zod'
 import { decodeWorkProcess } from 'workprocess-core'
 import type { WorkRecordLike, WorkStoreLike } from 'workprocess-core'
 
@@ -51,8 +54,9 @@ export const workprocessDomain = defineDomain({
   name: WORKPROCESS_DOMAIN,
   version: WORKPROCESS_DOMAIN_VERSION,
   tables: {
-    // 快照的严格性由内核解码器给（见文件头），故这里的值类型按 WorkRecordLike 标注。
-    processes: domainTable<string, WorkRecordLike>(recordSchema as never),
+    // 快照的严格性由内核解码器给（见文件头）：schema 的推导输出是"松散形状"
+    //（workProcess 按 unknown 读），权威类型标注成 WorkRecordLike——断言只落在类型面，运行时校验照旧。
+    processes: domainTable<string, WorkRecordLike>(recordSchema as unknown as ZodType<WorkRecordLike>),
   },
 })
 
