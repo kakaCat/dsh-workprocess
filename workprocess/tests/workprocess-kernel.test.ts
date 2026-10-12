@@ -16,8 +16,8 @@ import { WorkError } from 'workprocess/runtime.js'
 import type { WorkProcess, WorkStageDraft } from 'workprocess/types.js'
 import {
   clearWorkTask, closeWorkProcess, completeWorkStage, completeWorkTask, createWorkProcess, createWorkTask,
-  defineWorkStages, discardWorkProcess, editWorkObjective, progressOf, setWorkActivation,
-  stageClosePolicyOf, startWorkStage, workActivationOf, workProcessOf, workProcessViewOf, workTaskOf,
+  defineWorkStages, discardWorkProcess, editWorkObjective, markWorkAsked, progressOf, setWorkActivation,
+  stageClosePolicyOf, startWorkStage, workActivationOf, workAskedOf, workProcessOf, workProcessViewOf, workTaskOf,
   type WorkRecordLike,
 } from 'workprocess'
 
@@ -716,5 +716,31 @@ describe('续跑许可（rounds.activation：耐久，goal 那套 disarm 的落�
     await setWorkActivation(d, 'ws-a', 'disarmed')
     const view = await workProcessViewOf(d, 'ws-a')
     expect(view?.activation).toBe('disarmed')
+  })
+})
+
+describe('"已经问过"的耐久记号（跨重启不重复打扰；修订一变即作废）', () => {
+  const deps = (records: Record<string, WorkRecordLike>) => ({ store: storeOf(records), now: () => 1_000 })
+  const stage = [{ key: 'prep', statement: '准备' }]
+
+  it('记一次读得到；同键同修订幂等；没有流程 ⇒ false', async () => {
+    const records: Record<string, WorkRecordLike> = { 'ws-a': { updatedAt: 1 } }
+    const d = deps(records)
+    await createWorkProcess(d, 'ws-a', { objective: 'x', stages: stage })
+    expect(await workAskedOf(d, 'ws-a')).toBeUndefined()
+    expect(await markWorkAsked(d, 'ws-a', 'plan', 'prep', 1)).toBe(true)
+    expect(await workAskedOf(d, 'ws-a')).toEqual({ plan: { key: 'prep', revision: 1 } })
+    expect(await markWorkAsked(d, 'ws-a', 'plan', 'prep', 1)).toBe(false)   // 幂等
+    expect(await markWorkAsked(d, 'ws-none', 'plan', 'prep', 1)).toBe(false)
+  })
+
+  it('丢弃流程时记号一并清掉（否则重建的流程会撞上旧记号：同阶段键 + 同 revision）', async () => {
+    const records: Record<string, WorkRecordLike> = { 'ws-a': { updatedAt: 1 } }
+    const d = deps(records)
+    await createWorkProcess(d, 'ws-a', { objective: 'x', stages: stage })
+    await markWorkAsked(d, 'ws-a', 'plan', 'prep', 1)
+    expect(await discardWorkProcess(d, 'ws-a')).toBe(true)
+    await createWorkProcess(d, 'ws-a', { objective: 'x', stages: stage })    // 重建（revision 又是 1）
+    expect(await workAskedOf(d, 'ws-a')).toBeUndefined()                    // 旧记号已清
   })
 })

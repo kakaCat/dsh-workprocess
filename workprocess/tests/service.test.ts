@@ -89,3 +89,13 @@ describe('续跑许可（服务面）', () => {
     expect(await service.setActivation('session-1', 'armed')).toBe(true)
   })
 })
+
+describe('"已经问过"的记号（服务面）', () => {
+  it('markAsked 落库、asked 读回；同键同修订幂等', async () => {
+    const { service } = await seeded()
+    expect(await service.asked('session-1')).toBeUndefined()
+    expect(await service.markAsked('session-1', 'plan', 'repro', 1)).toBe(true)
+    expect(await service.asked('session-1')).toEqual({ plan: { key: 'repro', revision: 1 } })
+    expect(await service.markAsked('session-1', 'plan', 'repro', 1)).toBe(false)
+  })
+})

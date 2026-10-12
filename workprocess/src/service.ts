@@ -14,12 +14,12 @@
 import {
   blockWorkTask, clearWorkTask, closeWorkProcess, completeWorkStage, completeWorkTask, createWorkProcess,
   createWorkTask, currentStageOf, defineWorkStages, discardWorkProcess, editWorkObjective, editWorkTask,
-  decodeWorkProcess, pauseWorkTask, resumeWorkTask, setWorkActivation, startWorkStage, workActivationOf,
-  workProcessOf,
+  decodeWorkProcess, markWorkAsked, pauseWorkTask, resumeWorkTask, setWorkActivation, startWorkStage,
+  workActivationOf, workAskedOf, workProcessOf,
 } from './kernel.js'
 import type {
-  CreateWorkProcessRequest, CreateWorkTaskRequest, EditWorkTaskRequest, WorkActivation, WorkBlockReason,
-  WorkProcess, WorkStage, WorkStageDraft,
+  CreateWorkProcessRequest, CreateWorkTaskRequest, EditWorkTaskRequest, WorkActivation, WorkAskedState,
+  WorkBlockReason, WorkProcess, WorkStage, WorkStageDraft,
 } from './kernel.js'
 import type { WorkDeps } from './kernel.js'
 
@@ -103,6 +103,12 @@ export interface WorkprocessService {
   activation(scope: string): Promise<WorkActivation | undefined>
   /** 设置续跑许可（幂等：同值零写入；没有流程 ⇒ `false`）。 */
   setActivation(scope: string, activation: WorkActivation, revision?: number): Promise<boolean>
+
+  // ── "已经问过"的耐久记号（驱动器的去重判据；跨重启不重复打扰）────────
+  /** 读记号（没有流程 / 没记过 ⇒ `undefined`）；只在 `revision` 与当前流程相符时采信。 */
+  asked(scope: string): Promise<WorkAskedState | undefined>
+  /** 记下"这件问过了"（幂等；没有流程 ⇒ `false`）。 */
+  markAsked(scope: string, kind: 'plan' | 'ask', key: string, revision: number): Promise<boolean>
 
   // ── 回合计数（驱动器的回合预算判据；耐久在归属记录里）────────────
   /** 该归属域**已准入回合数**（缺省 = 没记录过）。 */
@@ -216,6 +222,8 @@ export function createWorkprocessService(
     createProcess: (scope, request) => createWorkProcess(deps, scope, request),
     startStage: (scope, stageKey, revision) => startWorkStage(deps, scope, stageKey, revision),
     audit,
+    asked: (scope) => workAskedOf(deps, scope),
+    markAsked: (scope, kind, key, revision) => markWorkAsked(deps, scope, kind, key, revision),
     activation: (scope) => workActivationOf(deps, scope),
     setActivation: (scope, activation, revision) => setWorkActivation(deps, scope, activation, revision),
     roundsStarted: async (scope) => (await deps.store.get(scope))?.rounds?.started,

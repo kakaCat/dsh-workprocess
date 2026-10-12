@@ -53,6 +53,12 @@ export interface WorkRecordLike {
   updatedAt?: number
   /** 回合事实（已准入回合数 + 进程内续跑许可）：**真相在归属记录**，本包只做派生读。 */
   rounds?: { started?: number; activation?: WorkActivation }
+  /**
+   * **已经问过**的耐久记号（每种轮次一个槽）：`{ key, revision }` —— 只有当前流程修订与之相符时才算数，
+   * 于是任何状态变更（stage 建了任务 / 进入下一阶段 / 表被替换）都会**自动作废**旧记号，
+   * 而"没有任何变更的重启"不会重复打扰（这才是它要解决的问题）。
+   */
+  asked?: WorkAskedState
 }
 
 /** store 读写通道（`mutate` 返回 `changed`；幂等判据以它为准）。 */
@@ -70,6 +76,18 @@ export interface WorkStoreLike {
    * "还没人读过表"时遍历到空——装载时自审恰好就是那个时刻（真机踩过）。
    */
   entries?(): Promise<IterableIterator<readonly [string, WorkRecordLike]>>
+}
+
+/** 一个"已经问过"的记号：问的是哪个键、当时流程的修订号是多少。 */
+export interface WorkAskedMark {
+  readonly key: string
+  readonly revision: number
+}
+
+/** 耐久记号表（每种轮次一个槽；`plan` = 阶段规划轮，`ask` = 收口确认轮）。 */
+export interface WorkAskedState {
+  readonly plan?: WorkAskedMark
+  readonly ask?: WorkAskedMark
 }
 
 /** 服务依赖（对齐宿主服务构造期注入的 ctx 面）。 */
@@ -227,6 +245,38 @@ export async function setWorkActivation(
   return changed
 }
 
+/**
+ * 读"**已经问过**"的耐久记号（没有流程 / 没记过 ⇒ `undefined`）。
+ *
+ * 消费方（驱动器）只在 `mark.revision === 当前流程 revision` 时采信：修订一变，旧记号自动失效。
+ */
+export async function workAskedOf(deps: WorkDeps, scope: string): Promise<WorkAskedState | undefined> {
+  const record = await deps.store.get(scope)
+  if (decodeExisting(record?.workProcess) === undefined) return undefined
+  return record?.asked
+}
+
+/**
+ * 记下"这件已经问过了"（耐久）：`key` 是阶段键（规划轮）或 `stage-done:<阶段键>` / `close`（确认轮）。
+ *
+ * 幂等：同键同修订零写入。没有流程 ⇒ 零写入返回 `false`（没有可问的对象）。
+ */
+export async function markWorkAsked(
+  deps: WorkDeps, scope: string, kind: 'plan' | 'ask', key: string, revision: number,
+): Promise<boolean> {
+  let changed = false
+  await deps.store.mutate(scope, (r) => {
+    const prev = decodeExisting(r.workProcess)
+    if (prev === undefined) return undefined
+    if (r.asked?.[kind]?.key === key && r.asked?.[kind]?.revision === revision) return undefined
+    r.asked = { ...r.asked, [kind]: { key, revision } }
+    r.updatedAt = deps.now()
+    changed = true
+    return { changed: true }
+  })
+  return changed
+}
+
 /** 读**续跑许可**（缺省 `armed`，与 `workProcessViewOf` 的派生同源）；没有流程 ⇒ `undefined`。 */
 export async function workActivationOf(deps: WorkDeps, scope: string): Promise<WorkActivation | undefined> {
   const record = await deps.store.get(scope)
@@ -274,6 +324,8 @@ export async function discardWorkProcess(
     if (prev === undefined) return undefined
     delete r.workProcess
     if (r.rounds !== undefined) r.rounds = { ...r.rounds, started: 0 }
+    // "已经问过"的记号随流程一起清：否则重建的流程可能撞上旧记号（同阶段键 + 同 revision）。
+    delete r.asked
     r.updatedAt = deps.now()
     changed = true
     return { changed: true }

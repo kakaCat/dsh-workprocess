@@ -16,7 +16,12 @@ import type { Context } from '@deepseek-ai/cordis'
 interface Sent { readonly source?: Record<string, unknown>; readonly content?: unknown }
 
 /** 极简宿主：够驱动器决策 + 投递 + 围栏即可（流程状态用一个假域服务喂）。 */
-function harness(options: { status?: string; process?: unknown; activation?: string } = {}) {
+function harness(options: {
+  status?: string
+  process?: unknown
+  activation?: string
+  asked?: { plan?: { key: string; revision: number }; ask?: { key: string; revision: number } }
+} = {}) {
   const sent: Sent[] = []
   const hooks: string[] = []
   const handlers = new Map<string, Array<(a: unknown, b?: unknown) => unknown>>()
@@ -39,9 +44,19 @@ function harness(options: { status?: string; process?: unknown; activation?: str
   }
   let activation = options.activation ?? 'armed'
   let roundsStarted = 0
+  let asked: { plan?: { key: string; revision: number }; ask?: { key: string; revision: number } } | undefined
+    = options.asked
   const disarms: string[] = []
+  const marks: string[] = []
   const domain = {
     activation: async (): Promise<string> => activation,
+    asked: async (): Promise<typeof asked> => asked,
+    markAsked: async (_scope: string, kind: 'plan' | 'ask', key: string, revision: number): Promise<boolean> => {
+      if (asked?.[kind]?.key === key && asked[kind]!.revision === revision) return false
+      asked = { ...asked, [kind]: { key, revision } }
+      marks.push(kind + ':' + key + '@' + String(revision))
+      return true
+    },
     setActivation: async (_scope: string, next: string): Promise<boolean> => {
       disarms.push(next)
       if (activation === next) return false
@@ -94,6 +109,7 @@ function harness(options: { status?: string; process?: unknown; activation?: str
     agent,
     competing: (message: unknown) => { (agent.inbox as { nextTurn: unknown[] }).nextTurn.push(message) },
     disarms,
+    marks,
     setRounds: (n: number) => { roundsStarted = n },
     fire: async (event: string, payload: unknown): Promise<void> => {
       for (const h of handlers.get(event) ?? []) await h(payload)
@@ -218,6 +234,34 @@ describe('驱动器插件：宿主 goal-round-driver 同款设计', () => {
     await h.fireStatus('idle')
     expect(h.sent).toHaveLength(2)
     expect((h.sent[1].source as { round?: number }).round).toBe(2)
+  })
+
+  it('"已经问过"耐久：进程重启后（内存集合空）也不重复投规划轮', async () => {
+    // 场景：上一进程已为 prep 投过规划轮（修订 1），现在是新进程、内存集合是空的。
+    const h = harness({
+      asked: { plan: { key: 'prep', revision: 1 } },
+      process: {
+        id: 'wp:session-1', revision: 1, objective: 'x',
+        stages: [{ key: 'prep', statement: '准备', doneCriteria: ['就绪'], state: 'active', tasks: [] }],
+      },
+    })
+    apply(h.ctx, { drive: true })
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(0)      // 不重复打扰（旧实现会再投一条）
+  })
+
+  it('"已经问过"随修订作废：流程变了（revision 前进）就重新问', async () => {
+    const h = harness({
+      asked: { plan: { key: 'prep', revision: 1 } },       // 记的是修订 1
+      process: {                                            // 现在是修订 2（状态变过）
+        id: 'wp:session-1', revision: 2, objective: 'x',
+        stages: [{ key: 'prep', statement: '准备', doneCriteria: ['就绪'], state: 'active', tasks: [] }],
+      },
+    })
+    apply(h.ctx, { drive: true })
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(1)                        // 修订不符 ⇒ 记号失效，该问就问
+    expect(h.marks).toEqual(['plan:prep@2'])              // 并且把新记号落下去
   })
 
   it('tick:false ⇒ 一条监听都不挂（等于没装驱动器）', () => {

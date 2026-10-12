@@ -488,14 +488,22 @@ export function apply(ctx: Context, config?: WorkRoundDriverConfig): void {
     }
   }
 
+  /** 本拍读到的流程修订（耐久记号按它判定有效性）。 */
+  let askedRevision: number | undefined
+
   /** 读现状 → 决策 → 落"不需要人"的副作用 / 投一轮；返回是否请求再拍一拍。 */
   async function driveOnce(state: State): Promise<boolean> {
     const scope = state.agent.session.id
+    // **"已经问过"的耐久记号**：跨重启只在"没有任何状态变更"时继续算数（修订一变即作废）。
+    // 内存集合保留作**进程内快挡**：耐久写可能还没落盘，先挡住重复投递。
+    const asked = await domain.asked(scope)
+    const askedAt = (kind: 'plan' | 'ask', key: string): boolean =>
+      asked?.[kind] !== undefined && asked[kind]!.key === key && asked[kind]!.revision === askedRevision
     const decision = await tickWorkprocess({
       domain,
       defaultMaxRounds,
-      stagePlanAsked: (stageKey) => state.planAsked.has(stageKey),
-      humanAskAsked: (askKey) => state.askAsked.has(askKey),
+      stagePlanAsked: (stageKey) => state.planAsked.has(stageKey) || askedAt('plan', stageKey),
+      humanAskAsked: (askKey) => state.askAsked.has(askKey) || askedAt('ask', askKey),
       autoClose,
     }, scope, scope)
     if (decision === undefined) return false
@@ -523,7 +531,9 @@ export function apply(ctx: Context, config?: WorkRoundDriverConfig): void {
         if (process === undefined) return false
         const delivery = planDeliveryOf(process, decision.stageKey, state.planAsked.size)
         if (delivery === undefined) return false
-        reserveAndQueue(state, 'plan', delivery)
+        if (reserveAndQueue(state, 'plan', delivery)) {
+          void domain.markAsked(scope, 'plan', decision.stageKey, delivery.revision)
+        }
         return false
       }
       case 'ask-stage-done':
@@ -539,7 +549,9 @@ export function apply(ctx: Context, config?: WorkRoundDriverConfig): void {
           decision.kind === 'ask-close' ? undefined : decision.stageKey,
         )
         if (delivery === undefined) return false
-        reserveAndQueue(state, 'ask', delivery)
+        if (reserveAndQueue(state, 'ask', delivery)) {
+          void domain.markAsked(scope, 'ask', askKey, delivery.revision)
+        }
         return false
       }
       case 'close-process': {
@@ -581,8 +593,11 @@ export function apply(ctx: Context, config?: WorkRoundDriverConfig): void {
     if (!readyToDrive(state)) return
     // **续跑许可**（耐久）：recall 后是 disarmed ⇒ 一拍都不推进（goal：`activation !== 'armed'` 就返回）。
     // 与 goal 的差别只有一处：它读 goal 的相位，我们读归属记录里的 `rounds.activation`。
-    const activation = await domain.activation(state.agent.session.id)
+    const scope = state.agent.session.id
+    const activation = await domain.activation(scope)
     if (activation === 'disarmed') return
+    // 当前流程修订（耐久记号只在与之相符时算数）：这一读也顺手确认流程还在。
+    askedRevision = (await domain.process(scope))?.revision
     if (state.needsCheckpoint) {
       state.needsCheckpoint = false
       try {

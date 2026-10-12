@@ -37,6 +37,12 @@ const recordSchema = z.object({
   rounds: z
     .object({ started: z.number().optional(), activation: z.enum(['armed', 'disarmed']).optional() })
     .optional(),
+  asked: z
+    .object({
+      plan: z.object({ key: z.string(), revision: z.number() }).optional(),
+      ask: z.object({ key: z.string(), revision: z.number() }).optional(),
+    })
+    .optional(),
 }).superRefine((value, ctx) => {
   if (value.workProcess === undefined) return
   try {
