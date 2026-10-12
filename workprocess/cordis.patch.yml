@@ -33,3 +33,8 @@
         blockedAfterRounds: 3
     - id: command-workprocess
       name: "dsh-command-workprocess"
+    # 不变量伴生件（对齐宿主 `dsh-goal/invariant`）：**只在开发/CI** 挂——它 inject `invariants`，
+    # 而桌面 profile 不挂 `@deepseek-ai/dsh-invariants`（宿主自己的 goal/session 伴生件同样休眠）。
+    # 要用就把下面两行放开，并在 profile 里补一挂 `@deepseek-ai/dsh-invariants` 的行：
+    # - id: workprocess-invariant
+    #   name: "workprocess/invariant"

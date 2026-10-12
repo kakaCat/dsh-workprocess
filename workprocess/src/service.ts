@@ -14,7 +14,8 @@
 import {
   blockWorkTask, clearWorkTask, closeWorkProcess, completeWorkStage, completeWorkTask, createWorkProcess,
   createWorkTask, currentStageOf, defineWorkStages, discardWorkProcess, editWorkObjective, editWorkTask,
-  pauseWorkTask, resumeWorkTask, setWorkActivation, startWorkStage, workActivationOf, workProcessOf,
+  decodeWorkProcess, pauseWorkTask, resumeWorkTask, setWorkActivation, startWorkStage, workActivationOf,
+  workProcessOf,
 } from './kernel.js'
 import type {
   CreateWorkProcessRequest, CreateWorkTaskRequest, EditWorkTaskRequest, WorkActivation, WorkBlockReason,
@@ -24,6 +25,20 @@ import type { WorkDeps } from './kernel.js'
 
 /** 会话的最小读取面（与 authority/message 同源的窄类型）。 */
 interface AgentLike { readonly session?: { readonly id?: string } }
+
+/** 审计发现（`audit()`）：一条已落盘记录的自洽性问题（**不是**运行期错误，是"历史里躺着坏数据"）。 */
+export interface WorkAuditFinding {
+  /** 归属域键。 */
+  readonly scope: string
+  /** 人可读的问题说明（含内核严格解码给出的原因）。 */
+  readonly problem: string
+}
+
+/** 审计结果：发现 + 每一条**通过**审计的快照（不变量伴生插件用它给影子折叠播种）。 */
+export interface WorkAuditReport {
+  readonly findings: readonly WorkAuditFinding[]
+  readonly snapshots: readonly { readonly scope: string; readonly process: WorkProcess }[]
+}
 
 /** 命令/看板要读的流程概览（够排版即可；没有 ⇒ undefined）。 */
 export interface WorkprocessStatus {
@@ -72,6 +87,16 @@ export interface WorkprocessService {
   discardProcess(scope: string, revision?: number): Promise<boolean>
   /** 收口整条流程（全阶段 done 才成立；方案 B 的轻量终止水印）。 */
   closeProcess(scope: string, revision?: number): Promise<boolean>
+
+  // ── 审计（"已落盘的历史还自洽吗"：不变量伴生插件用）────────────────
+  /**
+   * 遍历**整张归属记录表**：每条流程快照必须能过内核**严格解码**（形状 / 阶段串行 / id 唯一性），
+   * 且归属边界与记录键一致、`rounds` 读数合法。返回发现 + 通过审计的快照。
+   *
+   * 【为什么必须由服务做】域由领域插件独占打开（同名域重复 `open` 是响亮拒绝），
+   * 伴生插件拿不到表句柄——所以"审计"是服务面的一部分。
+   */
+  audit(): Promise<WorkAuditReport>
 
   // ── 续跑许可（耐久在归属记录里；驱动器的自动推进开关）────────────
   /** 读续跑许可（缺省 `armed`）；没有流程 ⇒ `undefined`。 */
@@ -130,6 +155,38 @@ export function createWorkprocessService(
     }
     return moved
   }
+  /**
+   * 审计整张表。检查项（都只读、不改）：严格解码 / 归属边界（`id === 'wp:' + scope`）/
+   * `rounds.started` 是非负安全整数 / `rounds.activation` 合法。
+   */
+  const audit = async (): Promise<WorkAuditReport> => {
+    const findings: WorkAuditFinding[] = []
+    const snapshots: { scope: string; process: WorkProcess }[] = []
+    for (const [scope, record] of deps.store.entries?.() ?? []) {
+      const raw = record?.workProcess
+      if (raw === undefined) continue                    // 空记录（只有 rounds）：不是流程
+      let process: WorkProcess
+      try {
+        process = decodeWorkProcess(raw)
+      } catch (err) {
+        findings.push({ scope, problem: '快照过不了严格解码：' + String((err as Error)?.message ?? err) })
+        continue
+      }
+      if (process.id !== 'wp:' + scope) {
+        findings.push({ scope, problem: '归属边界不符：快照 id ' + JSON.stringify(process.id) + ' 与记录键不一致' })
+      }
+      const started = record?.rounds?.started
+      if (started !== undefined && (!Number.isSafeInteger(started) || started < 0)) {
+        findings.push({ scope, problem: '回合计数不合法：' + JSON.stringify(started) })
+      }
+      const activation = record?.rounds?.activation
+      if (activation !== undefined && activation !== 'armed' && activation !== 'disarmed') {
+        findings.push({ scope, problem: '续跑许可不合法：' + JSON.stringify(activation) })
+      }
+      snapshots.push({ scope, process })
+    }
+    return { findings, snapshots }
+  }
   const discardProcess = async (scope: string, revision?: number): Promise<boolean> => {
     const changed = await discardWorkProcess(deps, scope, revision)
     if (changed) onCleared?.(scope)
@@ -157,6 +214,7 @@ export function createWorkprocessService(
     // 写：域 API（与内核服务函数一一对应，服务是唯一持有 store 的那一层）。
     createProcess: (scope, request) => createWorkProcess(deps, scope, request),
     startStage: (scope, stageKey, revision) => startWorkStage(deps, scope, stageKey, revision),
+    audit,
     activation: (scope) => workActivationOf(deps, scope),
     setActivation: (scope, activation, revision) => setWorkActivation(deps, scope, activation, revision),
     roundsStarted: async (scope) => (await deps.store.get(scope))?.rounds?.started,

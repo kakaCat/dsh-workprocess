@@ -62,6 +62,11 @@ export interface WorkStoreLike {
     scope: string,
     fn: (draft: WorkRecordLike) => unknown,
   ): Promise<{ readonly changed?: boolean }>
+  /**
+   * **快照遍历**（`[scope, 记录]` 对）。只有"审计已落盘历史"需要它（不变量伴生插件）；
+   * 省略 = 该 store 不支持遍历（读路径照常，审计降级为只报"无法遍历"）。
+   */
+  entries?(): IterableIterator<readonly [string, WorkRecordLike]>
 }
 
 /** 服务依赖（对齐宿主服务构造期注入的 ctx 面）。 */
