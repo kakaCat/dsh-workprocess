@@ -16,7 +16,7 @@ import {
   processAllowsClose, stageAllowsStart, startWorkStage, workProcessOf,
 } from 'workprocess'
 import type { WorkProcess, WorkRecordLike } from 'workprocess'
-import { decideWorkRound } from 'workprocess-round-driver'
+import { decideWorkRound, renderWorkPlanPrompt, renderWorkRoundPrompt } from 'workprocess-round-driver'
 import type { RoundDecision, WorkFacts, RoundScopeFacts } from 'workprocess-round-driver'
 
 function storeOf(records: Record<string, WorkRecordLike>) {
@@ -189,5 +189,27 @@ describe('端到端 · 驱动器环', () => {
     expect(decideWorkRound({ now: 1_000, scope: SCOPE, gates: {}, work: factsOf(one!) }))
       .toEqual({ kind: 'drive', processId: 'wp:ws-a', stageKey: 'prep', taskId: 'wt:prep:1' })
     expect((await workProcessOf(deps, 'ws-a'))!.stages[1].state).toBe('pending')
+  })
+})
+
+describe('两种轮次的分工口径（防"规划轮把活干完、回合预算形同虚设"）', () => {
+  // 真机踩过：规划轮提示词写着"建完直接动手"，于是两阶段流程跑完 `rounds.started` 还是 0——
+  // 预算与"落 block 要先跑满 N 轮"的门槛都按**任务轮**计数，被挤掉就等于没启用。
+  const stage = { key: 'v1', statement: '写文件', doneCriteria: ['文件在'] }
+
+  it('规划轮只建任务，明确叫停手等任务轮', () => {
+    const text = renderWorkPlanPrompt({ processObjective: 'x', stage, round: 1 })
+    expect(text).toContain('只建任务，不要在这一轮动手执行')
+    expect(text).toContain('任务轮会由驱动器在空闲边界投给你')
+    expect(text).toContain('max_rounds')          // 说清为什么
+  })
+
+  it('任务轮才是干活的那一轮（带任务、带轮号、说明做完停手）', () => {
+    const text = renderWorkRoundPrompt({
+      processObjective: 'x', stage, task: { id: 'wt:v1:1', objective: '写文件' }, round: 1, maxRounds: 2,
+    })
+    expect(text).toContain('wt:v1:1')
+    expect(text).toContain('第 1 轮（上限 2）')      // 轮号 + 生效预算都在提示词里
+    expect(text).toContain('只做本阶段**本任务**的事')
   })
 })

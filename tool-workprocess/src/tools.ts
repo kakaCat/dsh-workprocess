@@ -566,7 +566,8 @@ export async function createWorktask(
     return {
       success: true, scope, stage_key: stageKey, changed,
       ...(changed && created !== undefined ? { task_id: created.id, revision: created.revision } : {}),
-      next_step: '直接动手做这个任务；做完调 update_worktask(action: "complete")。不要顺手把后续阶段的任务也建满。',
+      next_step: '任务轮由驱动器投递（带 <workprocess_round> 标签）——**收到那一轮再动手**，'
+        + '做完调 update_worktask(action: "complete")。不要顺手把后续阶段的任务也建满。',
     }
   })
 }
