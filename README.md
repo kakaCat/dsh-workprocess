@@ -110,6 +110,25 @@ python3 scripts/observe-workflow.py <会话 id>   # 指定会话
 
 阈值可配：工具插件 `blockedAfterRounds`（缺省 3）。
 
+## 审计（`ctx.workprocess.audit()` + `scripts/audit-storage.mjs`）
+
+| 检查项 | 谁在查 |
+|---|---|
+| 快照形状 / 阶段串行 / id 唯一性 / 墓碑一致性 | **存储层 schema 的 `superRefine`**（就是内核严格解码器）——写时拒、载入时由存储层报 |
+| 归属边界（`workProcess.id` == `wp:<记录键>`） | **审计**（schema 不查这条） |
+| `rounds.started` 非负安全整数 / `activation` 合法 | **审计**（`z.number()` 会放过负数与小数） |
+
+所以审计的增量是**记录级那两件**，不是"抓坏快照"（那件在更早的一层就被拦了）。
+
+真机可验的形态是命令（不需要宿主、不需要服务、不需要重启）：
+
+```bash
+node scripts/audit-storage.mjs            # 审 ~/.dsh/storages/workprocess.json，逐条打勾
+node scripts/audit-storage.mjs <文件>      # 审指定文件（拿副本验证它真会抓问题）
+```
+
+进程内那份（装载时自审 + `ctx.workprocess.audit()`）保留：装载时发现即记一行警告（不阻断装载）。
+
 ## 真机才暴露的三个坑（都已修 + 防回归测试）
 
 | 坑 | 症状 | 修法 |

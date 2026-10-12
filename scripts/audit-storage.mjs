@@ -1,0 +1,69 @@
+#!/usr/bin/env node
+/**
+ * **存储审计**（真机可验版）：直接对 `~/.dsh/storages/workprocess.json` 跑一遍
+ * `ctx.workprocess.audit()` 的同款检查，并逐条给出裁决。
+ *
+ * 【为什么要有它】`ctx.workprocess.audit()` 的真机可观测面很窄：宿主桌面**不挂** `invariants`
+ * 服务（没有 provider），插件装载时那条 `logger.warn` 也读不到（当前运行不写日志）。
+ * 而"已落盘的状态还自洽吗"这件事本身值得随时能查——于是把它做成命令：
+ * 不需要宿主、不需要服务、不需要重启，读一遍盘就出裁决。
+ *
+ * 【检查项（与内核/服务同口径）】
+ *   ① 严格解码：形状 / 阶段串行 / id 唯一性 / 墓碑一致性（`decodeWorkProcess`）
+ *   ② 归属边界：`workProcess.id` 必须等于 `wp:<记录键>`
+ *   ③ 读数合法：`rounds.started` 是非负安全整数；`rounds.activation` ∈ {armed, disarmed}
+ *
+ * 用法：node scripts/audit-storage.mjs [存储文件路径]
+ * 退出码：0 = 全部通过（含"没有流程"）；1 = 有发现。
+ */
+import { readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+import { decodeWorkProcess } from '../workprocess/dist/index.js'
+
+const file = process.argv[2] ?? join(homedir(), '.dsh', 'storages', 'workprocess.json')
+const raw = JSON.parse(readFileSync(file, 'utf8'))
+const records = raw?.tables?.processes ?? {}
+
+/** 审计一条记录。@returns 发现列表（空 = 全过）。 */
+function auditRecord(scope, record) {
+  const findings = []
+  const snapshot = record?.workProcess
+  if (snapshot === undefined) return findings          // 空记录（只有 rounds）：不是流程
+  let process
+  try {
+    process = decodeWorkProcess(snapshot)
+  } catch (err) {
+    return ['快照过不了严格解码：' + String(err?.message ?? err)]
+  }
+  if (process.id !== 'wp:' + scope) {
+    findings.push('归属边界不符：快照 id ' + JSON.stringify(process.id) + ' ≠ ' + JSON.stringify('wp:' + scope))
+  }
+  const started = record?.rounds?.started
+  if (started !== undefined && (!Number.isSafeInteger(started) || started < 0)) {
+    findings.push('回合计数不合法：' + JSON.stringify(started))
+  }
+  const activation = record?.rounds?.activation
+  if (activation !== undefined && activation !== 'armed' && activation !== 'disarmed') {
+    findings.push('续跑许可不合法：' + JSON.stringify(activation))
+  }
+  return findings
+}
+
+let problems = 0
+let flows = 0
+console.log('审计文件：' + file)
+for (const [scope, record] of Object.entries(records)) {
+  const findings = auditRecord(scope, record)
+  const hasFlow = record?.workProcess !== undefined
+  if (hasFlow) flows += 1
+  if (findings.length === 0) {
+    console.log(`  ✓ ${scope}${hasFlow ? '' : '（无流程记录）'}`)
+    continue
+  }
+  problems += findings.length
+  console.log(`  ✗ ${scope}`)
+  for (const finding of findings) console.log('      - ' + finding)
+}
+console.log(`\n流程记录 ${flows} 条，问题 ${problems} 条。`)
+process.exit(problems === 0 ? 0 : 1)
