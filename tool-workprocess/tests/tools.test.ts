@@ -9,7 +9,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import { WORK_TOOL_REGISTRY } from 'tool-workprocess'
-import { WORK_TOOL_FACTORIES } from 'tool-workprocess'
+import { STAGE_ACTIONS, WORK_TOOL_FACTORIES } from 'tool-workprocess'
 import type { WorkToolDeps } from 'tool-workprocess'
 import type { WorkRecordLike, WorkStoreLike } from 'workprocess'
 import { createWorkprocessService, startWorkStage } from 'workprocess'
@@ -124,5 +124,15 @@ describe('工具壳 · 协议面走通', () => {
     expect((await agent.updateWorkstage.execute({ scope: 'ws-a', stage_key: 'prep', action: 'done' })).code).toBe('WORK_NO_PERMISSION')
     expect((await agent.updateWorktask.execute({ scope: 'ws-a', task_id: 'wt:prep:1', action: 'resume' })).code).toBe('WORK_NO_PERMISSION')
     expect((await agent.updateWorktask.execute({ scope: 'ws-a', task_id: 'wt:prep:1', action: 'edit', objective: 'x' })).code).toBe('WORK_NO_PERMISSION')
+  })
+})
+
+describe('工具 schema 与运行期白名单同源（防"改了白名单忘了 schema"）', () => {
+  it('update_workstage 的 action enum 必须逐字等于 STAGE_ACTIONS', () => {
+    const deps = { domain: {} as never, defaultScope: () => 'ws-a' } as never
+    const tool = WORK_TOOL_FACTORIES.updateWorkstage(deps) as {
+      parameters?: { properties?: { action?: { enum?: readonly string[] } } }
+    }
+    expect(tool.parameters?.properties?.action?.enum).toEqual([...STAGE_ACTIONS])
   })
 })

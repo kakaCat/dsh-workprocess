@@ -362,7 +362,11 @@ export async function createWorkstage(
 /** 自治回合落 block 的前置轮数（缺省 3，对齐宿主 goal）。 */
 export const DEFAULT_BLOCKED_AFTER_ROUNDS = 3
 
-const STAGE_ACTIONS = ['done', 'edit', 'discard', 'arm', 'disarm'] as const
+/**
+ * `update_workstage` 认的动作（**单一来源**）：运行期白名单与工具 schema 的 `enum` 都从这里派生。
+ * 曾经只改白名单没改 schema ⇒ 宿主在 schema 层就把新动词（`arm`）拒了，handler 根本没轮到（真机踩过）。
+ */
+export const STAGE_ACTIONS = ['done', 'edit', 'discard', 'arm', 'disarm'] as const
 
 /**
  * `update_workstage`：阶段态变更（对齐宿主 `update_goal` 的 `action` 形状）。
@@ -737,11 +741,15 @@ export function defineUpdateWorkstageTool(deps: WorkToolDeps) {
     stage_key: STAGE_KEY_PARAM,
     action: {
       type: 'string',
-      enum: ['done', 'edit', 'discard'],
+      // enum 从**单一来源**派生（`STAGE_ACTIONS`）：schema 与运行期白名单不许各写一份
+      //（真机踩过：只改白名单 ⇒ 宿主在 schema 层就把 `arm` 拒了，handler 根本没轮到）。
+      enum: [...STAGE_ACTIONS],
       description: 'done = 阶段收口落定，按**本阶段的收口策略**判谁来落：human（缺省）= **真人专属**（人工确认）；'
         + 'auto = 本回合（驱动器决策）可自动落 done。两条路都必须任务非空且全部 complete。'
         + 'edit = **改流程目标**（要 objective；对齐宿主 update_goal 的 edit；**真人专属**——阶段与任务原样保留）。'
         + 'discard = **丢弃整条流程**（不需要 stage_key；不可逆：流程与任务墓碑一起消失、回合计数归零；**真人专属**）。'
+        + 'arm / disarm = **续跑许可**（真人专属）：disarm 让驱动器停手（会话 resume 时驱动器自动落），'
+        + 'arm 在人说"继续"时放回去。'
         + '注意**阶段开工不是本工具的动词**——串行门放行后由驱动器开工。',
     },
     objective: { type: 'string', description: 'edit 用：这条流程改成要达成什么（替换原目标）。' },
