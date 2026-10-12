@@ -6,7 +6,7 @@
 / 常驻策略段都归本面，装配由 `apply` 一次接好。
 
 
-workprocess 的**工具面**：两层各三工具（登记表 `src/registry.ts` 是唯一手写清单）。
+workprocess 的**工具面**：两层各三工具（`src/tools.ts` 顶部的登记表是唯一手写清单）。
 
 **命名与形状对齐宿主 dsh**：`get_* / create_* / update_*`（动词在前），状态变更**收进 `update` 的 `action`**
 （对齐 `get_goal / create_goal / update_goal`）——不是为每个动词各开一个工具。
@@ -77,18 +77,18 @@ workprocess 的**工具面**：两层各三工具（登记表 `src/registry.ts` 
 - 越权抛 `WorkError('WORK_NO_PERMISSION')`，回执里给出路（由人在宿主界面确认 / 由人直接调 /
   `human` 策略下落不了的阶段，由人把 `close_policy` 改成 `auto`）。
 
-## 结构
+## 结构（3 个模块，与宿主 `dsh-tool-goal` 同粒度）
 
-| 文件 | 职责 |
-|---|---|
-| `src/registry.ts` | 六个工具的登记表（`handler` 名与 `handlers.ts` 逐字对应，用例逐条核） |
-| `src/authority.ts` | 授权判据（真人专属集合 + **按阶段收口策略的 `stage_done` 判据** + 精确授权三元组 + `requireActionAuthority`） |
-| `src/handlers.ts` | 处理器：协议无关（deps + 参数对象 → 回执对象），**不需要宿主即可单测** |
-| `src/tools.ts` | `defineTool` 工具壳（名字与自述**逐字取自登记表**）+ `WORK_TOOL_FACTORIES` |
-| `src/plugin.ts` | 独立插件入口 `applyWorkToolSurface(ctx, deps)`（装不上只降级，不带崩插件其余面） |
-| `src/index.ts` | 再导出（插件入口在 `tool-workprocess/plugin.js`） |
+宿主那个包源码也是三个模块（`authority` / `wrapup` / `index`），发布前打成一个 `lib/index.js`
+（见其打包分区标记）；我们按同样的粒度切：
 
-组合根把 `WorkToolDeps`（`store` + `now` + 可选 `resolveAuthority` / `verifyCaller`）注入后即可挂载。
+| 模块 | 职责 | 对应宿主 |
+|---|---|---|
+| `src/authority.ts` | 授权：**判据**（真人专属集合 + 按阶段收口策略的 `stage_done` 判据 + 精确授权三元组 + `requireActionAuthority`）＋ **宿主对话面**（授权判据读取 `authorityResolverOf`、通告 `exec.deferContext`、人机确认 `ctx.userQuestions`、`work-tool` 来源声明） | `authority.ts` + `wrapup.ts`（都是"工具与宿主/人的边界"） |
+| `src/tools.ts` | 六个工具：登记表（唯一手写清单）+ `defineTool` 壳（协议面）+ 处理器（协议无关，**不需要宿主即可单测**） | 宿主 `index` 里的工具定义 + 处理器 |
+| `src/index.ts` | 插件装配：`name` / `inject` / `apply(ctx, config)` + **常驻策略段**（模型面纪律） | 宿主 `index` 里的 `apply` + `ctx.systemPrompt.section` |
+
+数据口只有 `ctx.workprocess`（`WorkToolDeps.domain`）；`apply` 从宿主 ctx 一次接好授权、通告、人机确认。
 
 ## 测试
 

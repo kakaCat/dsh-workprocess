@@ -5,9 +5,9 @@
  *   ③ deps 组装：数据口只认 `ctx.workprocess`、归属缺省取本会话、授权/通告/人机确认接上宿主面。
  */
 import { describe, it, expect } from 'vitest'
-import { apply, inject, name, workToolDepsOf } from 'tool-workprocess/plugin.js'
-import { WORK_POLICY_SECTION } from 'tool-workprocess/policy.js'
-import { WORK_TOOL_REGISTRY } from 'tool-workprocess/registry.js'
+import { apply, inject, name, workToolDepsOf } from 'tool-workprocess'
+import { WORK_POLICY_SECTION } from 'tool-workprocess'
+import { WORK_TOOL_REGISTRY } from 'tool-workprocess'
 import type { Context } from '@deepseek-ai/cordis'
 
 interface Stub {

@@ -8,7 +8,7 @@
  *   ③ 真人专属动作在**协议面**也被拦（不是只在处理器里拦）。
  */
 import { describe, it, expect } from 'vitest'
-import { WORK_TOOL_REGISTRY } from 'tool-workprocess/registry.js'
+import { WORK_TOOL_REGISTRY } from 'tool-workprocess'
 import { WORK_TOOL_FACTORIES } from 'tool-workprocess'
 import type { WorkToolDeps } from 'tool-workprocess'
 import type { WorkRecordLike, WorkStoreLike } from 'workprocess'

@@ -13,7 +13,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { apply, name, inject, storageDomainStoreOf, workprocessDomain } from 'workprocess'
 import { WORK_TOOL_REGISTRY } from 'tool-workprocess'
-import { apply as applyTools } from 'tool-workprocess/plugin.js'
+import { apply as applyTools } from 'tool-workprocess'
 import { apply as applyDriver } from 'workprocess-round-driver'
 import { applyWorkEvent, startWorkStage } from 'workprocess'
 

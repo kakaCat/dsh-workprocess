@@ -7,7 +7,7 @@
  * 人工确认、身份分配、越权拦截在一条真实操作序列里同时成立）。
  */
 import { describe, it, expect } from 'vitest'
-import { WORK_TOOL_REGISTRY } from 'tool-workprocess/registry.js'
+import { WORK_TOOL_REGISTRY } from 'tool-workprocess'
 import { WORK_TOOL_FACTORIES } from 'tool-workprocess'
 import type { WorkToolDeps } from 'tool-workprocess'
 import type { WorkRecordLike, WorkStoreLike } from 'workprocess'
