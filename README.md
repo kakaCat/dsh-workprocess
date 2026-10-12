@@ -58,18 +58,43 @@ workProcess  id=wp:<scope>   revision（两层的写共用同一个 CAS）
 ```bash
 pnpm install
 pnpm typecheck
-pnpm test          # 166 条：内核（含纯度守卫）53 / 驱动 28 / 工具 34 / 领域插件 37 / 命令行插件 13（含端到端）
-pnpm build         # 出 dist/（宿主加载的是 JS，不是 TS）。两阶段：先 build:bootstrap 垫 dist，
-                   # 再正式构建——workprocess ↔ tool-workprocess 的声明级循环（M0 合并产物，
-                   # M2–M4 解环后撤除；自映射把各包名字解析回 src，详见各 tsconfig.build.json）
+pnpm test          # 172 条：内核（含纯度守卫）53 / 回合驱动器 34（决策 25 · 循环 3 · 设计契约 6）
+                   #        / 工具面 35（工具 29 · 插件 4 · 端到端 2）/ 领域插件 37 / 命令行 13
+pnpm build         # 出 dist/（宿主加载的是 JS，不是 TS）。四包拓扑序直出：构建期关掉源码 paths，
+                   # 兄弟包按 node_modules → dist 声明解析（循环已断，两段式过渡桥已撤除）
 ```
 
 ## 装进宿主（DSH profile）
 
-宿主按 `dsh.profile.bundles` 装载：依赖写 `link:<repo>/dsh-workprocess`、bundles 里列 `dsh-workprocess`、
-`node_modules/dsh-workprocess` 指向本包；`dsh-workprocess/cordis.patch.yml` 给出装载层条目。
+profile 的 `package.json` 里四个包都要有依赖（`link:<repo>/<包目录>`）、`node_modules/` 下要有对应软链，
+`dsh.profile.bundles` 里列 **`workprocess`**（它带 `dsh.bundle.patch: ./cordis.patch.yml`，
+该 patch 一次插四条装载行：`workprocess` → `workprocess-round-driver` → `tool-workprocess` →
+`dsh-command-workprocess`）。
 注意：**`dsh.bundle.patch` 指向的文件读不到，宿主会整个跳过这个 bundle**（现象：重启也不见工具）。
-改完重启 DSH 生效；排障与回滚见 `dsh-workprocess/README.md`。
+改完重启 DSH 生效。
+
+## 真机验收（一条全 auto 流程）
+
+单测只能证明"我构造的状态合法"，闭环要靠真机。**判据一条**：一条全 `auto` 的流程，
+从开工到流程收口全部由驱动器推完，中间不用人点。
+
+```bash
+python3 scripts/observe-workflow.py            # 取最近更新的那条流程
+python3 scripts/observe-workflow.py <会话 id>   # 指定会话
+```
+
+它把两处证据拼成一条时间线：归属记录（流程/阶段/任务的**当前**状态 + 耐久回合计数）
+与会话日志（驱动器**投过什么**，来源自署 `work`），并按里程碑逐项打勾。
+
+真机跑法（在**新会话**里发一条，`/work` 的用法见 `command-workprocess/README.md`）：
+
+```
+/work 两阶段全自动验收：阶段一（close_policy: auto）写 hello.txt 内容是 hello workprocess；
+阶段二（close_policy: auto）往 hello.txt 末尾追加一行 second stage。每阶段 1 个任务，max_rounds 各 2。
+```
+
+期望序列：阶段开工 → （阶段空着时）规划轮 → 任务轮 1 → 阶段一收口 → 阶段二开工 → 任务轮 2 →
+阶段二收口 → **流程收口**（`closedAt` 落下）。跑完 `observe-workflow.py` 的"里程碑对账"应全 ✓。
 
 ## 六条不变量
 
