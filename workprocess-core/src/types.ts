@@ -125,6 +125,8 @@ export interface WorkTaskTombstone {
  *
  * 无相位字段：相位活在**层2 的每个任务**上（对齐宿主 goal）；流程的"整体成没成"
  * 是**判据**（`processAllowsClose`）而不是存下来的第四个状态——多存一份就会与阶段态打架。
+ * `closedAt` 是**终止水印**而非相位：它不参与任何状态迁移，只标记"这条记录已终结、
+ * 除 discard 外不再接受写"（方案 B 的轻量收口落点，见 fold 的 `process-close`）。
  */
 export interface WorkProcess {
   readonly id: WorkProcessId
@@ -136,6 +138,8 @@ export interface WorkProcess {
   readonly stages: readonly WorkStage[]
   /** 已清除任务的墓碑（身份不复用的依据；缺省 = 还没清过）。 */
   readonly cleared?: readonly WorkTaskTombstone[]
+  /** 收口时间戳（缺省 = 未收口）：最后一段 done 后落 `process-close`，记录随之终止。 */
+  readonly closedAt?: number
 }
 
 /** 建阶段表的输入（`init` / `define-stages` 的载荷）：只有定义，不带态。 */

@@ -52,6 +52,8 @@ export interface GateFacts {
    * 问过就不再问——否则每个空闲边界都往会话里投一轮"请人确认"，人还没答就被刷屏。
    */
   readonly humanAskBlocked?: boolean
+  /** ⑧ **流程自动收口**（配置态：`close: 'auto'`）：最后一段 done 后驱动器直接落 close，不问人。 */
+  readonly autoClose?: boolean
 }
 
 /** 层2：本阶段里的一个任务。 */
@@ -87,6 +89,8 @@ export interface WorkFacts {
   readonly currentStage?: StageFacts
   /** 归属会话键（ownership 判定用）。 */
   readonly sessionKey?: string
+  /** 流程已收口（`closedAt` 非空）：记录终止，一切推进结论都不再生效。 */
+  readonly processClosed?: boolean
 }
 
 /** 一次驱动拍的全部输入（纯数据，便于穷举单测）。 */
@@ -119,6 +123,8 @@ export type RoundDecision =
   | { readonly kind: 'close-stage'; readonly processId: string; readonly stageKey: string }
   /** 全部阶段 done ⇒ 触发收口弹框。 */
   | { readonly kind: 'ask-close'; readonly processId: string }
+  /** **流程自动收口**（`close: 'auto'`）：最后一段 done 后由驱动器落 `process-close`（方案 B）。 */
+  | { readonly kind: 'close-process'; readonly processId: string }
   /** 任务达回合上限 ⇒ **落盘 block**（重启不失忆、人可见可裁）。 */
   | {
     readonly kind: 'block-task'; readonly processId: string; readonly taskId: string

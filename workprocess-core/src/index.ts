@@ -162,6 +162,17 @@ export async function createWorkProcess(
 }
 
 /**
+ * **流程收口**（方案 B 的轻量落点）：全部阶段 done 后落终止水印，记录随之终结。
+ * 判据在 fold（`process-close:stages-open`）；幂等：已收口 ⇒ 零写入（`already-closed`）。
+ * 收口后一切写被拒（`process-closed`）；重建须先 `discard`。给 `expectedRevision` 时旧值即拒。
+ */
+export async function closeWorkProcess(
+  deps: WorkDeps, scope: string, expectedRevision?: number,
+): Promise<boolean> {
+  return mutateWork(deps, scope, () => ({ kind: 'process-close', closedAt: deps.now() }), expectedRevision)
+}
+
+/**
  * **改流程目标**（对齐宿主 `update_goal` 的 `edit`；授权面把它判成**真人专属**）。
  *
  * 为什么它是状态动作而不是"丢弃重来"：丢弃会连着任务与墓碑一起没（历史被抹掉），

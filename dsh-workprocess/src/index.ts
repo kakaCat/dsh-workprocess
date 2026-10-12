@@ -59,6 +59,11 @@ export interface WorkprocessConfig {
   readonly drive?: boolean
   /** 任务没写 `max_rounds` 时的生效上限（缺省 {@link DEFAULT_MAX_ROUNDS}）。 */
   readonly defaultMaxRounds?: number
+  /**
+   * **流程收口**（方案 B）：'auto'（缺省）= 最后一段 done 后驱动器直接落 close，记录终止；
+   * 'human' = 全阶段 done 后投「请判」轮（方案 B 口径：判了不落章，与旧行为等价）。
+   */
+  readonly close?: 'human' | 'auto'
 }
 
 /** 会话事件的**最小读取面**（与 `authority.ts` 的 HostEvent 同源，这里只多要 taskId/revision）。 */
@@ -72,6 +77,8 @@ interface SessionEventLike {
 interface DriveCtx {
   readonly drive: boolean
   readonly defaultMaxRounds: number
+  /** **流程自动收口**（`close: 'auto'`）：最后一段 done 后驱动器直接落 close，不问人。 */
+  readonly autoClose: boolean
   /** 已投递、尚未接手的回合（`taskId:revision:round`；内存态——跨重启不重复投同一轮）。 */
   readonly pending: Set<string>
   /** 已经问过**阶段规划轮**的阶段键（同一阶段只问一次：问过就停手等人，不空转）。 */
@@ -137,6 +144,8 @@ export function apply(ctx: PluginCtx, config?: WorkprocessConfig): void {
     const driveCtx: DriveCtx = {
       drive: config?.drive === true,
       defaultMaxRounds: config?.defaultMaxRounds ?? DEFAULT_MAX_ROUNDS,
+      // 方案 B 缺省 'auto'：最后一段 done 即收口（human 模式与旧行为等价——请判轮问了也不落章）。
+      autoClose: config?.close !== 'human',
       pending: new Set<string>(),
       planAsked: new Set<string>(),
       askAsked: new Set<string>(),
@@ -194,6 +203,7 @@ async function driveAtIdle(
         defaultMaxRounds: drive.defaultMaxRounds,
         stagePlanAsked: (stageKey) => drive.planAsked.has(stageKey),
         humanAskAsked: (askKey) => drive.askAsked.has(askKey),
+        autoClose: drive.autoClose,
       }, session.id, session.id)
       if (decision === undefined) return
       if (decision.kind === 'drive') {
@@ -217,6 +227,8 @@ async function driveAtIdle(
         await deliverAskRound(ctx, store, session, decision.kind, decision.kind === 'ask-close' ? undefined : decision.stageKey)
         return
       }
+      // **流程自动收口**：推进态结论，再拍一拍（下一拍会发现已收口 → hold('process-closed')，循环终止）。
+      if (decision.kind === 'close-process') continue
       // 只有**确实改了状态**的三种结论才值得再拍一次；其余（hold / wait-human）停手。
       if (decision.kind !== 'start-stage' && decision.kind !== 'close-stage' && decision.kind !== 'block-task') return
     }

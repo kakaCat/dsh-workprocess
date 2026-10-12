@@ -52,6 +52,7 @@ WorkProcess（聚合根：一次完整流程，一个归属对象一条）
 | INV-4 | 身份稳定：流程 id 不变；存活任务的 id / `stageKey` 不变；`objective` 只由 `init`（确立）与 `objective-edit`（人改目标）两个动词改写 |
 | INV-5 | **串行门**：任一阶段非 `pending` 时其前序阶段必须全 `done`（最多一个 `active`） |
 | INV-6 | **阶段收口自洽**：阶段 `done` ⇒ 其任务非空且全部 `complete` |
+| INV-7 | **流程收口自洽**：已收口（`closedAt` 非空）⇒ 全阶段 `done`；`closedAt` 只由 `process-close` 写 |
 
 ## 依赖方向
 
@@ -68,5 +69,5 @@ workprocess-core ←  workprocess-round-driver（决策/提示词）
 ## 测试
 
 ```bash
-cd workprocess/workprocess-core && pnpm test      # 41 条：两层结构 / 串行门 / 收口策略 / 丢弃流程 / 相位机 / 身份不复用 / CAS / 值域
+cd workprocess/workprocess-core && pnpm test      # 52 条：两层结构 / 串行门 / 收口策略 / 流程收口 / 丢弃流程 / 相位机 / 身份不复用 / CAS / 值域
 ```

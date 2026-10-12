@@ -45,6 +45,15 @@ export type WorkEvent =
    * 授权面把它判成**真人专属**（同宿主口径）：改人的意图只有人能发起。
    */
   | { readonly kind: 'objective-edit'; readonly objective: string }
+  /**
+   * **流程收口**（方案 B 的轻量落点）：全部阶段 done 后落一个终止水印。
+   *
+   * 【为什么需要它】"流程没有完成态"的原则不变（成没成是判据，不是第四个状态），但记录
+   * 不能永远停在"具备收口条件"：不收口就没有终点的落点，开新流程只有抹掉（discard）一条路。
+   * 收口后 fold 入口的总闸会拒掉一切后续写（`discard` 除外）——**记录终止，判据留在阶段表里**。
+   * 没有 verdict 三档：轻量方案，判据本身就是全阶段 done。
+   */
+  | { readonly kind: 'process-close'; readonly closedAt: number }
   /** 整体替换阶段表（同名阶段保留其任务与态；会被丢掉的非空阶段一律拒，见 `WORK_STAGE_HAS_TASKS`）。 */
   | { readonly kind: 'stage-define'; readonly stages: readonly WorkStageDraft[] }
   /** 阶段开工（串行门：前序阶段必须全 `done`）。 */

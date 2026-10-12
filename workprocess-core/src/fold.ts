@@ -179,6 +179,8 @@ export function sameProcess(a: WorkProcess, b: WorkProcess): boolean {
   return a.id === b.id && a.objective === b.objective && a.revision === b.revision
     && a.stages.length === b.stages.length && a.stages.every((s, i) => sameStage(s, b.stages[i]))
     && sameTombstones(a.cleared ?? [], b.cleared ?? [])
+    // 终止水印也要逐字段对上：重放校验盖不住它，伪造的 closedAt 就会溜进来。
+    && a.closedAt === b.closedAt
 }
 
 /* -------------------------------------------------------------------------- */
@@ -252,7 +254,18 @@ function mapTask(process: WorkProcess, taskId: string, fn: (t: WorkTask) => Work
  * 对齐宿主 `applyGoalEvent(state, event)` 的形态，但只返回折叠结果（不持有累加器）。
  */
 export function applyWorkEvent(current: WorkProcess | undefined, event: WorkEvent): WorkFoldResult {
+  // **收口总闸**：已收口的流程不再接受任何写（`process-close` 自身除外——它负责幂等判定）。
+  // 重建须先 `discard`（丢弃走服务层、不经事件表，不受影响）。
+  if (current !== undefined && current.closedAt !== undefined && event.kind !== 'process-close') {
+    return no(current, 'process-closed')
+  }
   switch (event.kind) {
+    case 'process-close': {
+      if (current === undefined) return no(undefined, 'process-close:no-process')
+      if (current.closedAt !== undefined) return no(current, 'process-close:already-closed')
+      if (!processAllowsClose(current)) return no(current, 'process-close:stages-open')
+      return yes({ ...current, closedAt: event.closedAt, revision: current.revision + 1 })
+    }
     case 'init': {
       if (event.objective.trim() === '') return no(current, 'init:objective-required')
       const built = buildStages(event.stages)
@@ -539,10 +552,11 @@ export function decodeWorkStage(raw: unknown): WorkStage {
 export function decodeWorkProcess(raw: unknown): WorkProcess {
   if (typeof raw !== 'object' || raw === null) fail('快照不是对象')
   const o = raw as Record<string, unknown>
-  requireKeys(o, ['id', 'objective', 'revision', 'stages'], '快照', ['cleared'])
+  requireKeys(o, ['id', 'objective', 'revision', 'stages'], '快照', ['cleared', 'closedAt'])
   const id = requireNonEmptyString(o.id, '快照 id')
   const objective = requireNonEmptyString(o.objective, '快照 objective')
   const revision = requirePositiveInt(o.revision, '快照 revision')
+  const closedAt = o.closedAt === undefined ? undefined : requireFiniteNumber(o.closedAt, '快照 closedAt')
   if (!Array.isArray(o.stages)) fail('快照 stages 必须是数组')
   const stages = (o.stages as unknown[]).map(decodeWorkStage)
   const keys = new Set<string>()
@@ -580,6 +594,7 @@ export function decodeWorkProcess(raw: unknown): WorkProcess {
   return {
     id, objective, revision, stages,
     ...(cleared === undefined ? {} : { cleared }),
+    ...(closedAt === undefined ? {} : { closedAt }),
   }
 }
 
@@ -602,6 +617,10 @@ export function decodeWorkEvent(raw: unknown): WorkEvent {
     case 'objective-edit': {
       requireKeys(o, ['kind', 'objective'], 'objective-edit 事件')
       return { kind: 'objective-edit', objective: requireNonEmptyString(o.objective, 'objective-edit.objective') }
+    }
+    case 'process-close': {
+      requireKeys(o, ['kind', 'closedAt'], 'process-close 事件')
+      return { kind: 'process-close', closedAt: requireFiniteNumber(o.closedAt, 'process-close.closedAt') }
     }
     case 'stage-define': {
       requireKeys(o, ['kind', 'stages'], 'stage-define 事件')

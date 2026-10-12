@@ -17,13 +17,13 @@
  * @module workprocess-core/invariant
  */
 import type { WorkEventKind } from './domain.js'
-import { sameProcess, sameTask, serialViolation, type WorkFoldResult } from './fold.js'
+import { processAllowsClose, sameProcess, sameTask, serialViolation, type WorkFoldResult } from './fold.js'
 import { WorkError } from './runtime.js'
 import type { WorkProcess, WorkTask } from './types.js'
 
 /** 一条不变量违反（人话；供测试与诊断面）。 */
 export interface WorkInvariantViolation {
-  readonly inv: 'INV-1' | 'INV-2' | 'INV-3' | 'INV-4' | 'INV-5' | 'INV-6'
+  readonly inv: 'INV-1' | 'INV-2' | 'INV-3' | 'INV-4' | 'INV-5' | 'INV-6' | 'INV-7'
   readonly message: string
 }
 
@@ -76,6 +76,10 @@ export function checkWorkInvariants(
   if (eventKind !== 'init' && eventKind !== 'objective-edit' && next.objective !== prev.objective) {
     out.push({ inv: 'INV-4', message: 'objective 被非 init / objective-edit 事件改写（应当稳定）' })
   }
+  // closedAt 只能由 `process-close` 写：它是终止水印，任何别的动词顺手改它都是收口语义被架空。
+  if (eventKind !== 'process-close' && next.closedAt !== prev.closedAt) {
+    out.push({ inv: 'INV-4', message: 'closedAt 被非 process-close 事件改写（终止水印应当稳定）' })
+  }
 
   // INV-1：已完成的任务只能原样保留，或被 clear 掉（不在 after 里）。
   for (const [id, task] of before) {
@@ -113,6 +117,11 @@ export function checkWorkInvariants(
     if (stage.tasks.length === 0 || stage.tasks.some((t) => t.phase !== 'complete')) {
       out.push({ inv: 'INV-6', message: '阶段已收口但任务未全完成：' + stage.key })
     }
+  }
+
+  // INV-7：流程收口自洽（closed ⇒ 全阶段 done）。与 fold 的收口判据同源：规则坏了当场响。
+  if (next.closedAt !== undefined && !processAllowsClose(next)) {
+    out.push({ inv: 'INV-7', message: '流程已收口但阶段未全部 done' })
   }
   return out
 }

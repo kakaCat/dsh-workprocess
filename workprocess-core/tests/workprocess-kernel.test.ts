@@ -15,7 +15,7 @@ import { checkWorkInvariants } from 'workprocess-core/invariant.js'
 import { WorkError } from 'workprocess-core/runtime.js'
 import type { WorkProcess, WorkStageDraft } from 'workprocess-core/types.js'
 import {
-  clearWorkTask, completeWorkStage, completeWorkTask, createWorkProcess, createWorkTask,
+  clearWorkTask, closeWorkProcess, completeWorkStage, completeWorkTask, createWorkProcess, createWorkTask,
   defineWorkStages, discardWorkProcess, editWorkObjective, progressOf, stageClosePolicyOf, startWorkStage,
   workProcessOf, workProcessViewOf, workTaskOf,
   type WorkRecordLike,
@@ -560,5 +560,123 @@ describe('改流程目标（objective-edit：人改目标，不丢历史）', ()
     expect(st.writes).toBe(writes)
     await expect(editWorkObjective(deps, 'ws-a', '  ')).rejects.toMatchObject({ code: 'WORK_OBJECTIVE_REQUIRED' })
     await expect(editWorkObjective(deps, 'ws-a', 'z', 9)).rejects.toMatchObject({ code: 'WORK_CONFLICT' })
+  })
+})
+
+describe('流程收口（process-close：轻量终止水印）', () => {
+  /** 起一条流程并把全阶段做完（收口用例的起点）。 */
+  function finishedProcess(): WorkProcess {
+    let p = apply(initProcess(), { kind: 'stage-start', stageKey: 'prep' })
+    p = apply(p, { kind: 'task-create', task: { id: 'wt:prep:1', stageKey: 'prep', objective: '清洗' } })
+    p = apply(p, { kind: 'task-complete', taskId: 'wt:prep:1' })
+    p = apply(p, { kind: 'stage-done', stageKey: 'prep' })
+    p = apply(p, { kind: 'stage-start', stageKey: 'train' })
+    p = apply(p, { kind: 'task-create', task: { id: 'wt:train:1', stageKey: 'train', objective: '训练' } })
+    p = apply(p, { kind: 'task-complete', taskId: 'wt:train:1' })
+    p = apply(p, { kind: 'stage-done', stageKey: 'train' })
+    p = apply(p, { kind: 'stage-start', stageKey: 'release' })
+    p = apply(p, { kind: 'task-create', task: { id: 'wt:release:1', stageKey: 'release', objective: '发布' } })
+    p = apply(p, { kind: 'task-complete', taskId: 'wt:release:1' })
+    return apply(p, { kind: 'stage-done', stageKey: 'release' })
+  }
+
+  it('全阶段 done ⇒ 落 closedAt、revision +1、其余字段原样', () => {
+    const p = finishedProcess()
+    const before = p.revision
+    const closed = apply(p, { kind: 'process-close', closedAt: 1_000 })
+    expect(closed.closedAt).toBe(1_000)
+    expect(closed.revision).toBe(before + 1)
+    expect(closed.objective).toBe(p.objective)
+    expect(closed.stages.every((s) => s.state === 'done')).toBe(true)
+  })
+
+  it('判据：阶段没全 done ⇒ 拒（stages-open）；已收口再收 ⇒ 拒（already-closed，零写入）', () => {
+    const open = apply(initProcess(), { kind: 'stage-start', stageKey: 'prep' })
+    const blocked = applyWorkEvent(open, { kind: 'process-close', closedAt: 1 })
+    expect(blocked.changed).toBe(false)
+    expect(blocked.reason).toBe('process-close:stages-open')
+    const done = finishedProcess()
+    const closed = apply(done, { kind: 'process-close', closedAt: 1 })
+    const again = applyWorkEvent(closed, { kind: 'process-close', closedAt: 2 })
+    expect(again.changed).toBe(false)
+    expect(again.reason).toBe('process-close:already-closed')
+  })
+
+  it('收口总闸：已收口的流程拒绝一切写（task-create / stage-define / objective-edit 全部零写入）', () => {
+    const closed = apply(finishedProcess(), { kind: 'process-close', closedAt: 1 })
+    const writes: WorkEvent[] = [
+      { kind: 'task-create', task: { id: 'wt:x:1', stageKey: 'prep', objective: 'x' } },
+      { kind: 'stage-define', stages: [{ key: 'again', statement: '重来' }] },
+      { kind: 'objective-edit', objective: '换个目标' },
+      { kind: 'stage-start', stageKey: 'prep' },
+    ]
+    for (const event of writes) {
+      const r = applyWorkEvent(closed, event)
+      expect(r.changed).toBe(false)
+      expect(r.reason).toBe('process-closed')
+    }
+    // init 重建也被闸住（须先 discard）
+    expect(applyWorkEvent(closed, { ...INIT }).reason).toBe('process-closed')
+  })
+
+  it('严格解码：事件字段精确；快照放行 closedAt、坏值拒', () => {
+    expect(decodeWorkEvent({ kind: 'process-close', closedAt: 5 })).toEqual({ kind: 'process-close', closedAt: 5 })
+    expect(() => decodeWorkEvent({ kind: 'process-close', closedAt: 5, extra: 1 })).toThrowError(WorkError)
+    const closed = apply(finishedProcess(), { kind: 'process-close', closedAt: 5 })
+    expect(decodeWorkProcess(closed).closedAt).toBe(5)
+    expect(() => decodeWorkProcess({ ...closed, closedAt: 'x' })).toThrowError(WorkError)
+    expect(decodeWorkProcess({ ...closed, closedAt: undefined }).closedAt).toBeUndefined()
+  })
+
+  it('不变量：非 process-close 事件改 closedAt 会被 INV-4 拦下；未全 done 却收口会被 INV-7 拦下', () => {
+    const p = finishedProcess()
+    const tampered = { ...p, closedAt: 9 }
+    expect(checkWorkInvariants(p, { changed: true, next: tampered }, 'stage-start').map((v) => v.inv))
+      .toContain('INV-4')
+    // INV-7 在 fold 已拒，这里直接构造坏快照验证检查本身
+    const halfDone = { ...p, stages: p.stages.map((s, i) => (i === 0 ? s : { ...s, state: 'pending' as const })), closedAt: 9 }
+    expect(checkWorkInvariants(p, { changed: true, next: halfDone }, 'process-close').map((v) => v.inv))
+      .toContain('INV-7')
+  })
+
+  it('服务层：收口 +1 且幂等零写入；CAS 旧值即拒；未全 done 时 zero-write', async () => {
+    const st = storeOf({ 'ws-a': { updatedAt: 1 } })
+    const deps = { store: st as never, now: () => 1_000 }
+    await createWorkProcess(deps, 'ws-a', { objective: 'x', stages: [{ key: 'only', statement: '唯一' }] })
+    // 阶段没收口 ⇒ close 零写入
+    expect(await closeWorkProcess(deps, 'ws-a')).toBe(false)
+    await startWorkStage(deps, 'ws-a', 'only')
+    await createWorkTask(deps, 'ws-a', { stageKey: 'only', objective: '干活' })
+    await completeWorkTask(deps, 'ws-a', 'wt:only:1')
+    await completeWorkStage(deps, 'ws-a', 'only')
+    expect(await closeWorkProcess(deps, 'ws-a')).toBe(true)
+    expect((await workProcessOf(deps, 'ws-a'))?.closedAt).toBe(1_000)
+    const writes = st.writes
+    expect(await closeWorkProcess(deps, 'ws-a')).toBe(false)
+    expect(st.writes).toBe(writes)
+    await expect(closeWorkProcess(deps, 'ws-a', 999)).rejects.toMatchObject({ code: 'WORK_CONFLICT' })
+  })
+
+  it('迁移链：收口也走"事件重算 = 记录快照"（伪造 closedAt 即拒）', () => {
+    // 从 init 逐事件搭一条真实变更链（收口必须接在合法前态上重算）。
+    const EVENTS: WorkEvent[] = [
+      { kind: 'init', id: 'wp:ws-a', objective: 'x', stages: [{ key: 'only', statement: '唯一' }] },
+      { kind: 'stage-start', stageKey: 'only' },
+      { kind: 'task-create', task: { id: 'wt:only:1', stageKey: 'only', objective: '干活' } },
+      { kind: 'task-complete', taskId: 'wt:only:1' },
+      { kind: 'stage-done', stageKey: 'only' },
+    ]
+    let cur: WorkProcess | undefined
+    const chain = EVENTS.map((event) => {
+      const r = applyWorkEvent(cur, event)
+      if (!r.changed || r.next === undefined) throw new Error('夹具失败：' + event.kind)
+      cur = r.next
+      return change(event, r.next)
+    })
+    const closeEvent: WorkEvent = { kind: 'process-close', closedAt: 42 }
+    const closed = apply(cur!, closeEvent)
+    expect(foldWorkProcess([...chain, change(closeEvent, closed)]).process?.closedAt).toBe(42)
+    expect(() => foldWorkProcess([...chain, change(closeEvent, { ...closed, closedAt: 43 })]))
+      .toThrowError(WorkError)
   })
 })

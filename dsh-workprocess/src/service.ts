@@ -26,6 +26,8 @@ export interface WorkprocessStatus {
   readonly currentStageKey?: string
   /** 已准入回合数（耐久在归属记录里）。 */
   readonly roundsStarted: number
+  /** 流程收口时间戳（缺省 = 未收口）：已收口的流程一切写被内核拒。 */
+  readonly closedAt?: number
   /** 当前阶段首个任务生效的回合上限（没写 max_rounds ⇒ 缺省不展示）。 */
   readonly maxRounds?: number
 }
@@ -81,6 +83,7 @@ export function createWorkprocessService(store: WorkStoreLike): WorkprocessServi
         ...(found.stage === undefined ? {} : { currentStageKey: found.stage.key }),
         roundsStarted: (await store.get(scope))?.rounds?.started ?? 0,
         ...(cap === undefined ? {} : { maxRounds: cap }),
+        ...(found.process.closedAt === undefined ? {} : { closedAt: found.process.closedAt }),
       }
     },
     async discard(agent) {

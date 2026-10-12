@@ -397,16 +397,14 @@ describe('收口确认轮（任务全达成 + 策略 human ⇒ 请人拍板，�
     expect(h.sent).toHaveLength(1)
   })
 
-  it('策略 auto：驱动器自己收口，**不**投阶段确认轮；收完只剩"流程级"请人判', async () => {
+  it('策略 auto：驱动器自己收口，**不**投阶段确认轮；缺省 close:auto ⇒ 流程顺手收口', async () => {
     const h = await seededDone('auto')
     await h.emitStatus('idle')
     // 阶段被驱动器自动收口（没问人）
     expect((await h.tools.get_workstage.execute({}, h.exec())).stages).toMatchObject([{ state: 'done' }])
-    // 全阶段 done ⇒ 剩下的唯一一件事是"流程成没成"——那是人的判断，故投的是**流程级**确认轮
-    expect(h.sent).toHaveLength(1)
-    const text = JSON.stringify(h.sent[0].content)
-    expect(text).toContain('流程收口待人工判断')
-    expect(text).not.toContain('阶段收口待人工确认')
+    // 缺省 close:'auto'：全阶段 done ⇒ 驱动器直接落 process-close——**不投**"流程级请判轮"
+    expect(h.sent).toHaveLength(0)
+    expect((h.record()?.workProcess as { closedAt?: number }).closedAt).toBeDefined()
   })
 })
 
@@ -492,5 +490,65 @@ describe('人机确认接线（工具自己问人：宿主 userQuestions）', ()
     h.setUserAnswers(['NO_PROVIDER'])
     const out = await h.tools.update_workstage.execute({ stage_key: 'prep', action: 'done' }, h.exec())
     expect(out).toMatchObject({ success: false, code: 'WORK_NO_PERMISSION' })
+  })
+})
+
+/** 读回收口测试要看的流程字段（record() 的 workProcess 是 unknown，集中一处收窄）。 */
+function processOf(h: FakeHost): { closedAt?: number; stages: Array<{ state: string }> } {
+  return h.record()?.workProcess as { closedAt?: number; stages: Array<{ state: string }> }
+}
+
+describe('流程收口（close: auto 缺省 / human 显式）', () => {
+  /** 起一条单阶段流程并把它做完（auto 收口，配置由用例给）。 */
+  async function seededFinished(config: Record<string, unknown> = {}) {
+    const local = fakeHost()
+    apply(local.ctx, { drive: true, ...config })
+    await local.tools.create_workstage.execute(
+      { objective: '实现一个俄罗斯方块小游戏', stages: [{ key: 'only', statement: '唯一阶段', close_policy: 'auto' }] },
+      local.exec(),
+    )
+    await local.tools.create_worktask.execute({ stage_key: 'only', objective: '干活' }, local.exec())
+    await local.tools.update_worktask.execute({ task_id: 'wt:only:1', action: 'complete' }, local.exec())
+    local.sent.length = 0
+    return local
+  }
+
+  it('close: auto（缺省）：最后一段 done ⇒ 一个空闲边界内收口 stage + 落 process-close，不再投任何轮', async () => {
+    const h = await seededFinished()
+    await h.emitStatus('idle')
+    expect(h.sent).toHaveLength(0)                        // 不问人、不投请判轮
+    expect(processOf(h).closedAt).toBeDefined()          // 终止水印落盘
+    expect(processOf(h).stages[0].state).toBe('done')
+    // 收口后再空闲：hold('process-closed')，零写入零投递
+    const writes = h.domain.writes.length
+    await h.emitStatus('idle')
+    expect(h.sent).toHaveLength(0)
+    expect(h.domain.writes.length).toBe(writes)
+  })
+
+  it('close: human（显式）：全阶段 done ⇒ 投一次「流程级请判」轮；不再自动收口（方案 B 口径）', async () => {
+    const h = await seededFinished({ close: 'human' })
+    await h.emitStatus('idle')
+    expect(processOf(h).closedAt).toBeUndefined()               // 不自动落 close
+    expect(h.sent).toHaveLength(1)
+    const text = JSON.stringify(h.sent[0].content)
+    expect(text).toContain('流程收口待人工判断')
+    // 问过一次不再问
+    await h.emitStatus('idle')
+    expect(h.sent).toHaveLength(1)
+  })
+
+  it('已收口的流程：一切写被拒（task-create 零写入），重建须先 discard', async () => {
+    const h = await seededFinished()
+    await h.emitStatus('idle')
+    const out = await h.tools.create_worktask.execute({ stage_key: 'only', objective: '再干一件' }, h.exec())
+    // 零写入被闸住（注：createWorktask 的 changed:false 回执不带 reason 是既有缺口，所有零写入路径皆然）
+    expect(out).toMatchObject({ success: true, changed: false })
+    // discard 照旧可用（服务层动作，不经事件表）。真人专属授权需要"开放回合 + 人的消息"两件套：
+    h.setStatus('running')
+    h.setOpenTurn(0)
+    h.setEvents([{}, { type: 'user/message', data: { source: { kind: 'user' } } }])
+    expect(await h.tools.update_workstage.execute({ action: 'discard' }, h.exec())).toMatchObject({ success: true, changed: true })
+    expect(h.record()?.workProcess).toBeUndefined()
   })
 })

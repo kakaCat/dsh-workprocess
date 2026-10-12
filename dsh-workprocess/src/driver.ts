@@ -15,7 +15,8 @@
  * @module dsh-workprocess/driver
  */
 import {
-  blockWorkTask, completeWorkStage, currentStageOf, stageAllowsStart, startWorkStage, workProcessOf,
+  blockWorkTask, closeWorkProcess, completeWorkStage, currentStageOf, stageAllowsStart, startWorkStage,
+  workProcessOf,
 } from 'workprocess-core'
 import type { WorkProcess, WorkStoreLike, WorkTask } from 'workprocess-core'
 import { decideWorkRound, renderWorkAskPrompt, renderWorkPlanPrompt, renderWorkRoundPrompt } from 'workprocess-round-driver'
@@ -38,6 +39,7 @@ export function factsOf(
     processId: process.id,
     processRevision: process.revision,
     ...(sessionKey === undefined ? {} : { sessionKey }),
+    ...(process.closedAt === undefined ? {} : { processClosed: true }),
     ...(current === undefined ? {} : {
       currentStage: {
         key: current.key,
@@ -68,6 +70,8 @@ export interface TickDeps {
    * 决策树改为停手等人（`wait-human`）——把"阶段空着"这件事露出来。
    */
   readonly stagePlanAsked?: (stageKey: string) => boolean
+  /** **流程自动收口**（`close: 'auto'`）：最后一段 done 后驱动器直接落 close，不问人。 */
+  readonly autoClose?: boolean
   /**
    * **收口确认是否已经问过人**（同一件事只问一次）：问过就不再投，避免每个空闲边界都刷一轮。
    * 键由组合根定（如 `stage-done:<阶段键>` / `close`）。
@@ -89,6 +93,7 @@ export async function tickWorkprocess(
   const planAsked = deps.stagePlanAsked
   const askAsked = deps.humanAskAsked
   const gates: GateFacts = {
+    ...(deps.autoClose === true ? { autoClose: true } : {}),
     ...(planAsked === undefined || work.currentStage === undefined
       ? {}
       : { stagePlanBlocked: planAsked(work.currentStage.key) === true }),
@@ -118,9 +123,12 @@ export async function tickWorkprocess(
     case 'block-task':
       await blockWorkTask(deps, scope, decision.taskId, decision.reason)
       break
+    case 'close-process':
+      await closeWorkProcess(deps, scope)
+      break
     default:
       // drive / plan-stage：只**返回**结论（投递是组合根的事）；
-      // ask-* / wait-human / hold：没有对应能力就不假装有。
+      // close-process 已在上面落库；ask-* / wait-human / hold：没有对应能力就不假装有。
       break
   }
   return decision

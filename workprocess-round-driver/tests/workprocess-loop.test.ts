@@ -64,6 +64,7 @@ function label(d: RoundDecision): string {
     case 'ask-stage-done': return 'ask-stage-done:' + d.stageKey
     case 'close-stage': return 'close-stage:' + d.stageKey
     case 'ask-close': return 'ask-close'
+    case 'close-process': return 'close-process'
     case 'block-task': return 'block-task:' + d.taskId
     case 'wait-human': return 'wait-human:' + d.reason
     case 'hold': return 'hold:' + d.reason

@@ -239,6 +239,8 @@ export async function getWorkstage(deps: WorkToolDeps, args: Record<string, unkn
     /** 串行门读数：当前阶段 pending 且前序阶段全 done ⇒ 可开工。 */
     allows_start: current !== undefined && stageAllowsStart(process, current.key),
     allows_close: processAllowsClose(process),
+    /** 流程收口时间戳（缺省 = 未收口）：已收口的流程一切写被内核拒（'process-closed'）。 */
+    ...(process.closedAt === undefined ? {} : { closed_at: process.closedAt }),
   }
 }
 

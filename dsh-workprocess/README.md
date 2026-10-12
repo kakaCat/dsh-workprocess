@@ -38,6 +38,7 @@ apply(ctx, config) ⇒
         tick: true            # 回合边界是否自动驱动（缺省 true）
         drive: true           # 空闲边界是否**自动投递续跑回合**（缺省 false；本仓装载层打开）
         defaultMaxRounds: 20  # 任务没写 max_rounds 时的硬上限（防跑飞）
+        close: auto           # 流程收口：auto（缺省）= 最后一段 done 即收口；human = 全阶段 done 后投「请判」轮（判了不落章，方案 B 口径）
 ```
 
 ## 续跑是怎么跑的（刹车在哪）
@@ -120,7 +121,7 @@ ln -sfn <repo>/dsh-workprocess ~/.dsh/profiles/desktop/node_modules/dsh-workproc
 ## 测试
 
 ```bash
-pnpm test   # 全仓 148 条；本包 30 条：装配面 / 域声明与内核校验 / 归属缺省 / 真人判定 /
+pnpm test   # 全仓 160 条；本包 33 条：装配面 / 域声明与内核校验 / 归属缺省 / 真人判定 /
             #   空闲边界（开工·auto 收口·running 不动手）/ 续跑投递（自署来源·去重·上限刹车）/ **阶段规划轮** / **收口确认轮** /
             #   服务面 ctx.workprocess（view / pauseActive / resumePaused / discard 幂等）
 ```

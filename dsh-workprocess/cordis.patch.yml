@@ -16,5 +16,7 @@
         # 刹车 = 任务自己的 max_rounds，没写就按 defaultMaxRounds（硬上限，防跑飞）。
         drive: true
         defaultMaxRounds: 20
+        # 流程收口：auto = 最后一段 done 即收口（缺省）；human = 全阶段 done 后投「请判」轮（判了不落章，方案 B 口径）。
+        close: auto
     - id: command-workprocess
       name: "dsh-command-workprocess"

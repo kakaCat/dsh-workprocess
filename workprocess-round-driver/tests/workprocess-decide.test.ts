@@ -72,6 +72,24 @@ describe('层1 · 串行门与收口', () => {
       .toEqual({ kind: 'ask-close', processId: 'wp:ws-a' })
   })
 
+  it('全阶段 done 且 close:auto → 驱动器直接收口（close-process），不问人', () => {
+    expect(decideWorkRound(input({
+      gates: { autoClose: true },
+      work: { processId: 'wp:ws-a', currentStage: undefined },
+    }))).toEqual({ kind: 'close-process', processId: 'wp:ws-a' })
+  })
+
+  it('已收口的流程 → hold(process-closed)：记录终止，一切推进结论都不再生效', () => {
+    expect(decideWorkRound(input({
+      gates: { autoClose: true },
+      work: { processId: 'wp:ws-a', currentStage: undefined, processClosed: true },
+    }))).toEqual({ kind: 'hold', reason: 'process-closed', processId: 'wp:ws-a' })
+    // human 口径下同样不动（收口优先级高于请判/自动收口）
+    expect(decideWorkRound(input({
+      work: { processId: 'wp:ws-a', currentStage: undefined, processClosed: true },
+    }))).toEqual({ kind: 'hold', reason: 'process-closed', processId: 'wp:ws-a' })
+  })
+
   it('阶段 pending 且串行门放行 → 先开工（不开工就不许跑任务）', () => {
     const r = decideWorkRound(input({ work: { processId: 'wp:ws-a', currentStage: stage({ state: 'pending', allowsStart: true, tasks: [task()] }) } }))
     expect(r).toEqual({ kind: 'start-stage', processId: 'wp:ws-a', stageKey: 'prep' })

@@ -103,8 +103,10 @@ function taskLine(task: WorkTask): string {
 export function renderWorkStatus(title: string, status: WorkprocessStatus): WorkCommandResult {
   const current = status.stages.find((s) => s.key === status.currentStageKey)
   const rounds = String(status.roundsStarted) + (status.maxRounds === undefined ? '' : '/' + String(status.maxRounds))
-  const whoActs = current === undefined
-    ? ['全部阶段已收口：流程没有"完成"态——成没成是判据（人判）。']
+  const whoActs = status.closedAt !== undefined
+    ? ['流程已收口（' + new Date(status.closedAt).toLocaleString() + '）：记录终止，写被拒；重开新流程用 /work <目标>（旧流程须先 /work clear）。']
+    : current === undefined
+      ? ['全部阶段已收口：流程没有"完成"态——成没成是判据（人判）。']
     : current.state === 'pending'
       ? ['当前阶段还没开工：空闲边界上驱动器会自动开工。']
       : current.tasks.some((t) => t.phase === 'active')

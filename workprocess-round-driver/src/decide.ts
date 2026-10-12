@@ -14,6 +14,8 @@
  *              任务全 complete → 策略 `auto` 则 close-stage（自动收口），否则 ask-stage-done（请人确认）；
  *              **阶段已开工却没任务 → plan-stage**（投一轮让 agent 给本阶段建任务；问过一次就停手等人）。
  *              决策层仍**不臆造任务**：它只把"这个阶段是空的"这件事交给 agent。
+ *   ⑩ **层0**：全阶段 done 且已收口 → hold('process-closed')；`close: auto` → close-process；
+ *              否则 ask-close（请人判，流程没有"完成"态——判据即全阶段 done）。
  *
  * @module workprocess/round/decide
  */
@@ -53,8 +55,13 @@ function pick(tasks: readonly TaskFacts[]): { running?: TaskFacts; waiting?: Tas
 
 /** 层的分支：先层1（串行门 / 收口），再层2（相位机 / 回合上限）。 */
 function layerBranch(input: DecideInput, processId: string, stage: StageFacts | undefined): RoundDecision {
-  // 全阶段 done ⇒ 流程级收口请人判（流程没有"完成"态）；已经问过就停手等人。
+  // 全阶段 done ⇒ 流程级收口。三条路（顺序即纪律）：
+  //   · 已收口（closedAt 非空）⇒ 记录终止，一切推进结论都不再生效；
+  //   · `close: 'auto'` ⇒ 驱动器直接落 close（最后一段 done 即完成——方案 B 的缺省）；
+  //   · 否则请人判（ask-close，问过一次就停手等人）。
   if (stage === undefined) {
+    if (input.work?.processClosed === true) return hold('process-closed', processId)
+    if (input.gates?.autoClose === true) return { kind: 'close-process', processId }
     return input.gates?.humanAskBlocked === true
       ? { kind: 'wait-human', processId, reason: 'ask-close-asked' }
       : { kind: 'ask-close', processId }
