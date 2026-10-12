@@ -16,6 +16,13 @@ workprocess 的**插件入口**（组合根）：把「内核 + 驱动 + 工具�
 
 ```
 inject = ['agents', 'tools', 'sessionProjections', 'storageDomain', 'systemPrompt']
+apply(ctx: Context, config) ⇒
+  · 打开归属记录域（storage domain `workprocess`）
+  · 注册常驻策略段（`ctx.systemPrompt.section('tool:workprocess')`）
+  · 给工具面接上通告口（deferNotice ⇒ exec.deferContext）与人机确认口（askHuman ⇒ ctx.userQuestions）
+  · **发 `work/changed` typed 事件**（declare module '@deepseek-ai/cordis'；写路径统一从组合根进事件总线；
+     payload = { scope, change }，丢弃为墓碑 change: undefined——外部插件可 ctx.on 订阅）
+  · ctx.provide('workprocess', 服务面)   ← 官方 cordis provide，纯对象即可（无 instanceof Service 检查）
 apply(ctx, config) ⇒
   · 打开归属记录域（storage domain `workprocess`）
   · 六个工具进 ctx.tools.register（get_/create_/update_ × workstage/worktask）

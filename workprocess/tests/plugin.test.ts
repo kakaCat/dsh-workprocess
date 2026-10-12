@@ -56,6 +56,8 @@ interface FakeHost {
   deferred: unknown[]
   /** 注册进 systemPrompt 的策略段。 */
   policySections: Array<{ name: string; order: number; text: string }>
+  /** `ctx.emit` 收下的载荷（work/changed 断言用）。 */
+  emitted: Array<{ name: string; payload: unknown }>
   session: { id: string; snapshotEvents(): readonly HostEvent[] }
   domain: ReturnType<typeof fakeDomainFacility>
   /** 投一条会话事件（走插件真挂上的 handler，等它跑完）。 */
@@ -89,6 +91,7 @@ function fakeHost(): FakeHost {
   const hooks: string[] = []
   const deferred: unknown[] = []
   const policySections: Array<{ name: string; order: number; text: string }> = []
+  const emitted: Array<{ name: string; payload: unknown }> = []
   let userAnswers: Array<{ id: string; selected: string[]; custom?: string } | 'ASK_CANCELLED' | 'NO_PROVIDER'> = []
   const questionsService = {
     ask: async (): Promise<{ answers: Array<{ id: string; selected: string[]; custom?: string }> }> => {
@@ -114,6 +117,8 @@ function fakeHost(): FakeHost {
     provide: (serviceName: string, value: unknown) => { (ctx as Record<string, unknown>)[serviceName] = value; return undefined },
     // 宿主的问题服务（`ctx.get('userQuestions')`）：策略 human 的收口确认走它。
     get: (name: string) => (name === 'userQuestions' ? questionsService : undefined),
+    // 宿主事件总线：`ctx.emit` 收在这里（work/changed 断言用）。
+    emit: (name: string, payload: unknown) => { emitted.push({ name, payload }) },
     // 系统提示词面（策略段）：槽位数与宿主 SECTION_ORDERS.TOOL_GOAL 一致。
     systemPrompt: {
       section: (section: { name: string; order: number; text: string }) => { policySections.push(section); return (): void => {} },
@@ -121,7 +126,7 @@ function fakeHost(): FakeHost {
     },
   }
   return {
-    ctx: ctx as never, tools, hooks, sent, deferred, policySections, session, domain,
+    ctx: ctx as never, tools, hooks, sent, deferred, policySections, emitted, session, domain,
     store: storageDomainStoreOf(ctx as never),
     emit: async (event: unknown) => { for (const h of handlers.get('session/event') ?? []) await h(session, event) },
     emitStatus: async (next: string) => {
@@ -550,5 +555,51 @@ describe('流程收口（close: auto 缺省 / human 显式）', () => {
     h.setEvents([{}, { type: 'user/message', data: { source: { kind: 'user' } } }])
     expect(await h.tools.update_workstage.execute({ action: 'discard' }, h.exec())).toMatchObject({ success: true, changed: true })
     expect(h.record()?.workProcess).toBeUndefined()
+  })
+})
+
+describe('work/changed 宿主事件（对齐 goal/changed：写路径统一从组合根进事件总线）', () => {
+  it('有效写入 ⇒ emit work/changed（scope + 事件 + 全量快照，与耐久状态同源）', async () => {
+    await call('create_workstage', { objective: 'x', stages: [{ key: 'prep', statement: '准备' }] })
+    await call('create_worktask', { stage_key: 'prep', objective: '清洗数据' })
+    const changes = host.emitted.filter((e) => e.name === 'work/changed' && (e.payload as { change: unknown }).change !== undefined)
+    expect(changes.length).toBe(2)                       // init + task-create
+    const first = changes[0].payload as { scope: string; change: { event: { kind: string }; process: { revision: number } } }
+    expect(first.scope).toBe('session-1')
+    expect(first.change.event.kind).toBe('init')
+    expect(first.change.process.revision).toBe(1)
+    const second = changes[1].payload as { change: { event: { kind: string } } }
+    expect(second.change.event.kind).toBe('task-create')
+  })
+
+  it('幂等零写入 ⇒ 不发事件（changed:false 没有变更就没有事件）', async () => {
+    await call('create_workstage', { objective: 'x', stages: [{ key: 'prep', statement: '准备' }] })
+    host.emitted.length = 0
+    await call('create_workstage', { objective: 'x', stages: [{ key: 'prep', statement: '准备' }] })
+    expect(host.emitted.filter((e) => e.name === 'work/changed')).toHaveLength(0)
+  })
+
+  it('discard ⇒ 发墓碑（change = undefined）——丢弃不经事件表，单独报', async () => {
+    await call('create_workstage', { objective: 'x', stages: [{ key: 'prep', statement: '准备' }] })
+    host.emitted.length = 0
+    // 真人专属授权的两件套
+    host.setStatus('running')
+    host.setOpenTurn(0)
+    host.setEvents([{}, { type: 'user/message', data: { source: { kind: 'user' } } }])
+    await call('update_workstage', { action: 'discard' })
+    const tomb = host.emitted.filter((e) => e.name === 'work/changed')
+    expect(tomb).toHaveLength(1)
+    expect((tomb[0].payload as { scope: string; change: unknown }).change).toBeUndefined()
+    expect((tomb[0].payload as { scope: string }).scope).toBe('session-1')
+  })
+
+  it('驱动拍的机械动作也发事件（开工 stage-start 经内核写路径）', async () => {
+    await call('create_workstage', { objective: 'x', stages: [{ key: 'prep', statement: '准备' }] })
+    host.emitted.length = 0
+    await host.emitStatus('idle')
+    const kinds = host.emitted
+      .map((e) => (e.payload as { change?: { event: { kind: string } } }).change?.event.kind)
+      .filter(Boolean)
+    expect(kinds).toContain('stage-start')
   })
 })

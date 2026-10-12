@@ -8,12 +8,20 @@
  * 【口径对齐宿主 tool-goal】同款三重校验：agent 必须正是注册表里那个、状态 running、
  * 且正是本回合的发起者（`currentInitiator()`）——三个都不满足就**不授任何授权**。
  *
+ * 【类型来源】直接吃官方 cordis `Context`（`ctx.agents` / `ctx.sessionProjections` 的类型
+ * 由 `@deepseek-ai/dsh-agent` / `@deepseek-ai/dsh-session-projection` 增强提供）——
+ * 手写的 HostAgent/HostSession/AuthorityHostCtx 假面随之退役；事件切面在边界处一次性收窄
+ * 成判据要的窄形状。
+ *
  * @module workprocess/authority
  */
+import type { Context } from '@deepseek-ai/cordis'
+// type-only import：把官方包拉进编译程序，其 `declare module` 增强（ctx.sessionProjections）随之生效。
+import type {} from '@deepseek-ai/dsh-session-projection'
 import { authorityFromEvents, type WorkRoundRef, type WorkToolAuthority } from 'tool-workprocess'
 
-/** 会话事件的**最小读取面**（不 import 宿主包：结构类型，缺字段 = 判不出）。 */
-export interface HostEvent {
+/** 授权判据要的会话事件**窄形状**（边界收窄：官方 SessionEvent 字段更宽，判据只用这几个）。 */
+interface AuthorityEventSlice {
   readonly type?: string
   readonly data?: {
     readonly source?: {
@@ -25,35 +33,11 @@ export interface HostEvent {
   }
 }
 
-export interface HostSession {
-  readonly id: string
-  snapshotEvents(): readonly HostEvent[]
-}
-
-/** 宿主 Agent 的**最小读取面**。 */
-export interface HostAgent {
-  readonly id: string
-  readonly status?: string
-  /** 有父 = 子 agent（不授真人授权：子 agent 的回合不是人在打字）。 */
-  readonly parentAgent?: unknown
-  readonly session: HostSession
-}
-
-/** 授权判定要读的宿主服务（缺一个就退回保守侧）。 */
-export interface AuthorityHostCtx {
-  readonly agents: {
-    get(id: string): unknown
-    currentInitiator(): unknown
-  }
-  readonly sessionProjections?: {
-    stateOf(session: unknown, kind: string): { readonly openTurnStartSeq?: unknown } | undefined
-  }
-}
-
-/** 取本次工具调用的调用者 agent（不在会话里调 = undefined）。 */
-export function agentOf(exec: unknown): HostAgent | undefined {
+/** 取本次工具调用的调用者 agent（不在会话里调 = undefined；只要归属缺省要的窄面）。 */
+export function agentOf(exec: unknown): { readonly id: string; readonly session: { readonly id?: string } } | undefined {
   const agent = (exec as { agent?: unknown } | undefined)?.agent
-  return agent === undefined || agent === null ? undefined : agent as HostAgent
+  if (agent === undefined || agent === null) return undefined
+  return agent as { readonly id: string; readonly session: { readonly id?: string } }
 }
 
 /**
@@ -61,18 +45,21 @@ export function agentOf(exec: unknown): HostAgent | undefined {
  * 返回 `undefined` = **判不出 / 不达标**，调用方按 conservative 的 `autonomous` 处理。
  */
 export function authorityResolverOf(
-  ctx: AuthorityHostCtx,
+  ctx: Context,
 ): (exec: unknown, expected?: WorkRoundRef) => WorkToolAuthority | undefined {
   return (exec: unknown, expected?: WorkRoundRef): WorkToolAuthority | undefined => {
-    const agent = agentOf(exec)
-    if (agent === undefined) return undefined
-    if (ctx.agents.get(agent.id) !== agent) return undefined
-    if (agent.status !== undefined && agent.status !== 'running') return undefined
+    const agent = (exec as { agent?: unknown } | undefined)?.agent
+    if (agent === undefined || agent === null) return undefined
+    // 三重校验（官方类型：agents 注册表 / status / currentInitiator）。
+    if (ctx.agents.get((agent as { id: string }).id as never) !== agent) return undefined
+    if ((agent as { status?: string }).status !== 'running') return undefined
     if (ctx.agents.currentInitiator() !== agent) return undefined
-    const boundary = ctx.sessionProjections?.stateOf(agent.session, 'turnBoundary')
+    const session = (agent as { session: unknown }).session
+    const boundary = ctx.sessionProjections?.stateOf(session as never, 'turnBoundary')
     const start = boundary?.openTurnStartSeq
     // 无开放回合 / 判不出 ⇒ 不授自治（宿主 tool-goal 同款：判不出就别放行）
     if (typeof start !== 'number') return undefined
-    return authorityFromEvents(agent.session.snapshotEvents(), start, agent.parentAgent === undefined, expected)
+    const events = (session as { snapshotEvents(): readonly AuthorityEventSlice[] }).snapshotEvents()
+    return authorityFromEvents(events, start, (agent as { parentAgent?: unknown }).parentAgent === undefined, expected)
   }
 }

@@ -50,8 +50,12 @@ function scopeOfAgent(agent: unknown): string | undefined {
   return typeof id === 'string' && id.length > 0 ? id : undefined
 }
 
-/** 造服务面（组合根唯一实例：与打开的那个存储域同源）。 */
-export function createWorkprocessService(store: WorkStoreLike): WorkprocessService {
+/** 造服务面（组合根唯一实例：与打开的那个存储域同源）。
+ * @param onCleared 整条流程被丢弃时的墓碑通知（组合根接到宿主 `work/changed`，change = undefined）。
+ */
+export function createWorkprocessService(
+  store: WorkStoreLike, onCleared?: (scope: string) => void,
+): WorkprocessService {
   const now = (): number => Date.now()
   const stageOf = async (scope: string) => {
     const process = await workProcessOf({ store }, scope)
@@ -89,7 +93,9 @@ export function createWorkprocessService(store: WorkStoreLike): WorkprocessServi
     async discard(agent) {
       const scope = scopeOfAgent(agent)
       if (scope === undefined) return false
-      return discardWorkProcess({ store, now }, scope)
+      const changed = await discardWorkProcess({ store, now }, scope)
+      if (changed) onCleared?.(scope)
+      return changed
     },
     async pauseActive(agent) {
       const scope = scopeOfAgent(agent)

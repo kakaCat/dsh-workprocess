@@ -35,6 +35,10 @@
     "workprocess-round-driver": "workspace:*"
   },
   "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.4",
+    "@deepseek-ai/dsh-agent": "0.2.0-rc.1",
+    "@deepseek-ai/dsh-session-projection": "0.2.0-rc.1",
+    "@deepseek-ai/dsh-system-prompt": "0.2.0-rc.1",
     "zod": "^4.4.3"
   },
   "dsh": {

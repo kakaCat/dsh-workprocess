@@ -72,6 +72,8 @@ export interface TickDeps {
   readonly stagePlanAsked?: (stageKey: string) => boolean
   /** **流程自动收口**（`close: 'auto'`）：最后一段 done 后驱动器直接落 close，不问人。 */
   readonly autoClose?: boolean
+  /** 有效写入后的变更通知（透传给内核写路径；组合根接到宿主 `work/changed`）。 */
+  readonly onChanged?: (notification: { readonly processId: string; readonly scope: string; readonly change: unknown }) => void | Promise<void>
   /**
    * **收口确认是否已经问过人**（同一件事只问一次）：问过就不再投，避免每个空闲边界都刷一轮。
    * 键由组合根定（如 `stage-done:<阶段键>` / `close`）。

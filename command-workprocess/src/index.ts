@@ -34,17 +34,6 @@ import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands
 import type { WorkprocessService, WorkprocessStatus } from 'workprocess'
 import type { WorkStage, WorkTask } from 'workprocess'
 
-/**
- * cordis 服务类型增强：`ctx.workprocess` 由 `workprocess` 插件 provide（M2 起）；
- * 这里先声明上，apply 就能用真类型拿到服务，不再手写假 ctx 面。
- */
-declare module '@deepseek-ai/cordis' {
-  interface Context {
-    /** workprocess 领域服务（view / discard / pauseActive / resumePaused）。 */
-    readonly workprocess: WorkprocessService
-  }
-}
-
 /** 插件名（装载行 id 同源）。 */
 export const name = 'command-workprocess'
 

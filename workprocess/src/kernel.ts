@@ -101,9 +101,10 @@ function decodeExisting(raw: WorkProcess | undefined): WorkProcess | undefined {
  * 有效写入后的变更通知（载荷与耐久状态同源：事件 + 全量快照），
  * 形状对齐宿主 `GoalSnapshotChangeMeta`，使监听器可以把它直接喂给 `foldWorkProcess` 重放校验。
  */
-async function emitChanged(deps: WorkDeps, event: WorkEvent, process: WorkProcess): Promise<void> {
+async function emitChanged(deps: WorkDeps, scope: string, event: WorkEvent, process: WorkProcess): Promise<void> {
   await deps.onChanged?.({
     processId: process.id,
+    scope,
     change: { kind: 'work/change', version: WORK_CHANGE_VERSION, event, process },
   })
 }
@@ -142,7 +143,7 @@ async function mutateWork(
     event = ev
     return { changed: true }
   })
-  if (changed && next !== undefined && event !== undefined) await emitChanged(deps, event, next)
+  if (changed && next !== undefined && event !== undefined) await emitChanged(deps, scope, event, next)
   return changed
 }
 

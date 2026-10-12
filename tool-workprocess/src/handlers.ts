@@ -60,6 +60,14 @@ export interface WorkToolDeps {
    * 人同意才动作。本口照此办理：**§人机确认的裁决由工具拿，不由模型转述§**。
    */
   readonly askHuman?: (exec: unknown, request: WorkHumanAsk) => Promise<WorkHumanVerdict>
+  /**
+   * 有效写入后的**变更通知**（透传给内核写路径：组合根把它接到宿主 `work/changed` 事件）。
+   * 端口保留在工具面是为了穷举单测不依赖宿主事件总线；装配期由组合根注入。
+   */
+  readonly onChanged?: (notification: { readonly processId: string; readonly scope: string
+    readonly change: { readonly kind: 'work/change'; readonly version: 1; readonly event: unknown; readonly process: unknown } }) => void | Promise<void>
+  /** 整条流程被丢弃时的**墓碑通知**（丢弃不经事件表，单独报）。 */
+  readonly onDiscarded?: (scope: string) => void
 }
 
 /** 一条人机确认请求（工具问人时给弹框的内容）。 */
@@ -338,6 +346,7 @@ export async function updateWorkstage(
       authorize('process_discard', authorityOf(deps, exec))
       const changed = await discardWorkProcess(deps, scope, revision)
       if (changed) {
+        deps.onDiscarded?.(scope)
         notice(deps, exec, 'process-discard',
           '<workprocess_discarded>\n整条流程已丢弃（不可逆：阶段、任务与任务编号墓碑一并消失，回合计数归零）。\n'
           + '不要再引用原来的阶段键或任务 id；需要重来就用 create_workstage 新起一条。\n'

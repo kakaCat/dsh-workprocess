@@ -112,6 +112,8 @@ export interface WorkMessageSource {
  */
 export interface WorkChangedNotification {
   readonly processId: string
+  /** 归属域键（`processId` 去掉 `wp:` 前缀）：事件载荷按它路由。 */
+  readonly scope: string
   readonly change: WorkChange
 }
 

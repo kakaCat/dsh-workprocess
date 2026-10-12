@@ -26,21 +26,26 @@ import {
   WORK_TOOL_FACTORIES, WORK_TOOL_REGISTRY,
   type WorkHumanAsk, type WorkHumanVerdict, type WorkToolDeps,
 } from 'tool-workprocess'
-import { agentOf, authorityResolverOf, type AuthorityHostCtx, type HostAgent, type HostSession } from './authority.js'
-import { storageDomainStoreOf, type StorageDomainCtx } from './storage.js'
+import type { Context } from '@deepseek-ai/cordis'
+// type-only import：官方包的 `declare module` 增强（ctx.sessionProjections 等）随包入程序。
+import type {} from '@deepseek-ai/dsh-session-projection'
+import { agentOf, authorityResolverOf } from './authority.js'
+import type { WorkChangedPayload } from './events.js'
+import { storageDomainStoreOf } from './storage.js'
 import { createWorkprocessService } from './service.js'
 import {
   DEFAULT_MAX_ROUNDS, askDeliveryOf, planDeliveryOf, roundDeliveryOf, tickWorkprocess, type RoundDelivery,
 } from './driver.js'
 
 export * from './kernel.js'
+import './events.js'
+export type { WorkChangedPayload } from './events.js'
 export { storageDomainStoreOf, workprocessDomain, WORKPROCESS_DOMAIN, WORKPROCESS_DOMAIN_VERSION } from './storage.js'
 export { createWorkprocessService } from './service.js'
 export type { WorkprocessService, WorkprocessStatus } from './service.js'
 export { agentOf, authorityResolverOf } from './authority.js'
 export { DEFAULT_MAX_ROUNDS, askDeliveryOf, effectiveMaxRoundsOf, factsOf, planDeliveryOf, roundDeliveryOf, tickWorkprocess } from './driver.js'
 export type { StorageDomainCtx, DomainTableHandle } from './storage.js'
-export type { HostAgent, HostEvent, HostSession } from './authority.js'
 export type { RoundDelivery } from './driver.js'
 
 /** 插件名（日志前缀与装载层条目 id 同源）。 */
@@ -67,7 +72,10 @@ export interface WorkprocessConfig {
   readonly close?: 'human' | 'auto'
 }
 
-/** 会话事件的**最小读取面**（与 `authority.ts` 的 HostEvent 同源，这里只多要 taskId/revision）。 */
+/** 会话的**窄引用**（投递/驱动只要 id；官方 Session 类型在边界处自然满足）。 */
+type SessionRef = { readonly id: string }
+
+/** 会话事件的**最小读取面**（与 authority.ts 的 AuthorityEventSlice 同源，这里只多要 taskId/revision）。 */
 interface SessionEventLike {
   readonly type?: string
   readonly data?: {
@@ -88,29 +96,23 @@ interface DriveCtx {
   readonly askAsked: Set<string>
 }
 
-interface PluginCtx extends AuthorityHostCtx, StorageDomainCtx {
-  readonly agents: AuthorityHostCtx['agents'] & { get(id: string): unknown }
-  readonly tools: { register(tool: unknown): () => void }
-  on(event: 'session/event', cb: (session: HostSession, event: unknown) => void | Promise<void>): unknown
-  /** agent 生命周期事件（宿主 `agent/status`：`{ agent, status }`）——空闲边界的权威信号。 */
-  on(event: 'agent/status', cb: (payload: { agent?: HostAgent; status?: string }) => void | Promise<void>): unknown
-  /** 提供服务面（宿主 cordis：`ctx.provide(name, value)`；消费方按名注入）。 */
-  provide(name: string, value: unknown): unknown
-  /** 按名取服务（cordis：`ctx.get('userQuestions')` 等）。 */
-  get?(name: string): unknown
-  /** 系统提示词面（注册常驻策略段；缺省 = 不注册，插件其余面照常）。 */
-  readonly systemPrompt?: {
-    section(section: { name: string; order: number; text: string }): unknown
-    getSectionOrder(name: string): number
-  }
-}
-
-/** 装配：打开归属记录域 + 注册六个工具 + 挂回合边界驱动（含续跑投递）。 */
-export function apply(ctx: PluginCtx, config?: WorkprocessConfig): void {
+/** 装配：打开归属记录域 + 注册六个工具 + 提供 ctx.workprocess 服务 + 发 work/changed + 挂回合边界驱动。 */
+export function apply(ctx: Context, config?: WorkprocessConfig): void {
   const store = storageDomainStoreOf(ctx)
+  /** 内核变更通知 → 宿主事件：写路径（工具 / 服务 / 驱动拍）统一在这里进事件总线。 */
+  const emitChanged = (scope: string, change: WorkChangedPayload['change']): void => {
+    try {
+      ctx.emit('work/changed', { scope, change })
+    } catch (err) {
+      // 监听器故障由宿主兜底；这里再兜一层，绝不让通知中断写路径。
+      console.warn('[workprocess] work/changed 投递失败：' + String((err as Error)?.message ?? err))
+    }
+  }
   const deps: WorkToolDeps = {
     store,
     now: () => Date.now(),
+    onChanged: (notification) => emitChanged(notification.scope, notification.change as WorkChangedPayload['change']),
+    onDiscarded: (scope) => emitChanged(scope, undefined),
     // 归属缺省 = **本会话**（一个会话一条流程；多流程并存时要显式给 scope）。
     defaultScope: (exec) => agentOf(exec)?.session?.id,
     resolveAuthority: authorityResolverOf(ctx),
@@ -128,7 +130,7 @@ export function apply(ctx: PluginCtx, config?: WorkprocessConfig): void {
   }
   // 把"读 + 人可做的三种干预"提供成服务：命令行包（dsh-command-workprocess）只消费它，
   // 不自己再开一次存储域（同名域重复 open 是响亮拒绝），也不绕内核改状态。
-  ctx.provide('workprocess', createWorkprocessService(store))
+  ctx.provide('workprocess', createWorkprocessService(store, (scope) => emitChanged(scope, undefined)))
   // **常驻策略段**（对齐宿主 `dsh-tool-goal` 的 `ctx.systemPrompt.section`）：
   // 工具自述只在模型"打算调工具"时被读到，而"阶段串行 / 谁能落 done / 回合预算"这些纪律
   // 得在每轮都在场。槽位紧跟 TOOL_GOAL（同族工具，顺序数相同由名字定先后）。
@@ -152,31 +154,33 @@ export function apply(ctx: PluginCtx, config?: WorkprocessConfig): void {
       askAsked: new Set<string>(),
     }
     // ① 回合事实：只有我们自署来源的回合才算数（人的消息不是回合）。
-    ctx.on('session/event', (session: HostSession, event: unknown) => {
+    ctx.on('session/event', (session: SessionRef, event: unknown) => {
       // 返回 promise 供宿主/测试等待（cordis 不看返回值，等不到也不影响宿主）。
-      return onSessionEvent(ctx, store, session, event, driveCtx)
+      return onSessionEvent(ctx, store, session, event, driveCtx, emitChanged)
     })
     // ② **空闲边界驱动**（对齐宿主 `goal-round-driver` 的 `agent/status === 'idle'`）：
     //    "agent 空闲了"这件事的权威信号是 agent 状态事件，不是会话事件里读 turnBoundary——
     //    后者的时序靠不住（`turn/end` 那一拍投影可能还没翻成空闲，翻完之后又不再有事件，
     //    于是驱动器一枪不放；真机踩过）。返回 promise 供测试等待。
-    ctx.on('agent/status', (payload: { agent?: HostAgent; status?: string }) => {
+    // 官方载荷形状（dsh-agent 的 Events 增强）：{ agent, status }；session 取窄引用。
+    ctx.on('agent/status', (payload) => {
       if (payload?.status !== 'idle') return undefined
-      const session = payload.agent?.session
-      return session === undefined ? undefined : driveAtIdle(ctx, store, session, driveCtx)
+      const session = payload.agent?.session as SessionRef | undefined
+      return session === undefined ? undefined : driveAtIdle(ctx, store, session, driveCtx, emitChanged)
     })
   }
 }
 
 /** 一个会话事件的处理：只记回合事实（驱动放在空闲边界上，见 `agent/status` 那条）。 */
 async function onSessionEvent(
-  ctx: PluginCtx, store: WorkToolDeps['store'], session: HostSession, event: unknown, drive: DriveCtx,
+  ctx: Context, store: WorkToolDeps['store'], session: SessionRef, event: unknown, drive: DriveCtx,
+  emitChanged: (scope: string, change: WorkChangedPayload['change']) => void,
 ): Promise<void> {
   try {
     await observeWorkRound(store, session.id, event)
     // 兜底：万一 `agent/status` 的那一拍错过了（事件竞争），会话事件到达时若 agent 已空闲，补一拍。
-    if ((ctx.agents.get(session.id) as { status?: string } | undefined)?.status !== 'idle') return
-    await driveAtIdle(ctx, store, session, drive)
+    if ((ctx.agents.get(session.id as never) as { status?: string } | undefined)?.status !== 'idle') return
+    await driveAtIdle(ctx, store, session, drive, emitChanged)
   } catch (err) {
     // 驱动失败不许冒泡进宿主的事件总线（那会带崩本轮会话）：如实记一行，下个边界再试。
     console.warn('[workprocess] 回合边界驱动失败（不影响本轮会话）：' + String((err as Error)?.message ?? err))
@@ -192,7 +196,8 @@ async function onSessionEvent(
  * 或得出任何**不推进状态**的结论（hold / wait-human / ask-* / 没流程）。
  */
 async function driveAtIdle(
-  ctx: PluginCtx, store: WorkToolDeps['store'], session: HostSession, drive: DriveCtx,
+  ctx: Context, store: WorkToolDeps['store'], session: SessionRef, drive: DriveCtx,
+  emitChanged: (scope: string, change: WorkChangedPayload['change']) => void,
 ): Promise<void> {
   try {
     // 上界只是兜底（每拍推进都会 bump revision，正常两拍内就到 drive）：防规则改坏时打转。
@@ -205,6 +210,7 @@ async function driveAtIdle(
         stagePlanAsked: (stageKey) => drive.planAsked.has(stageKey),
         humanAskAsked: (askKey) => drive.askAsked.has(askKey),
         autoClose: drive.autoClose,
+        onChanged: (notification) => emitChanged(notification.scope, notification.change as WorkChangedPayload['change']),
       }, session.id, session.id)
       if (decision === undefined) return
       if (decision.kind === 'drive') {
@@ -267,9 +273,9 @@ export async function observeWorkRound(
  * `turn/end` 那一拍投影可能还没翻成空闲，翻完之后又不再有事件——驱动器一枪不放（真机踩过）。
  */
 export async function tickAtBoundary(
-  ctx: AuthorityHostCtx, store: WorkToolDeps['store'], session: HostSession, drive?: DriveCtx,
+  ctx: Context, store: WorkToolDeps['store'], session: SessionRef, drive?: DriveCtx,
 ): Promise<Awaited<ReturnType<typeof tickWorkprocess>>> {
-  const boundary = ctx.sessionProjections?.stateOf(session, 'turnBoundary')
+  const boundary = ctx.sessionProjections?.stateOf(session as never, 'turnBoundary')
   if (boundary?.openTurnStartSeq !== null) return undefined
   return tickWorkprocess({
     store,
@@ -281,7 +287,7 @@ export async function tickAtBoundary(
 
 /** 把下一轮投给会话（`agent.followup`）：同一轮只投一次（`taskId:revision:round` 去重）。 */
 export async function deliverRound(
-  ctx: PluginCtx, store: WorkToolDeps['store'], session: HostSession, taskId: string, drive: DriveCtx,
+  ctx: Context, store: WorkToolDeps['store'], session: SessionRef, taskId: string, drive: DriveCtx,
 ): Promise<RoundDelivery | undefined> {
   const process = await workProcessOf({ store }, session.id)
   if (process === undefined) return undefined
@@ -290,7 +296,7 @@ export async function deliverRound(
   if (delivery === undefined) return undefined
   const key = delivery.taskId + ':' + String(delivery.revision) + ':' + String(delivery.round)
   if (drive.pending.has(key)) return undefined
-  const agent = ctx.agents.get(session.id) as { followup?: (message: unknown) => void } | undefined
+  const agent = ctx.agents.get(session.id as never) as { followup?: (message: unknown) => void } | undefined
   if (typeof agent?.followup !== 'function') return undefined
   agent.followup(createUserMessage({
     content: [{ type: 'text', text: delivery.prompt }],
@@ -314,13 +320,13 @@ export async function deliverRound(
  * 规划轮不消耗任务预算，也就不该把 `rounds.started` 往前推（那个计数是回合上限的判据）。
  */
 export async function deliverPlanRound(
-  ctx: PluginCtx, store: WorkToolDeps['store'], session: HostSession, stageKey: string,
+  ctx: Context, store: WorkToolDeps['store'], session: SessionRef, stageKey: string,
 ): Promise<RoundDelivery | undefined> {
   const process = await workProcessOf({ store }, session.id)
   if (process === undefined) return undefined
   const delivery = planDeliveryOf(process, stageKey)
   if (delivery === undefined) return undefined
-  const agent = ctx.agents.get(session.id) as { followup?: (message: unknown) => void } | undefined
+  const agent = ctx.agents.get(session.id as never) as { followup?: (message: unknown) => void } | undefined
   if (typeof agent?.followup !== 'function') return undefined
   agent.followup(createUserMessage({
     content: [{ type: 'text', text: delivery.prompt }],
@@ -339,14 +345,14 @@ export async function deliverPlanRound(
  * 来源同样自署 `work`（自动回合，不是人打的字），**不带 `round`**（不消耗任务预算）。
  */
 export async function deliverAskRound(
-  ctx: PluginCtx, store: WorkToolDeps['store'], session: HostSession,
+  ctx: Context, store: WorkToolDeps['store'], session: SessionRef,
   kind: 'ask-stage-done' | 'ask-close', stageKey?: string,
 ): Promise<RoundDelivery | undefined> {
   const process = await workProcessOf({ store }, session.id)
   if (process === undefined) return undefined
   const delivery = askDeliveryOf(process, kind === 'ask-close' ? 'close' : 'stage-done', stageKey)
   if (delivery === undefined) return undefined
-  const agent = ctx.agents.get(session.id) as { followup?: (message: unknown) => void } | undefined
+  const agent = ctx.agents.get(session.id as never) as { followup?: (message: unknown) => void } | undefined
   if (typeof agent?.followup !== 'function') return undefined
   agent.followup(createUserMessage({
     content: [{ type: 'text', text: delivery.prompt }],
@@ -412,7 +418,7 @@ interface UserQuestionsLike {
  * **绝不把"没问成"当成"同意"**（那才是真正危险的默认值）。
  */
 export async function askHumanOf(
-  ctx: PluginCtx, exec: unknown, request: WorkHumanAsk,
+  ctx: Context, exec: unknown, request: WorkHumanAsk,
 ): Promise<WorkHumanVerdict> {
   const service = ctx.get?.('userQuestions') as UserQuestionsLike | undefined
   if (typeof service?.ask !== 'function') return { kind: 'no-channel' }
