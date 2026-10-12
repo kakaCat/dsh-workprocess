@@ -91,7 +91,7 @@ export function authorityFromEvents(
 /** 需要真人授权的**全部**动作（唯一一份：改这里即改全部调用点）。 */
 export type WorkAuthorityAction =
   | 'task_edit' | 'task_pause' | 'task_resume' | 'task_block' | 'task_complete' | 'task_clear'
-  | 'stage_done' | 'process_edit' | 'process_discard'
+  | 'stage_done' | 'process_edit' | 'process_discard' | 'process_arm'
 
 /** 调用者解析结果（对齐宿主 `GoalToolExecution` 的最小面）。 */
 export interface WorkToolExecution {
@@ -120,11 +120,11 @@ export function workToolExecution(
 
 /**
  * 真人专属动作：改目标（`task_edit` / `process_edit`）、继续（`resume`）、**丢弃流程**（`process_discard`）。
- * 前三个是"改人的意图"（改的是要达成什么 / 要不要继续），第四个是"撤掉整条流程"——
- * 都是 agent 自行发起就会推翻人的决定的那类。
+ * 前三个是"改人的意图"（改的是要达成什么 / 要不要继续），第四个是"撤掉整条流程"，
+ * 第五个是"要不要让它自己往下跑"（续跑许可）——都是 agent 自行发起就会推翻人的决定的那类。
  */
 const HUMAN_ONLY: ReadonlySet<WorkAuthorityAction> = new Set<WorkAuthorityAction>(
-  ['task_edit', 'task_resume', 'process_edit', 'process_discard'],
+  ['task_edit', 'task_resume', 'process_edit', 'process_discard', 'process_arm'],
 )
 
 /**

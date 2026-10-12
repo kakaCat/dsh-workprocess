@@ -14,11 +14,11 @@
 import {
   blockWorkTask, clearWorkTask, closeWorkProcess, completeWorkStage, completeWorkTask, createWorkProcess,
   createWorkTask, currentStageOf, defineWorkStages, discardWorkProcess, editWorkObjective, editWorkTask,
-  pauseWorkTask, resumeWorkTask, startWorkStage, workProcessOf,
+  pauseWorkTask, resumeWorkTask, setWorkActivation, startWorkStage, workActivationOf, workProcessOf,
 } from './kernel.js'
 import type {
-  CreateWorkProcessRequest, CreateWorkTaskRequest, EditWorkTaskRequest, WorkBlockReason, WorkProcess,
-  WorkStage, WorkStageDraft,
+  CreateWorkProcessRequest, CreateWorkTaskRequest, EditWorkTaskRequest, WorkActivation, WorkBlockReason,
+  WorkProcess, WorkStage, WorkStageDraft,
 } from './kernel.js'
 import type { WorkDeps } from './kernel.js'
 
@@ -37,6 +37,8 @@ export interface WorkprocessStatus {
   readonly closedAt?: number
   /** 当前阶段首个任务生效的回合上限（没写 max_rounds ⇒ 缺省不展示）。 */
   readonly maxRounds?: number
+  /** **续跑许可**（缺省 `armed`）：`disarmed` 时驱动器不自动往下推（会话 resume 后自动落）。 */
+  readonly activation?: WorkActivation
 }
 
 /**
@@ -70,6 +72,12 @@ export interface WorkprocessService {
   discardProcess(scope: string, revision?: number): Promise<boolean>
   /** 收口整条流程（全阶段 done 才成立；方案 B 的轻量终止水印）。 */
   closeProcess(scope: string, revision?: number): Promise<boolean>
+
+  // ── 续跑许可（耐久在归属记录里；驱动器的自动推进开关）────────────
+  /** 读续跑许可（缺省 `armed`）；没有流程 ⇒ `undefined`。 */
+  activation(scope: string): Promise<WorkActivation | undefined>
+  /** 设置续跑许可（幂等：同值零写入；没有流程 ⇒ `false`）。 */
+  setActivation(scope: string, activation: WorkActivation, revision?: number): Promise<boolean>
 
   // ── 回合计数（驱动器的回合预算判据；耐久在归属记录里）────────────
   /** 该归属域**已准入回合数**（缺省 = 没记录过）。 */
@@ -134,6 +142,7 @@ export function createWorkprocessService(
       if (scope === undefined) return undefined
       const found = await stageOf(scope)
       if (found === undefined) return undefined
+      const activation = await workActivationOf(deps, scope)
       const cap = found.stage?.tasks[0]?.maxRounds
       return {
         objective: found.process.objective,
@@ -142,11 +151,14 @@ export function createWorkprocessService(
         roundsStarted: (await deps.store.get(scope))?.rounds?.started ?? 0,
         ...(cap === undefined ? {} : { maxRounds: cap }),
         ...(found.process.closedAt === undefined ? {} : { closedAt: found.process.closedAt }),
+        ...(activation === undefined ? {} : { activation }),
       }
     },
     // 写：域 API（与内核服务函数一一对应，服务是唯一持有 store 的那一层）。
     createProcess: (scope, request) => createWorkProcess(deps, scope, request),
     startStage: (scope, stageKey, revision) => startWorkStage(deps, scope, stageKey, revision),
+    activation: (scope) => workActivationOf(deps, scope),
+    setActivation: (scope, activation, revision) => setWorkActivation(deps, scope, activation, revision),
     roundsStarted: async (scope) => (await deps.store.get(scope))?.rounds?.started,
     async observeRound(scope, round) {
       await deps.store.mutate(scope, (record) => {

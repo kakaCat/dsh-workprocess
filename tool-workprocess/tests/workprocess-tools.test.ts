@@ -69,8 +69,8 @@ describe('登记表自洽（两层 × get/create/update，命名对齐宿主 dsh
 })
 
 describe('授权口径（对齐宿主 update 政策）', () => {
-  it('缺省策略（human）下：stage_done（收口确认）+ task_edit / process_edit（改目标）+ task_resume（改人的意图）+ process_discard（撤流程）都是真人专属', () => {
-    for (const action of ['stage_done', 'task_edit', 'process_edit', 'task_resume', 'process_discard'] as const) {
+  it('缺省策略（human）下：stage_done（收口确认）+ task_edit / process_edit（改目标）+ task_resume（改人的意图）+ process_discard（撤流程）+ process_arm（放行/收回续跑）都是真人专属', () => {
+    for (const action of ['stage_done', 'task_edit', 'process_edit', 'task_resume', 'process_discard', 'process_arm'] as const) {
       expect(isActionAuthorized(action, { kind: 'autonomous' })).toBe(false)
       expect(isActionAuthorized(action, { kind: 'direct-human' })).toBe(true)
     }
@@ -477,5 +477,31 @@ describe('层2 处理器 · 任务', () => {
     expect((await updateWorktask(deps, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'clear' })).changed).toBe(true)
     const missing = await getWorktask(deps, { scope: 'ws-a', task_id: 'wt:prep:1' })
     expect(String(missing.error)).toContain('任务不存在')
+  })
+})
+
+describe('续跑许可（工具面：arm / disarm + get_workstage 显示）', () => {
+  it('真人可 disarm / arm；agent 自发起一律被拒（自签通行证）', async () => {
+    const records: Record<string, WorkRecordLike> = { 'ws-a': { updatedAt: 1 } }
+    const human = depsOf(records, true)
+    const agent = depsOf(records)
+    const built = tools.createWorkstage(human, { scope: 'ws-a', objective: '把模型发上线', stages: [{ key: 'prep', statement: '准备' }] })
+    await built
+    const update = (args: Record<string, unknown>) => tools.updateWorkstage(human, args)
+    const agentUpdate = (args: Record<string, unknown>) => tools.updateWorkstage(agent, args)
+
+    // 自治回合：即便流程在那儿，也不许自己把许可收回去或放回来（都是"改人的意图"一类）。
+    await expect(agentUpdate({ action: 'disarm' })).resolves.toMatchObject({ success: false })
+    await expect(agentUpdate({ action: 'arm' })).resolves.toMatchObject({ success: false })
+
+    // 真人：disarm 收许可（幂等第二次 changed:false）→ get_workstage 如实显示。
+    const off = await update({ scope: 'ws-a', action: 'disarm' })
+    expect(off).toMatchObject({ success: true, action: 'disarm', activation: 'disarmed', changed: true })
+    expect(await update({ scope: 'ws-a', action: 'disarm' })).toMatchObject({ changed: false })
+    expect(await tools.getWorkstage(human, { scope: 'ws-a' })).toMatchObject({ success: true, activation: 'disarmed' })
+
+    // 人说"继续" ⇒ arm 放回去。
+    expect(await update({ scope: 'ws-a', action: 'arm' })).toMatchObject({ success: true, activation: 'armed', changed: true })
+    expect(await tools.getWorkstage(human, { scope: 'ws-a' })).toMatchObject({ activation: 'armed' })
   })
 })

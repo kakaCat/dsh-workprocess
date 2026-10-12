@@ -23,6 +23,9 @@
         defaultMaxRounds: 20
         # 流程收口：auto = 最后一段 done 即收口（缺省）；human = 全阶段 done 后投「请判」轮（判了不落章，方案 B 口径）。
         close: auto
+        # 会话 resume（宿主重启后加载）⇒ 自动收回续跑许可（disarmed），要人说"继续"再 arm。
+        # 对齐宿主 goal 的 disarm-on-resume 纪律；想让流程跨重启继续自动跑就设 false。
+        disarmOnResume: true
     - id: tool-workprocess
       name: "tool-workprocess"
     - id: command-workprocess

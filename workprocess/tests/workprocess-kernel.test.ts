@@ -16,8 +16,8 @@ import { WorkError } from 'workprocess/runtime.js'
 import type { WorkProcess, WorkStageDraft } from 'workprocess/types.js'
 import {
   clearWorkTask, closeWorkProcess, completeWorkStage, completeWorkTask, createWorkProcess, createWorkTask,
-  defineWorkStages, discardWorkProcess, editWorkObjective, progressOf, stageClosePolicyOf, startWorkStage,
-  workProcessOf, workProcessViewOf, workTaskOf,
+  defineWorkStages, discardWorkProcess, editWorkObjective, progressOf, setWorkActivation,
+  stageClosePolicyOf, startWorkStage, workActivationOf, workProcessOf, workProcessViewOf, workTaskOf,
   type WorkRecordLike,
 } from 'workprocess'
 
@@ -678,5 +678,43 @@ describe('流程收口（process-close：轻量终止水印）', () => {
     expect(foldWorkProcess([...chain, change(closeEvent, closed)]).process?.closedAt).toBe(42)
     expect(() => foldWorkProcess([...chain, change(closeEvent, { ...closed, closedAt: 43 })]))
       .toThrowError(WorkError)
+  })
+})
+
+describe('续跑许可（rounds.activation：耐久，goal 那套 disarm 的落点）', () => {
+  const deps = (records: Record<string, WorkRecordLike>) => ({ store: storeOf(records), now: () => 1_000 })
+
+  it('缺省 armed；disarm 写进记录（耐久），幂等零写入', async () => {
+    const records: Record<string, WorkRecordLike> = { 'ws-a': { updatedAt: 1 } }
+    const d = deps(records)
+    await createWorkProcess(d, 'ws-a', { objective: 'x', stages: [{ key: 'p', statement: 's' }] })
+    expect(await workActivationOf(d, 'ws-a')).toBe('armed')          // 缺省 = 允许自动跑
+    expect(await setWorkActivation(d, 'ws-a', 'disarmed')).toBe(true)
+    expect(await workActivationOf(d, 'ws-a')).toBe('disarmed')
+    expect(records['ws-a'].rounds?.activation).toBe('disarmed')      // 落在记录里，不是内存态
+    expect(await setWorkActivation(d, 'ws-a', 'disarmed')).toBe(false)  // 幂等
+    expect(await setWorkActivation(d, 'ws-a', 'armed')).toBe(true)      // 人能放回去
+  })
+
+  it('没有流程 ⇒ 零写入 false（没有可授权的对象）', async () => {
+    const records: Record<string, WorkRecordLike> = {}
+    expect(await setWorkActivation(deps(records), 'ws-none', 'disarmed')).toBe(false)
+    expect(await workActivationOf(deps(records), 'ws-none')).toBeUndefined()
+  })
+
+  it('CAS：给旧 revision 即拒（先读再改）', async () => {
+    const records: Record<string, WorkRecordLike> = { 'ws-a': { updatedAt: 1 } }
+    const d = deps(records)
+    await createWorkProcess(d, 'ws-a', { objective: 'x', stages: [{ key: 'p', statement: 's' }] })
+    await expect(setWorkActivation(d, 'ws-a', 'disarmed', 99)).rejects.toThrow(WorkError)
+  })
+
+  it('视图把许可带出来（get_workstage / 消费方都看得到）', async () => {
+    const records: Record<string, WorkRecordLike> = { 'ws-a': { updatedAt: 1 } }
+    const d = deps(records)
+    await createWorkProcess(d, 'ws-a', { objective: 'x', stages: [{ key: 'p', statement: 's' }] })
+    await setWorkActivation(d, 'ws-a', 'disarmed')
+    const view = await workProcessViewOf(d, 'ws-a')
+    expect(view?.activation).toBe('disarmed')
   })
 })

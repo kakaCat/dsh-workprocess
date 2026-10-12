@@ -23,6 +23,7 @@
 | `requestDrive`：触发合并成**一条** agent 局部串行 run（`withoutInitiator` + while + retire） | 同 |
 | `drive`：耐久检查点（`ctx.sessions.flush`）→ 收尾上一轮预约 → 决策 → 落副作用/投下一轮 | 同 |
 | `agent.followup(createUserMessage(...))` + `attempt` 预约（消息身份精确比对） | 同（来源自署 `work`，绝不冒充人） |
+| `goal.activation !== 'armed'` ⇒ 一拍不推进（会话 resume 自动 disarm） | 同（读归属记录的 `rounds.activation`；`agent/created` 的 `source === 'resume'` 时落 `disarmed`） |
 | `agent/inbox/inserted｜claimed｜discarded` 竞态围栏 | 同 |
 | `ctx.effect(function* () { ... })` 挂监听 + `ctx.logger.warn` | 同 |
 
@@ -36,6 +37,7 @@
 | `drive` | `false` | 是否自动**投递续跑回合**（本仓装载层打开）；关掉仍会落开工/收口/block |
 | `defaultMaxRounds` | `20` | 任务没写 `max_rounds` 时的生效上限（自动续跑必须有刹车） |
 | `close` | `'auto'` | 流程收口：`auto` = 最后一段 done 即落 close；`human` = 投「请判」轮（判了不落章） |
+| `disarmOnResume` | `true` | 会话 `resume`（宿主重启后加载）⇒ 自动收回续跑许可（`disarmed`，一拍不推进），要人 `arm` 才继续；设 `false` = 跨重启接着自动跑 |
 
 ## 它回答四件事
 

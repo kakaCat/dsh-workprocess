@@ -16,7 +16,7 @@ import type { Context } from '@deepseek-ai/cordis'
 interface Sent { readonly source?: Record<string, unknown>; readonly content?: unknown }
 
 /** 极简宿主：够驱动器决策 + 投递 + 围栏即可（流程状态用一个假域服务喂）。 */
-function harness(options: { status?: string; process?: unknown } = {}) {
+function harness(options: { status?: string; process?: unknown; activation?: string } = {}) {
   const sent: Sent[] = []
   const hooks: string[] = []
   const handlers = new Map<string, Array<(a: unknown, b?: unknown) => unknown>>()
@@ -37,7 +37,16 @@ function harness(options: { status?: string; process?: unknown } = {}) {
     inbox: { nextStep: [], nextTurn: [] as unknown[] },
     followup: (message: Sent): void => { sent.push(message) },
   }
+  let activation = options.activation ?? 'armed'
+  const disarms: string[] = []
   const domain = {
+    activation: async (): Promise<string> => activation,
+    setActivation: async (_scope: string, next: string): Promise<boolean> => {
+      disarms.push(next)
+      if (activation === next) return false
+      activation = next
+      return true
+    },
     process: async (): Promise<unknown> => process,
     roundsStarted: async (): Promise<number> => 0,
     observeRound: async (): Promise<void> => {},
@@ -83,6 +92,7 @@ function harness(options: { status?: string; process?: unknown } = {}) {
     setProcess: (next: typeof process) => { process = next },
     agent,
     competing: (message: unknown) => { (agent.inbox as { nextTurn: unknown[] }).nextTurn.push(message) },
+    disarms,
     fire: async (event: string, payload: unknown): Promise<void> => {
       for (const h of handlers.get(event) ?? []) await h(payload)
       await settle()
@@ -144,6 +154,36 @@ describe('驱动器插件：宿主 goal-round-driver 同款设计', () => {
     apply(h.ctx, { drive: true })
     await h.fireStatus('running')
     expect(h.sent).toHaveLength(0)
+  })
+
+  it('续跑许可 disarmed ⇒ 一拍都不投（重启后不会被自动续跑）', async () => {
+    const h = harness({ activation: 'disarmed' })
+    apply(h.ctx, { drive: true })
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(0)
+  })
+
+  it('会话 resume（宿主重启后加载）⇒ 自动收回许可（disarmed）', async () => {
+    const h = harness()
+    apply(h.ctx, { drive: true })
+    await h.fire('agent/created', { agent: h.agent, source: 'resume' })
+    expect(h.disarms).toEqual(['disarmed'])
+  })
+
+  it('disarmOnResume:false ⇒ 重启后接着自动跑（长时间无人值守用）', async () => {
+    const h = harness()
+    apply(h.ctx, { drive: true, disarmOnResume: false })
+    await h.fire('agent/created', { agent: h.agent, source: 'resume' })
+    expect(h.disarms).toEqual([])
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(1)
+  })
+
+  it('新建会话（startup）不收许可：刚建的流程照常自动跑', async () => {
+    const h = harness()
+    apply(h.ctx, { drive: true })
+    await h.fire('agent/created', { agent: h.agent, source: 'startup' })
+    expect(h.disarms).toEqual([])
   })
 
   it('tick:false ⇒ 一条监听都不挂（等于没装驱动器）', () => {

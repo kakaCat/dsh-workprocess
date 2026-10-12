@@ -301,6 +301,14 @@ export interface WorkRoundDriverConfig {
    * 'human' = 全阶段 done 后投「请判」轮（方案 B 口径：判了不落章，与旧行为等价）。
    */
   readonly close?: 'human' | 'auto'
+  /**
+   * 会话 **`resume`**（宿主重启后从盘上加载）时是否**自动收回续跑许可**（缺省 true，对齐宿主 goal：
+   * "After session resume or fork, an active goal is disarmed"）。
+   *
+   * 打开 = 重启后不被自动续跑（要人说一句"继续"才 rearm）——无人值守的流程不会在你不知情时继续动。
+   * 关掉 = 重启后接着自动跑（适合长时间无人值守的流程）。
+   */
+  readonly disarmOnResume?: boolean
 }
 
 /** cordis `FiberState.ACTIVE` 的数值（const enum 在 isolatedModules 下不能当值用，宿主同款写法）。 */
@@ -357,6 +365,8 @@ export function apply(ctx: Context, config?: WorkRoundDriverConfig): void {
   const driveEnabled = config?.drive === true
   const defaultMaxRounds = config?.defaultMaxRounds ?? DEFAULT_MAX_ROUNDS
   const autoClose = config?.close !== 'human'
+  /** 会话 resume ⇒ 自动收回续跑许可（缺省开；goal 同款纪律）。 */
+  const disarmOnResume = config?.disarmOnResume !== false
   const states = new Map<Agent, State>()
 
   const warn = (message: string): void => {
@@ -517,9 +527,13 @@ export function apply(ctx: Context, config?: WorkRoundDriverConfig): void {
     }
   }
 
-  /** 一拍的完整语义（宿主 goal driver 的 `drive`：检查点 → 收尾上一轮 → 决策）。 */
+  /** 一拍的完整语义（宿主 goal driver 的 `drive`：许可 → 检查点 → 收尾上一轮 → 决策）。 */
   async function drive(state: State): Promise<void> {
     if (!readyToDrive(state)) return
+    // **续跑许可**（耐久）：recall 后是 disarmed ⇒ 一拍都不推进（goal：`activation !== 'armed'` 就返回）。
+    // 与 goal 的差别只有一处：它读 goal 的相位，我们读归属记录里的 `rounds.activation`。
+    const activation = await domain.activation(state.agent.session.id)
+    if (activation === 'disarmed') return
     if (state.needsCheckpoint) {
       state.needsCheckpoint = false
       try {
@@ -581,11 +595,21 @@ export function apply(ctx: Context, config?: WorkRoundDriverConfig): void {
   }
 
   ctx.effect(function* () {
-    ctx.on('agent/created', ({ agent }) => {
+    ctx.on('agent/created', ({ agent, source }) => {
       const state = stateFor(agent)
       state.attempt = undefined
       state.competingQueued = false
       state.needsCheckpoint = false
+      // 会话 `resume`（宿主重启后从盘上加载）⇒ **收回续跑许可**：无人值守的流程不会在你
+      // 不知情时接着动；人要继续说一句就 arm（对齐宿主 goal 的 disarm-on-resume 纪律）。
+      if (disarmOnResume && source === 'resume') {
+        return domain.setActivation(agent.session.id, 'disarmed')
+          .then(() => undefined)
+          .catch((error: unknown) => {
+            warn(`could not disarm on resume for "${agent.session.id}": ${renderThrown(error)}`)
+            return undefined
+          })
+      }
       return undefined   // 该事件的监听器签名要求 promise | undefined（宿主同款）
     })
     ctx.on('agent/disposed', ({ agent }) => {

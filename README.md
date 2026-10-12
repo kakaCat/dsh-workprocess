@@ -96,6 +96,23 @@ python3 scripts/observe-workflow.py <会话 id>   # 指定会话
 期望序列：阶段开工 → （阶段空着时）规划轮 → 任务轮 1 → 阶段一收口 → 阶段二开工 → 任务轮 2 →
 阶段二收口 → **流程收口**（`closedAt` 落下）。跑完 `observe-workflow.py` 的"里程碑对账"应全 ✓。
 
+**最近一次真机验收（2026-10-12，两阶段全 auto）**：通过 ✅ —— 12:42:13 投 v1 规划轮 → 12:42:31 投 v2 规划轮，
+两个阶段各自 auto 收口、流程 `closedAt` 落下，全程零人工介入。账：6 条投递中 2 条规划轮、
+`rounds.started` 未前进（任务都在规划轮内做完，没消耗任务轮）。
+
+## 续跑许可（`activation`：耐久；对齐宿主 goal 的 arm/disarm）
+
+| | 说明 |
+|---|---|
+| 落点 | 归属记录的 `rounds.activation`（**不进事件表、不发 `work/changed`**：它是控制面读数，不是领域值） |
+| 读 | `get_workstage` 回执里的 `activation`；服务面 `ctx.workprocess.activation(scope)` |
+| 自动收 | 会话 **`resume`**（宿主重启后从盘上加载）⇒ 驱动器落 `disarmed`，一拍都不推进（对齐 goal："after session resume or fork, an active goal is disarmed"） |
+| 人工放 | `update_workstage action=arm`（**真人专属**；agent 自发起 = 自签通行证，一律拒） |
+| 人工收 | `update_workstage action=disarm`（同上，真人专属） |
+| 关掉自动收 | 驱动器配置 `disarmOnResume: false`（长时间无人值守的流程要跨重启继续跑时用） |
+
+`disarmed` 顺带解决"重启后重复打扰"：驱动器停手 ⇒ 既不重投规划轮，也不重问收口确认。
+
 ## 六条不变量
 
 | 编号 | 内容 |

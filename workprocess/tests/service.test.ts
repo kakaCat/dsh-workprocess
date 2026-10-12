@@ -77,3 +77,15 @@ describe('ctx.workprocess 服务面', () => {
     expect(await service.view(agent)).toBeUndefined()
   })
 })
+
+describe('续跑许可（服务面）', () => {
+  it('读缺省 armed；disarm 后 view 与 activation 都能看到', async () => {
+    const { service } = await seeded()
+    expect(await service.activation('session-1')).toBe('armed')
+    expect(await service.setActivation('session-1', 'disarmed')).toBe(true)
+    expect(await service.activation('session-1')).toBe('disarmed')
+    const status = await service.view({ session: { id: 'session-1' } })
+    expect(status?.activation).toBe('disarmed')
+    expect(await service.setActivation('session-1', 'armed')).toBe(true)
+  })
+})

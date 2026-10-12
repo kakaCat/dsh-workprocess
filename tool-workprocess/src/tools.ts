@@ -272,6 +272,7 @@ export async function getWorkstage(deps: WorkToolDeps, args: Record<string, unkn
   if (process === undefined) {
     return { success: false, scope, error: '该归属域还没有流程（先调 create_workstage 建流程）' }
   }
+  const activation = await deps.domain.activation(scope)
   // 当前阶段 = 串行顺序里第一个非 done 的阶段（口径在 stages.js 单点，工具面不自己找）。
   const current = currentStageOf(process)
   return {
@@ -291,6 +292,8 @@ export async function getWorkstage(deps: WorkToolDeps, args: Record<string, unkn
     allows_close: processAllowsClose(process),
     /** 流程收口时间戳（缺省 = 未收口）：已收口的流程一切写被内核拒（'process-closed'）。 */
     ...(process.closedAt === undefined ? {} : { closed_at: process.closedAt }),
+    // **续跑许可**（耐久）：disarmed = 驱动器停手（会话 resume 后自动落），等人 arm。
+    ...(activation === undefined ? {} : { activation }),
   }
 }
 
@@ -344,7 +347,7 @@ export async function createWorkstage(
  *   · `discard` —— **丢弃整条流程**（不要 stage_key；误建流程的补救口，见下）。
  * 阶段开工不是本工具的动词：串行门放行后由驱动器开工。
  */
-const STAGE_ACTIONS = ['done', 'edit', 'discard'] as const
+const STAGE_ACTIONS = ['done', 'edit', 'discard', 'arm', 'disarm'] as const
 
 /**
  * `update_workstage`：阶段态变更（对齐宿主 `update_goal` 的 `action` 形状）。
@@ -356,6 +359,11 @@ const STAGE_ACTIONS = ['done', 'edit', 'discard'] as const
  *
  * `discard` = **连根拔掉这条流程**（不可逆：流程与任务墓碑一起消失、回合计数归零）；
  * 刻意做成**真人专属**——建流程要想清楚，误建也只能由人来撤。幂等：没有流程 ⇒ `changed:false`。
+ *
+ * `arm` / `disarm` = **续跑许可**（耐久，落在归属记录的 `rounds.activation`）：
+ *   · `disarm`——让驱动器不再自动往下推这条流程（会话 `resume`（宿主重启后加载）时由驱动器**自动**落）；
+ *   · `arm`——人说要继续时把许可放回去。
+ * 两者都是**真人专属**：agent 自行放行自己 = 自己给自己发通行证（与 goal 的 arm/resume 口径一致）。
  */
 export async function updateWorkstage(
   deps: WorkToolDeps, args: Record<string, unknown>, exec?: unknown,
@@ -365,7 +373,7 @@ export async function updateWorkstage(
   const stageKey = args.stage_key === undefined ? '' : String(args.stage_key)
   const action = String(args.action ?? '')
   const objective = args.objective === undefined ? '' : String(args.objective)
-  // stage_key 只对 done 必需：edit 改的是整条流程的目标，discard 丢的是整条流程。
+  // stage_key 只对 done 必需：edit / arm / disarm 改的都是整条流程，discard 丢的是整条流程。
   if (action === 'done' && stageKey.trim() === '') {
     return { success: false, scope, error: '缺少 stage_key（收口哪个阶段；edit / discard 才不需要）' }
   }
@@ -400,6 +408,20 @@ export async function updateWorkstage(
       authorize('process_edit', authorityOf(deps, exec))
       const changed = await deps.domain.editObjective(scope, objective, revision)
       return { success: true, scope, action, objective, changed }
+    }
+    if (action === 'arm' || action === 'disarm') {
+      // 真人专属（"要不要让它自己往下跑"是人的决定）：agent 自行放行自己 = 自签通行证。
+      authorize('process_arm', authorityOf(deps, exec))
+      const activation = action === 'arm' ? 'armed' as const : 'disarmed' as const
+      const changed = await deps.domain.setActivation(scope, activation, revision)
+      if (changed) {
+        notice(deps, exec, 'process-' + action,
+          action === 'arm'
+            ? '<workprocess_armed>\n续跑许可已放回（armed）：驱动器会在空闲边界继续自动推进这条流程。\n</workprocess_armed>'
+            : '<workprocess_disarmed>\n续跑许可已收回（disarmed）：驱动器不再自动往下推——'
+              + '需要继续时说一声（arm）或由人继续手动推进。\n</workprocess_disarmed>')
+      }
+      return { success: true, scope, action, activation, changed }
     }
     // 先读目标阶段：授权判据要按它的收口策略判（策略不在参数里，在流程里）。
     const process = await deps.domain.process(scope)

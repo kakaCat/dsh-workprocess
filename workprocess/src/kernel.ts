@@ -190,6 +190,43 @@ export async function editWorkObjective(
 }
 
 /**
+ * 设置**续跑许可**（`rounds.activation`，耐久）——goal 那套 arm/disarm 的落点。
+ *
+ * 【为什么在记录里而不在流程快照里】许可不是"这条流程是什么样"，而是"此刻允不允许它自己往下跑"：
+ * 它不进事件表、不发 `work/changed`（与 `rounds.started` 同类：控制面读数，不是领域值）。
+ *
+ * 【谁来写】驱动器在会话 `resume`（宿主重启后加载）时落 `disarmed`；真人（或其指令下的模型）
+ * 用 `update_workstage action=arm|disarm` 改。没有流程 ⇒ 零写入 `false`（没有可授权的对象）。
+ * 幂等：同值零写入。
+ */
+export async function setWorkActivation(
+  deps: WorkDeps, scope: string, activation: WorkActivation, expectedRevision?: number,
+): Promise<boolean> {
+  if (expectedRevision !== undefined) {
+    const current = await deps.store.get(scope)
+    assertRevision(decodeExisting(current?.workProcess), expectedRevision)
+  }
+  let changed = false
+  await deps.store.mutate(scope, (r) => {
+    const prev = decodeExisting(r.workProcess)
+    if (prev === undefined) return undefined
+    if ((r.rounds?.activation ?? 'armed') === activation) return undefined
+    r.rounds = { ...r.rounds, activation }
+    r.updatedAt = deps.now()
+    changed = true
+    return { changed: true }
+  })
+  return changed
+}
+
+/** 读**续跑许可**（缺省 `armed`，与 `workProcessViewOf` 的派生同源）；没有流程 ⇒ `undefined`。 */
+export async function workActivationOf(deps: WorkDeps, scope: string): Promise<WorkActivation | undefined> {
+  const record = await deps.store.get(scope)
+  if (decodeExisting(record?.workProcess) === undefined) return undefined
+  return record?.rounds?.activation ?? 'armed'
+}
+
+/**
  * 整体替换阶段表（同名阶段保留其任务与态；会被丢掉的非空阶段一律拒）。
  * 幂等：同值零写入。
  */
