@@ -1,7 +1,41 @@
 # workprocess-round-driver
 
-**以两层工作模型为基础的回合驱动器**：本包是**库而非插件**——没有独立挂载项、没有配置项，
-由调用方的组合根接成驱动器后生效（形状对齐宿主 `packages/goal/goal-round-driver`）。
+**回合驱动器插件**（对齐宿主 `@deepseek-ai/dsh-goal-round-driver`）：`name` / `inject` / `apply(ctx, config)`，
+**独立装载行**（`cordis.patch.yml` 的第二条，紧跟领域插件）。职责：agent 空闲时把流程往前推——
+落"不需要人"的副作用（开工 / auto 收口 / 落盘 block / 流程收口），并投递下一轮（任务轮 / 阶段规划轮 / 收口确认轮）。
+
+## 模块与设计（与宿主逐条对应）
+
+| 模块 | 内容 |
+|---|---|
+| `src/index.ts` | 插件壳 + 运行时（事实投影 · 一拍 · 投递）+ 消息来源声明（`kind: 'work'`） |
+| `src/decide.ts` | 契约类型 + 决策树（**纯层**：零 I/O、零宿主依赖，可穷举单测） |
+| `src/prompt.ts` | 三种轮次的提示词渲染（纯字符串函数） |
+
+宿主那个包源码也是三个模块（`index` / `prompt` / `invariant`）——粒度一致；我们的第二模块是**决策树**
+（goal 的规则简单到能内联进 `drive()`，我们的域有阶段 × 任务相位 × 收口策略 × 回合预算 × 规划/确认轮）。
+
+| 宿主 goal driver | 本插件 |
+| --- | --- |
+| `inject = ['agents','goals','sessions']` | `inject = ['agents','sessions','workprocess']` |
+| 每 agent 一张 state（`attempt`/`competingQueued`/`needsCheckpoint`/`requested`/`run`/`stopping`） | 同 |
+| `readyToDrive`：fiber 活跃 + agent 仍活着 + `idle` + 无竞争排队 | 同 |
+| `requestDrive`：触发合并成**一条** agent 局部串行 run（`withoutInitiator` + while + retire） | 同 |
+| `drive`：耐久检查点（`ctx.sessions.flush`）→ 收尾上一轮预约 → 决策 → 落副作用/投下一轮 | 同 |
+| `agent.followup(createUserMessage(...))` + `attempt` 预约（消息身份精确比对） | 同（来源自署 `work`，绝不冒充人） |
+| `agent/inbox/inserted｜claimed｜discarded` 竞态围栏 | 同 |
+| `ctx.effect(function* () { ... })` 挂监听 + `ctx.logger.warn` | 同 |
+
+数据**只经 `ctx.workprocess`**（存储域由领域插件独占打开：`storageDomain.open` 对同名域是响亮拒绝）。
+
+## 配置（装载层 `config` 段）
+
+| 键 | 缺省 | 作用 |
+|---|---|---|
+| `tick` | `true` | 关掉 = 一条监听都不挂（等于没装驱动器，状态迁移全靠人/模型显式调） |
+| `drive` | `false` | 是否自动**投递续跑回合**（本仓装载层打开）；关掉仍会落开工/收口/block |
+| `defaultMaxRounds` | `20` | 任务没写 `max_rounds` 时的生效上限（自动续跑必须有刹车） |
+| `close` | `'auto'` | 流程收口：`auto` = 最后一段 done 即落 close；`human` = 投「请判」轮（判了不落章） |
 
 ## 它回答四件事
 

@@ -1,16 +1,10 @@
 /**
- * 回合提示词渲染（对齐宿主 `goal-round-driver/src/prompt.ts` 的职责：
- * 把"这一段要达成什么 + 这一轮跑什么 + 边界"写成投给模型的那条消息）。
+ * **提示词渲染**（纯字符串函数，零 I/O）：任务轮 / 阶段规划轮 / 收口确认轮。
  *
- * 【两层怎么写进提示词】提示词必须让模型一眼看出**自己在哪一层做事**：
- *   · 流程目标（层0）—— 为什么有这条流程；
- *   · 当前阶段 + 达成判据（层1）—— 参照系，也是"什么时候收口、由谁收口"的判据（收口策略）；
- *   · 这一轮的任务（层2）—— 唯一要动手的事。
- * 阶段间串行这条纪律写在边界里：**不许越阶段开工**（越界由 `stage-start` 的串行门兜底）。
+ * 对齐宿主 `dsh-goal-round-driver` 的 `renderGoalRoundPrompt`（它内联在 index 里，
+ * 我们因为有三种轮次而单独立一个模块）。
  *
- * 纯函数：只吃结构化入参、返回字符串（可穷举单测；不读时钟、不读记录）。
- *
- * @module workprocess/round/prompt
+ * @module workprocess-round-driver/prompt
  */
 import { stageClosePolicyOf } from 'workprocess'
 import type { WorkStageClosePolicy } from 'workprocess'
