@@ -34,12 +34,14 @@ export function renderWorkRoundPrompt(input: WorkRoundPromptInput): string {  co
     ? ['（本阶段未登记达成判据——按阶段陈述推进）']
     : input.stage.doneCriteria.map((c) => '- ' + c)
   const cap = input.maxRounds === undefined ? '不限' : String(input.maxRounds)
-  // 收口策略的两条路都要写清：策略错写会让模型"替人收口"或"该自动却停手等人"。
-  const closeLine = stageClosePolicyOf(input.stage) === 'auto'
-    ? '2. 本阶段收口（stage-done）策略是 `auto`：任务全达成后**由驱动器自动收口**，你不要自写完成。'
-    : '2. 本阶段收口（stage-done）是**人工确认**（策略 `human`）：判据齐了请人确认，不要自写完成。'
+  // 本阶段的收口策略是**逐阶段数据**（每个阶段可能不同），必须在投递里报出来——
+  // 策略错写会让模型"替人收口"或"该自动却停手等人"。跨轮的规则（串行 / 预算 / 终局）不在这里复述：
+  // 那些在常驻策略段里（`tool:workprocess`），投递只带本轮数据与本轮动作。
+  const closeHint = stageClosePolicyOf(input.stage) === 'auto'
+    ? '本阶段收口策略 `auto`：判据齐了由驱动器自动收口。'
+    : '本阶段收口策略 `human`：判据齐了**请人确认**（工具会自己弹框）。'
   return wrap('workprocess_round', [
-    '# 工作轮次（workprocess）',
+    '# 本轮任务（workprocess）',
     '',
     '流程目标：' + input.processObjective,
     '',
@@ -50,16 +52,11 @@ export function renderWorkRoundPrompt(input: WorkRoundPromptInput): string {  co
     '',
     '## 本轮任务（层2）',
     '任务 `' + input.task.id + '`：' + input.task.objective,
-    '回合：第 ' + String(input.round) + ' 轮（上限 ' + cap + '）',
-    '',
-    '## 边界',
-    '1. 只做本阶段**本任务**的事，不越阶段开工（阶段间串行：前一阶段全部达成后才轮到下一阶段）。',
-    closeLine,
-    '3. 任务达成（task-complete）由你按判据自评后落库；被中断就 block 并写清原因。',
+    '回合：第 ' + String(input.round) + ' 轮（上限 ' + cap + '）。' + closeHint,
     '',
     '## 停手条件',
-    '- 判据未齐又推不动：block 任务并说明被什么挡住（等人/等上游）。',
-    '- 任务已达成：task-complete 后停手，不要顺手开新任务。',
+    '- 达成：按判据自评后 task-complete，然后停手（不要顺手开新任务）。',
+    '- 推不动：卡点写进回执，**先撑满 3 轮**（不足就落 block 会被拒）；满 3 轮仍推不动才 block（写清等谁）。',
   ])
 }
 
@@ -100,18 +97,13 @@ export function renderWorkPlanPrompt(input: WorkPlanPromptInput): string {
     ...criteria,
     '',
     '## 现在要做的唯一一件事',
-    '本阶段已经开工，但**还没有任何任务**（阶段串行 ⇒ 任务只属于当前阶段，所以每个新阶段开始时都是空的）。',
-    '请用 `create_worktask`（`stage_key: "' + input.stage.key + '"`）给本阶段建 **1–3 个任务**：',
-    '- 每个任务的 objective 写成**可核验**的陈述（跑什么、看到什么算过）；',
-    '- 只建本阶段要做的，**不要**替后续阶段建任务（阶段是串行的）。',
-    '**只建任务，不要在这一轮动手执行**：建完就停手。任务轮会由驱动器在空闲边界投给你',
-    '（带 `<workprocess_round>` 标签、写明本轮跑哪个任务），**干活在那一轮**。',
-    '理由：回合预算（`max_rounds`）与"落 block 要先跑满 N 轮"的门槛都按**任务轮**计数——',
-    '在这一轮把活干掉，预算就等于没启用（真机踩过：两阶段跑完，`rounds.started` 还是 0）。',
+    '本阶段已开工、**还没有任务**。用 `create_worktask`（`stage_key: "' + input.stage.key + '"`）建 **1–3 个**：',
+    '- objective 写成**可核验**的陈述（跑什么、看到什么算过）。',
+    '**只建任务，这一轮不要动手**：建完就停手，任务轮会由驱动器投给你（带 `<workprocess_round>` 标签）。',
+    '（理由一行：回合预算与 block 门槛都按任务轮计数——在这一轮把活干掉，预算等于没启用。）',
     '',
-    '## 边界',
-    '1. 不越阶段开工（前一阶段全部达成后才轮到下一阶段）。',
-    '2. 规划是第 ' + String(input.round) + ' 轮：若本阶段确实无事可做，请明确说明并停手等人（不要反复空转）。',
+    '## 停手条件',
+    '- 规划是第 ' + String(input.round) + ' 轮：本阶段**确实无事可做**就明说并停手等人（不要反复空转）。',
   ])
 }
 

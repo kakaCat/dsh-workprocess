@@ -348,7 +348,8 @@ describe('续跑投递（drive）', () => {
     expect(h.sent[0].source).toMatchObject({ kind: 'work', processId: 'wp:session-1', taskId: 'wt:prep:1', revision: 1, round: 1 })
     const text = JSON.stringify(h.sent[0].content)
     expect(text).toContain('清洗数据')      // 提示词里带着本轮任务
-    expect(text).toContain('不越阶段开工')   // 边界也在
+    // 投递只带"本轮数据 + 本轮动作 + 本轮停手条件"：跨轮规则（阶段串行…）在常驻策略段里，不在每轮复述。
+    expect(text).toContain('先撑满 3 轮')      // 门槛必须在本轮说明里（真机踩过：只说 block 会被拒）
     await h.emitStatus('idle')             // 还没接手：同一轮不重复投
     expect(h.sent).toHaveLength(1)
   })

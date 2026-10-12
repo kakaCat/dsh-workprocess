@@ -197,11 +197,12 @@ describe('两种轮次的分工口径（防"规划轮把活干完、回合预算
   // 预算与"落 block 要先跑满 N 轮"的门槛都按**任务轮**计数，被挤掉就等于没启用。
   const stage = { key: 'v1', statement: '写文件', doneCriteria: ['文件在'] }
 
-  it('规划轮只建任务，明确叫停手等任务轮', () => {
+  it('规划轮只建任务，明确叫停手等任务轮（理由压成一行，不复述策略段规则）', () => {
     const text = renderWorkPlanPrompt({ processObjective: 'x', stage, round: 1 })
-    expect(text).toContain('只建任务，不要在这一轮动手执行')
-    expect(text).toContain('任务轮会由驱动器在空闲边界投给你')
-    expect(text).toContain('max_rounds')          // 说清为什么
+    expect(text).toContain('只建任务，这一轮不要动手')
+    expect(text).toContain('任务轮会由驱动器投给你')
+    expect(text).toContain('理由一行')            // 只说一句为什么，踩坑史留在代码注释里
+    expect(text).not.toContain('前一阶段全部达成后才轮到下一阶段')   // 串行规则属策略段
   })
 
   it('终局收束轮：收口/停住两种口径都要"只说话、不再调工具"', () => {
@@ -226,6 +227,9 @@ describe('两种轮次的分工口径（防"规划轮把活干完、回合预算
     })
     expect(text).toContain('wt:v1:1')
     expect(text).toContain('第 1 轮（上限 2）')      // 轮号 + 生效预算都在提示词里
-    expect(text).toContain('只做本阶段**本任务**的事')
+    expect(text).toContain('收口策略 `human`')      // 收口策略是**逐阶段数据**，必须在本轮报出（夹具没写 ⇒ 缺省 human）
+    // 真机踩过：投递叫模型 block、却没提门槛 ⇒ 照做被拒、白跑一轮。门槛必须在本轮说明里。
+    expect(text).toContain('先撑满 3 轮')
+    expect(text).not.toContain('不越阶段开工')      // 串行规则属策略段，不在每轮复述
   })
 })

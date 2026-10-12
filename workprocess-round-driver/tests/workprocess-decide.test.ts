@@ -184,7 +184,7 @@ describe('层2 · 相位机与回合上限', () => {
 })
 
 describe('回合提示词：两层都要写进模型看得见的地方', () => {
-  it('含流程目标 / 阶段与判据 / 本轮任务 / 边界与停手条件', () => {
+  it('含流程目标 / 阶段与判据 / 本轮任务与轮号 / 停手条件（并**不复述**策略段规则）', () => {
     const text = renderWorkRoundPrompt({
       processObjective: '把模型发上线',
       stage: { key: 'prep', statement: '准备数据', doneCriteria: ['数据可用'] },
@@ -197,7 +197,10 @@ describe('回合提示词：两层都要写进模型看得见的地方', () => {
     expect(text).toContain('- 数据可用')
     expect(text).toContain('任务 `wt:prep:1`：清洗数据')
     expect(text).toContain('第 2 轮（上限 5）')
-    expect(text).toContain('不越阶段开工')
+    // 投递只带"本轮数据 + 本轮动作 + 本轮停手条件"：跨轮规则（阶段串行）在常驻策略段里，不在每轮复述。
+    expect(text).not.toContain('不越阶段开工')
+    expect(text).toContain('先撑满 3 轮')            // 门槛必须在投递里（否则模型照 block 被拒）
+    expect(text).toContain('收口策略 `human`')       // 收口策略是逐阶段数据，必须报出
   })
 
   it('没有登记判据时如实说明，不编造判据', () => {
@@ -211,15 +214,15 @@ describe('回合提示词：两层都要写进模型看得见的地方', () => {
     expect(text).toContain('上限 不限')
   })
 
-  it('边界按收口策略写：human 请人确认 / auto 由驱动器自动收口（缺省 = human）', () => {
+  it('收口策略写进本轮（逐阶段数据）：human 请人确认 / auto 由驱动器自动收口（缺省 = human）', () => {
     const base = {
       processObjective: 'x',
       task: { id: 'wt:prep:1', objective: 'y' },
       round: 1,
     }
     const human = renderWorkRoundPrompt({ ...base, stage: { key: 'prep', statement: '准备', doneCriteria: [] } })
-    expect(human).toContain('人工确认')
-    expect(human).not.toContain('自动收口')
+    expect(human).toContain('请人确认')
+    expect(human).not.toContain('由驱动器自动收口')
     const auto = renderWorkRoundPrompt({
       ...base, stage: { key: 'prep', statement: '准备', doneCriteria: [], closePolicy: 'auto' },
     })
