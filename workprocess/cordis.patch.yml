@@ -1,4 +1,4 @@
-# dsh-workprocess 的装载层（bundle patch）。
+# workprocess 的装载层（bundle patch）。
 #
 # 为什么必须有这个文件：目标 profile 的 `dsh.profile.bundles` 里列了本包，而本包
 # package.json 声明了 `dsh.bundle.patch: ./cordis.patch.yml` —— DSH 加载器**读不到**该文件时
@@ -8,7 +8,7 @@
 # 的关系一致）：命令行是**独立包**，只消费 `ctx.workprocess`，不装命令行也不影响工具面。
 - insert:
     - id: workprocess
-      name: "dsh-workprocess"
+      name: "workprocess"
       config:
         # 回合边界是否自动驱动（开工 / auto 阶段自动收口 / 落盘 block）：缺省 true。
         tick: true
