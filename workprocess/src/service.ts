@@ -1,19 +1,26 @@
 /**
  * `ctx.workprocess` 服务面（**给别的插件消费**的那一层，与宿主 `ctx.goals` 同形）。
  *
- * 【为什么要它】命令行（`dsh-command-workprocess`）是**独立包**、独立装载行：它不该自己开存储域
- * （`storageDomain.open` 对同一个域名"已经打开"是**响亮拒绝**的，两个插件各开一次必撞），
- * 也不该绕过内核直接改状态。所以本插件把"读/干预"做成服务提供出去，命令包只消费。
+ * 【为什么要它】存储域的 `open` 对同名域是**响亮拒绝**（`already-open`）——域只能由一个插件独占。
+ * 工具面（`tool-workprocess`）与命令行（`workprocess`）都不能自己开域，也不该绕过内核直接改状态。
+ * 于是本插件把**域 API**（读 + 全部写动词）做成服务提供出去：消费方拿 `ctx.workprocess` 就够了，
+ * 不需要 store、不需要内核函数——这正是宿主 `tool-goal` 调 `ctx.goals.complete(...)` 的形状。
  *
- * 【口径】动作都按 `agent` 定位（`agent.session.id` = 归属域），与 `ctx.goals.get(agent)` 同款；
- * 命令天然由人发起，故 `discard` / `resumePaused` 这类真人专属动作在这一层是合法的。
+ * 【两套键】写/读的**域 API 按 `scope` 键**（一个归属域一条流程；多流程并存时显式给 scope），
+ * 人可直接做的干预**按 `agent` 键**（`agent.session.id` = 归属域，命令面用，同 `ctx.goals.get(agent)`）。
  *
  * @module workprocess/service
  */
 import {
-  currentStageOf, discardWorkProcess, pauseWorkTask, resumeWorkTask, workProcessOf,
+  blockWorkTask, clearWorkTask, closeWorkProcess, completeWorkStage, completeWorkTask, createWorkProcess,
+  createWorkTask, currentStageOf, defineWorkStages, discardWorkProcess, editWorkObjective, editWorkTask,
+  pauseWorkTask, resumeWorkTask, workProcessOf,
 } from './kernel.js'
-import type { WorkStage, WorkStoreLike } from './kernel.js'
+import type {
+  CreateWorkProcessRequest, CreateWorkTaskRequest, EditWorkTaskRequest, WorkBlockReason, WorkProcess,
+  WorkStage, WorkStageDraft,
+} from './kernel.js'
+import type { WorkDeps } from './kernel.js'
 
 /** 会话的最小读取面（与 authority/message 同源的窄类型）。 */
 interface AgentLike { readonly session?: { readonly id?: string } }
@@ -32,11 +39,38 @@ export interface WorkprocessStatus {
   readonly maxRounds?: number
 }
 
-/** `ctx.workprocess`：读 + 人可做的三种干预。 */
+/**
+ * `ctx.workprocess`：**域 API**（scope 键：读 + 全部写动词）+ **人机干预**（agent 键）。
+ *
+ * 写方法一律返回内核的 `changed`（幂等是硬语义：`changed:false` = 一个字节都没写）；
+ * 带 `revision` 时旧值即拒（CAS，抛 `WorkError('WORK_CONFLICT')`）。
+ */
 export interface WorkprocessService {
+  // ── 读（域 API）────────────────────────────────────────────────
+  /** 流程快照（缺省 = 该归属域没有流程）。 */
+  process(scope: string): Promise<WorkProcess | undefined>
   /** 读该 agent 会话的流程概览（没有流程 ⇒ undefined；缺失 ≠ 空）。 */
   view(agent: unknown): Promise<WorkprocessStatus | undefined>
-  /** 丢弃整条流程（幂等：没有流程 ⇒ false）。 */
+
+  // ── 写（域 API，与内核服务函数一一对应）─────────────────────────
+  createProcess(scope: string, request: CreateWorkProcessRequest): Promise<boolean>
+  defineStages(scope: string, stages: readonly WorkStageDraft[], revision?: number): Promise<boolean>
+  editObjective(scope: string, objective: string, revision?: number): Promise<boolean>
+  closeStage(scope: string, stageKey: string, revision?: number): Promise<boolean>
+  createTask(scope: string, request: CreateWorkTaskRequest, revision?: number): Promise<boolean>
+  editTask(scope: string, taskId: string, patch: EditWorkTaskRequest, revision?: number): Promise<boolean>
+  pauseTask(scope: string, taskId: string, revision?: number): Promise<boolean>
+  resumeTask(scope: string, taskId: string, revision?: number): Promise<boolean>
+  blockTask(scope: string, taskId: string, reason: WorkBlockReason, revision?: number): Promise<boolean>
+  completeTask(scope: string, taskId: string, revision?: number): Promise<boolean>
+  clearTask(scope: string, taskId: string, revision?: number): Promise<boolean>
+  /** 丢弃整条流程（scope 键；幂等：没有流程 ⇒ false）。 */
+  discardProcess(scope: string, revision?: number): Promise<boolean>
+  /** 收口整条流程（全阶段 done 才成立；方案 B 的轻量终止水印）。 */
+  closeProcess(scope: string, revision?: number): Promise<boolean>
+
+  // ── 人机干预（agent 键；命令面用）──────────────────────────────
+  /** 丢弃该 agent 会话的整条流程（幂等：没有流程 ⇒ false）。 */
   discard(agent: unknown): Promise<boolean>
   /** 暂停**当前阶段**的活动任务；返回被暂停的任务 id。 */
   pauseActive(agent: unknown): Promise<readonly string[]>
@@ -50,16 +84,19 @@ function scopeOfAgent(agent: unknown): string | undefined {
   return typeof id === 'string' && id.length > 0 ? id : undefined
 }
 
-/** 造服务面（组合根唯一实例：与打开的那个存储域同源）。
- * @param onCleared 整条流程被丢弃时的墓碑通知（组合根接到宿主 `work/changed`，change = undefined）。
+/**
+ * 造服务面（组合根唯一实例：与打开的那个存储域同源）。
+ *
+ * @param deps - 内核依赖（store / now / onChanged）：服务持有它，消费方不必再碰 store。
+ * @param onCleared - 整条流程被丢弃时的墓碑通知（组合根接到宿主 `work/changed`，change = undefined）。
  */
 export function createWorkprocessService(
-  store: WorkStoreLike, onCleared?: (scope: string) => void,
+  deps: WorkDeps, onCleared?: (scope: string) => void,
 ): WorkprocessService {
-  const now = (): number => Date.now()
+  const process = (scope: string): Promise<WorkProcess | undefined> => workProcessOf(deps, scope)
   const stageOf = async (scope: string) => {
-    const process = await workProcessOf({ store }, scope)
-    return process === undefined ? undefined : { process, stage: currentStageOf(process) }
+    const found = await process(scope)
+    return found === undefined ? undefined : { process: found, stage: currentStageOf(found) }
   }
   const pauseOrResume = async (scope: string, from: 'active' | 'paused'): Promise<readonly string[]> => {
     const found = await stageOf(scope)
@@ -68,13 +105,19 @@ export function createWorkprocessService(
     const moved: string[] = []
     for (const task of targets) {
       const changed = from === 'active'
-        ? await pauseWorkTask({ store, now }, scope, task.id)
-        : await resumeWorkTask({ store, now }, scope, task.id)
+        ? await pauseWorkTask(deps, scope, task.id)
+        : await resumeWorkTask(deps, scope, task.id)
       if (changed) moved.push(task.id)
     }
     return moved
   }
+  const discardProcess = async (scope: string, revision?: number): Promise<boolean> => {
+    const changed = await discardWorkProcess(deps, scope, revision)
+    if (changed) onCleared?.(scope)
+    return changed
+  }
   return {
+    process,
     async view(agent) {
       const scope = scopeOfAgent(agent)
       if (scope === undefined) return undefined
@@ -85,17 +128,29 @@ export function createWorkprocessService(
         objective: found.process.objective,
         stages: found.process.stages,
         ...(found.stage === undefined ? {} : { currentStageKey: found.stage.key }),
-        roundsStarted: (await store.get(scope))?.rounds?.started ?? 0,
+        roundsStarted: (await deps.store.get(scope))?.rounds?.started ?? 0,
         ...(cap === undefined ? {} : { maxRounds: cap }),
         ...(found.process.closedAt === undefined ? {} : { closedAt: found.process.closedAt }),
       }
     },
-    async discard(agent) {
+    // 写：域 API（与内核服务函数一一对应，服务是唯一持有 store 的那一层）。
+    createProcess: (scope, request) => createWorkProcess(deps, scope, request),
+    defineStages: (scope, stages, revision) => defineWorkStages(deps, scope, stages, revision),
+    editObjective: (scope, objective, revision) => editWorkObjective(deps, scope, objective, revision),
+    closeStage: (scope, stageKey, revision) => completeWorkStage(deps, scope, stageKey, revision),
+    createTask: (scope, request, revision) => createWorkTask(deps, scope, request, revision),
+    editTask: (scope, taskId, patch, revision) => editWorkTask(deps, scope, taskId, patch, revision),
+    pauseTask: (scope, taskId, revision) => pauseWorkTask(deps, scope, taskId, revision),
+    resumeTask: (scope, taskId, revision) => resumeWorkTask(deps, scope, taskId, revision),
+    blockTask: (scope, taskId, reason, revision) => blockWorkTask(deps, scope, taskId, reason, revision),
+    completeTask: (scope, taskId, revision) => completeWorkTask(deps, scope, taskId, revision),
+    clearTask: (scope, taskId, revision) => clearWorkTask(deps, scope, taskId, revision),
+    discardProcess,
+    closeProcess: (scope, revision) => closeWorkProcess(deps, scope, revision),
+    // 人机干预：agent 键。
+    discard(agent) {
       const scope = scopeOfAgent(agent)
-      if (scope === undefined) return false
-      const changed = await discardWorkProcess({ store, now }, scope)
-      if (changed) onCleared?.(scope)
-      return changed
+      return scope === undefined ? Promise.resolve(false) : discardProcess(scope)
     },
     async pauseActive(agent) {
       const scope = scopeOfAgent(agent)

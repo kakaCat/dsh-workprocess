@@ -1,5 +1,11 @@
 # tool-workprocess
 
+**插件形态**（对齐宿主 `dsh-tool-goal`）：`name` / `inject: ['tools','workprocess','agents','sessionProjections','systemPrompt']` / `apply(ctx, config)`。
+**数据口只有 `ctx.workprocess`**——存储域由领域插件独占打开（同名域重复 `open` 是响亮拒绝），
+本面不碰 store、不绕内核；授权判据 / 通告（`exec.deferContext`）/ 人机确认（`ctx.userQuestions`）
+/ 常驻策略段都归本面，装配由 `apply` 一次接好。
+
+
 workprocess 的**工具面**：两层各三工具（登记表 `src/registry.ts` 是唯一手写清单）。
 
 **命名与形状对齐宿主 dsh**：`get_* / create_* / update_*`（动词在前），状态变更**收进 `update` 的 `action`**

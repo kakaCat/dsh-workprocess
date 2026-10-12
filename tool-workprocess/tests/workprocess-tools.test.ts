@@ -15,8 +15,8 @@ import {
   createWorkstage, createWorktask, getWorkstage, getWorktask, updateWorkstage, updateWorktask,
   type WorkToolDeps, type WorkHumanVerdict,
 } from 'tool-workprocess'
-import type { WorkRecordLike } from 'workprocess'
-import { startWorkStage } from 'workprocess'
+import type { WorkRecordLike, WorkStoreLike } from 'workprocess'
+import { createWorkprocessService, startWorkStage } from 'workprocess'
 
 function storeOf(records: Record<string, WorkRecordLike>) {
   return {
@@ -31,10 +31,18 @@ function storeOf(records: Record<string, WorkRecordLike>) {
   }
 }
 
-function depsOf(records: Record<string, WorkRecordLike>, human = false): WorkToolDeps {
+/**
+ * 测试依赖：工具面要的 `domain`（域服务）+ 直接落内核动作（如开工）要的 `store` / `now`。
+ * 三者共享**同一个 store 实例**——域服务就是架在它上面的。
+ */
+type TestDeps = WorkToolDeps & { readonly store: WorkStoreLike; readonly now: () => number }
+
+function depsOf(records: Record<string, WorkRecordLike>, human = false): TestDeps {
+  const store = storeOf(records) as never
+  const now = () => 1_000
   return {
-    store: storeOf(records) as never,
-    now: () => 1_000,
+    store, now,
+    domain: createWorkprocessService({ store, now }),
     ...(human ? { resolveAuthority: () => ({ kind: 'direct-human' as const }) } : {}),
   }
 }

@@ -14,23 +14,24 @@
  * @module tool-workprocess/handlers
  */
 import {
-  WorkError, allTasksOf, applyWorkEvent, blockWorkTask, clearWorkTask, completeWorkStage, completeWorkTask,
-  createWorkProcess, createWorkTask, currentStageOf, defineWorkStages, discardWorkProcess, editWorkObjective,
-  editWorkTask, pauseWorkTask, processAllowsClose, resumeWorkTask, stageAllowsStart, stageClosePolicyOf,
-  stageIsFinishable, workProcessOf,
+  WorkError, allTasksOf, applyWorkEvent, currentStageOf, processAllowsClose, stageAllowsStart,
+  stageClosePolicyOf, stageIsFinishable,
 } from 'workprocess'
-import type { WorkStage, WorkStageClosePolicy, WorkStageDraft, WorkStoreLike, WorkTask } from 'workprocess'
+import type { WorkprocessService } from 'workprocess'
+import type { WorkStage, WorkStageClosePolicy, WorkStageDraft, WorkTask } from 'workprocess'
 import {
   isActionAuthorized, requireActionAuthority, workToolExecution,
   type WorkAuthorityAction, type WorkAuthorityContext, type WorkRoundRef, type WorkToolAuthority,
 } from './authority.js'
 
-/** 组合根可注入的依赖（`store` = 归属记录端口；判据钩子见 `authority.ts`）。 */
+/** 组合根可注入的依赖（`domain` = `ctx.workprocess` 域服务；判据钩子见 `authority.ts`）。 */
 export interface WorkToolDeps {
-  /** 归属记录的读写通道（本面只碰 `workProcess` 字段）。 */
-  readonly store: WorkStoreLike
-  /** 时间源（本包不读系统时钟）。 */
-  readonly now: () => number
+  /**
+   * **领域服务**（`ctx.workprocess`）：工具面**唯一**的数据出入口——不碰 store、不绕内核。
+   * 存储域的 `open` 对同名域是响亮拒绝（`already-open`），域只能由领域插件独占，
+   * 故工具面经服务读写（对齐宿主 `tool-goal` 调 `ctx.goals.*` 的形状）。
+   */
+  readonly domain: WorkprocessService
   /** 本回合授权判定（给了就按它判；缺省 = 保守的 autonomous）。 */
   readonly resolveAuthority?: (exec: unknown, expected?: WorkRoundRef) => WorkToolAuthority | undefined
   /** 调用者存活校验（缺省 = 不校验）。 */
@@ -60,14 +61,6 @@ export interface WorkToolDeps {
    * 人同意才动作。本口照此办理：**§人机确认的裁决由工具拿，不由模型转述§**。
    */
   readonly askHuman?: (exec: unknown, request: WorkHumanAsk) => Promise<WorkHumanVerdict>
-  /**
-   * 有效写入后的**变更通知**（透传给内核写路径：组合根把它接到宿主 `work/changed` 事件）。
-   * 端口保留在工具面是为了穷举单测不依赖宿主事件总线；装配期由组合根注入。
-   */
-  readonly onChanged?: (notification: { readonly processId: string; readonly scope: string
-    readonly change: { readonly kind: 'work/change'; readonly version: 1; readonly event: unknown; readonly process: unknown } }) => void | Promise<void>
-  /** 整条流程被丢弃时的**墓碑通知**（丢弃不经事件表，单独报）。 */
-  readonly onDiscarded?: (scope: string) => void
 }
 
 /** 一条人机确认请求（工具问人时给弹框的内容）。 */
@@ -226,7 +219,7 @@ const KEBAB = /^[a-z0-9]+(-[a-z0-9]+)*$/
 export async function getWorkstage(deps: WorkToolDeps, args: Record<string, unknown>, exec?: unknown): Promise<WorkToolReply> {
   const scope = scopeOf(args, deps, exec)
   if (scope === undefined) return { success: false, error: '缺少 scope（归属域键：这条流程挂在谁名下；未接默认归属时请显式给）' }
-  const process = await workProcessOf(deps, scope)
+  const process = await deps.domain.process(scope)
   if (process === undefined) {
     return { success: false, scope, error: '该归属域还没有流程（先调 create_workstage 建流程）' }
   }
@@ -268,13 +261,13 @@ export async function createWorkstage(
   const objective = args.objective === undefined ? '' : String(args.objective)
   const revision = typeof args.revision === 'number' ? args.revision : undefined
   return guarded(async () => {
-    const existing = await workProcessOf(deps, scope)
+    const existing = await deps.domain.process(scope)
     if (existing === undefined) {
       if (objective.trim() === '') {
         return { success: false, scope, error: '建流程需要 objective（写清这条流程要达成什么）' }
       }
-      const changed = await createWorkProcess(deps, scope, { objective, stages })
-      const built = await workProcessOf(deps, scope)
+      const changed = await deps.domain.createProcess(scope, { objective, stages })
+      const built = await deps.domain.process(scope)
       const first = built === undefined ? undefined : currentStageOf(built)
       return {
         success: true, scope, created: true, changed,
@@ -290,7 +283,7 @@ export async function createWorkstage(
     // `changed:false` 的幂等重放与"会被拒"（丢非空阶段 / 串行门被破）在回执里必须分得清。
     const dry = applyWorkEvent(existing, { kind: 'stage-define', stages })
     if (!dry.changed) return { success: true, scope, created: false, changed: false, reason: dry.reason }
-    const changed = await defineWorkStages(deps, scope, stages, revision)
+    const changed = await deps.domain.defineStages(scope, stages, revision)
     return { success: true, scope, created: false, changed }
   })
 }
@@ -344,9 +337,8 @@ export async function updateWorkstage(
     if (action === 'discard') {
       // 真人专属（删掉的是整条流程，不可逆）；内核负责"没有流程就零写入"的幂等。
       authorize('process_discard', authorityOf(deps, exec))
-      const changed = await discardWorkProcess(deps, scope, revision)
+      const changed = await deps.domain.discardProcess(scope, revision)
       if (changed) {
-        deps.onDiscarded?.(scope)
         notice(deps, exec, 'process-discard',
           '<workprocess_discarded>\n整条流程已丢弃（不可逆：阶段、任务与任务编号墓碑一并消失，回合计数归零）。\n'
           + '不要再引用原来的阶段键或任务 id；需要重来就用 create_workstage 新起一条。\n'
@@ -357,11 +349,11 @@ export async function updateWorkstage(
     if (action === 'edit') {
       // 真人专属（改的是"这条流程要达成什么"——同宿主 `update_goal` 的 edit 口径）。
       authorize('process_edit', authorityOf(deps, exec))
-      const changed = await editWorkObjective(deps, scope, objective, revision)
+      const changed = await deps.domain.editObjective(scope, objective, revision)
       return { success: true, scope, action, objective, changed }
     }
     // 先读目标阶段：授权判据要按它的收口策略判（策略不在参数里，在流程里）。
-    const process = await workProcessOf(deps, scope)
+    const process = await deps.domain.process(scope)
     const stage = process?.stages.find((s) => s.key === stageKey)
     if (stage === undefined) return { success: false, scope, stage_key: stageKey, error: '阶段不存在' }
     const closePolicy = stageClosePolicyOf(stage)
@@ -422,7 +414,7 @@ export async function updateWorkstage(
         changed: false, reason: '本阶段任务未全部 complete（缺失 ≠ 达成）',
       }
     }
-    const changed = await completeWorkStage(deps, scope, stageKey, revision)
+    const changed = await deps.domain.closeStage(scope, stageKey, revision)
     if (changed) {
       notice(deps, exec, 'stage-done: ' + stageKey,
         '<workprocess_stage_done>\n阶段 ' + stageKey + ' 已收口。\n'
@@ -441,7 +433,7 @@ export async function updateWorkstage(
 export async function getWorktask(deps: WorkToolDeps, args: Record<string, unknown>, exec?: unknown): Promise<WorkToolReply> {
   const scope = scopeOf(args, deps, exec)
   if (scope === undefined) return { success: false, error: '缺少 scope（归属域键：这条流程挂在谁名下；未接默认归属时请显式给）' }
-  const process = await workProcessOf(deps, scope)
+  const process = await deps.domain.process(scope)
   if (process === undefined) return { success: false, scope, error: '该归属域还没有流程' }
   const taskId = args.task_id === undefined ? undefined : String(args.task_id)
   const stageKey = args.stage_key === undefined ? undefined : String(args.stage_key)
@@ -474,11 +466,11 @@ export async function createWorktask(
   const maxRounds = typeof args.max_rounds === 'number' ? args.max_rounds : undefined
   const revision = typeof args.revision === 'number' ? args.revision : undefined
   return guarded(async () => {
-    const changed = await createWorkTask(deps, scope, {
+    const changed = await deps.domain.createTask(scope, {
       stageKey, objective, ...(maxRounds === undefined ? {} : { maxRounds }),
     }, revision)
     // 回执带上新任务的 id（调用方下一句就要用它，不该再去猜编号）。
-    const process = await workProcessOf(deps, scope)
+    const process = await deps.domain.process(scope)
     const stage = process?.stages.find((s) => s.key === stageKey)
     const created = stage === undefined ? undefined : stage.tasks[stage.tasks.length - 1]
     return {
@@ -534,15 +526,15 @@ export async function updateWorktask(
     }
     authorize(('task_' + act) as WorkAuthorityAction, authorityOf(deps, exec))
     const changed = act === 'edit'
-      ? await editWorkTask(deps, scope, taskId, {
+      ? await deps.domain.editTask(scope, taskId, {
         ...(objective.trim() === '' ? {} : { objective }),
         ...(maxRounds === undefined ? {} : { maxRounds }),
       }, revision)
-      : act === 'pause' ? await pauseWorkTask(deps, scope, taskId, revision)
-        : act === 'resume' ? await resumeWorkTask(deps, scope, taskId, revision)
-          : act === 'complete' ? await completeWorkTask(deps, scope, taskId, revision)
-            : act === 'clear' ? await clearWorkTask(deps, scope, taskId, revision)
-              : await blockWorkTask(deps, scope, taskId, { code: reasonCode, message: reason }, revision)
+      : act === 'pause' ? await deps.domain.pauseTask(scope, taskId, revision)
+        : act === 'resume' ? await deps.domain.resumeTask(scope, taskId, revision)
+          : act === 'complete' ? await deps.domain.completeTask(scope, taskId, revision)
+            : act === 'clear' ? await deps.domain.clearTask(scope, taskId, revision)
+              : await deps.domain.blockTask(scope, taskId, { code: reasonCode, message: reason }, revision)
     // **收尾通告**（对齐宿主 goal 的 `<goal_complete>`）：任务刚达成的那一拍就说清"到此为止"。
     if (act === 'complete' && changed) {
       notice(deps, exec, 'task-complete: ' + taskId,

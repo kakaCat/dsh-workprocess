@@ -13,6 +13,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { apply, name, inject, storageDomainStoreOf, workprocessDomain } from 'workprocess'
 import { WORK_TOOL_REGISTRY } from 'tool-workprocess'
+import { apply as applyTools } from 'tool-workprocess/plugin.js'
 import { applyWorkEvent, startWorkStage } from 'workprocess'
 
 interface ToolLike { execute(args: Record<string, unknown>, exec?: unknown): Promise<Record<string, unknown>> }
@@ -147,7 +148,9 @@ let host: FakeHost
 
 beforeEach(() => {
   host = fakeHost()
+  // 真机装配的形状：领域插件（provide ctx.workprocess + 驱动）在前，工具插件在后消费它。
   apply(host.ctx, {})
+  applyTools(host.ctx)
 })
 
 const call = (tool: string, args: Record<string, unknown> = {}) => host.tools[tool].execute(args, host.exec())
@@ -168,7 +171,7 @@ async function idleTick(h: FakeHost = host): Promise<void> {
 describe('插件装配面', () => {
   it('声明 name / inject，并按登记表注册六个工具（名字逐字一致）', () => {
     expect(name).toBe('workprocess')
-    expect(inject).toEqual(['agents', 'tools', 'sessionProjections', 'storageDomain', 'systemPrompt'])
+    expect(inject).toEqual(['agents', 'sessionProjections', 'storageDomain'])
     expect(Object.keys(host.tools).sort()).toEqual(WORK_TOOL_REGISTRY.map((e) => e.toolName).sort())
     expect(host.hooks).toEqual(['session/event', 'agent/status'])
   })
@@ -267,6 +270,7 @@ describe('续跑投递（drive）', () => {
   async function seeded(config: Record<string, unknown> = { drive: true }) {
     const local = fakeHost()
     apply(local.ctx, config)
+    applyTools(local.ctx)
     await local.tools.create_workstage.execute(
       { objective: '把模型发上线', stages: [{ key: 'prep', statement: '准备' }] }, local.exec(),
     )
@@ -325,6 +329,7 @@ describe('阶段规划轮（阶段开工了却没任务 ⇒ 让 agent 建任务�
   async function seededEmpty(config: Record<string, unknown> = { drive: true }) {
     const local = fakeHost()
     apply(local.ctx, config)
+    applyTools(local.ctx)
     await local.tools.create_workstage.execute(
       { objective: '实现一个俄罗斯方块小游戏', stages: [{ key: 'ui', statement: '界面与交互' }] }, local.exec(),
     )
@@ -368,6 +373,7 @@ describe('收口确认轮（任务全达成 + 策略 human ⇒ 请人拍板，�
   async function seededDone(policy: 'human' | 'auto' = 'human') {
     const local = fakeHost()
     apply(local.ctx, { drive: true })
+    applyTools(local.ctx)
     await local.tools.create_workstage.execute({
       objective: '实现一个俄罗斯方块小游戏',
       stages: [{ key: 'ui', statement: '界面与交互', close_policy: policy }],
@@ -453,6 +459,7 @@ describe('人机确认接线（工具自己问人：宿主 userQuestions）', ()
   async function readyToClose() {
     const local = fakeHost()
     apply(local.ctx, {})
+    applyTools(local.ctx)
     await local.tools.create_workstage.execute(
       { objective: 'x', stages: [{ key: 'prep', statement: '准备' }] }, local.exec(),
     )
@@ -508,6 +515,7 @@ describe('流程收口（close: auto 缺省 / human 显式）', () => {
   async function seededFinished(config: Record<string, unknown> = {}) {
     const local = fakeHost()
     apply(local.ctx, { drive: true, ...config })
+    applyTools(local.ctx)
     await local.tools.create_workstage.execute(
       { objective: '实现一个俄罗斯方块小游戏', stages: [{ key: 'only', statement: '唯一阶段', close_policy: 'auto' }] },
       local.exec(),

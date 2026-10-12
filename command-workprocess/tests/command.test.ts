@@ -13,9 +13,10 @@
 import { describe, it, expect } from 'vitest'
 import {
   apply, createInstruction, editInstruction, inject, name, parseWorkCommand, renderWorkStatus, workCommandHandler,
+  type WorkprocessFacade,
 } from 'dsh-command-workprocess'
 import { createWorkprocessService } from 'workprocess'
-import type { WorkprocessService, WorkprocessStatus } from 'workprocess'
+import type { WorkprocessStatus } from 'workprocess'
 import {
   createWorkProcess, createWorkTask, startWorkStage, workProcessOf,
 } from 'workprocess'
@@ -131,7 +132,7 @@ describe('\`/work\` · 排版（人看的）', () => {
 })
 
 describe('\`/work\` · handler 分派（假服务）', () => {
-  const stub = (over: Partial<WorkprocessService> = {}): WorkprocessService => ({
+  const stub = (over: Partial<WorkprocessFacade> = {}): WorkprocessFacade => ({
     view: async () => undefined,
     discard: async () => false,
     pauseActive: async () => [],
@@ -223,7 +224,7 @@ describe('\`/work\` · 真接线（apply 注册 + 真服务 + 真内核）', () 
     await startWorkStage(deps, 'session-1', 'repro')
     await createWorkTask(deps, 'session-1', { stageKey: 'repro', objective: '抓栈' })
     const commands = fakeCommands()
-    const service = createWorkprocessService(store)
+    const service = createWorkprocessService({ store, now: () => 1_000 })
     apply({ commands: commands.surface, workprocess: service } as never)
     return { store, commands, service }
   }

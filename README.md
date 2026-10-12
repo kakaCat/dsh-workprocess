@@ -4,8 +4,8 @@
 每个阶段装若干**任务**（`workTask`，会被自动续跑推动的工作单元）。
 
 零第三方领域依赖：内核（`workprocess` 包的 types/domain/fold/invariant/runtime/stages/client
-七个模块）不 import 任何东西——由 `tests/kernel-purity.test.ts` 逐文件机械守卫；只有工具面
-依赖宿主工具 SDK（`@deepseek-ai/dsh-tools`）用于把工具注册进宿主。**运行时依赖只认 `@deepseek-ai` 官方包与工作区包**：唯一的 `zod`
+七个模块）不 import 任何东西——由 `tests/kernel-purity.test.ts` 逐文件机械守卫；工具插件
+依赖宿主工具 SDK（`@deepseek-ai/dsh-tools`）把六个工具注册进宿主。**运行时依赖只认 `@deepseek-ai` 官方包与工作区包**：唯一的 `zod`
 在 `dsh-workprocess` 走 `peerDependencies`——`@deepseek-ai/dsh-storage-domain` 自己声明
 `zod: ^4.4.3` 且其公开 API `domainTable(schema: ZodType<V>)` 的类型即来自 'zod'，是官方契约
 钦定的 schema 语言，由官方栈提供而非我们自选。
@@ -44,10 +44,10 @@ workProcess  id=wp:<scope>   revision（两层的写共用同一个 CAS）
 
 | 包 | 作用 | 依赖 |
 |---|---|---|
-| `workprocess` | **领域插件**：内核（两层快照 / 事件表 / 折叠 / 七条不变量 / 严格解码 / 服务：CAS + 幂等 + 身份分配）＋ 归属记录落宿主存储域（`ctx.storageDomain`）/ 真人判定（会话事件切面）/ 回合边界驱动（开工 · auto 收口 · 落盘 block · **续跑投递**）/ 提供 **`ctx.workprocess`** 服务 + 发 **`work/changed`** typed 宿主事件（对齐 `goal/changed`）+ `apply(ctx: Context, config)`。内核纯度守在**模块边界**（内核七文件零外部 import，由 `tests/kernel-purity.test.ts` 机械守卫）。类型全部直连官方包：cordis `Context`（peer，type-only）、dsh-agent / dsh-session-projection / dsh-system-prompt / dsh-storage-domain / dsh-llm | `workprocess-round-driver`、`tool-workprocess`、`@deepseek-ai/dsh-storage-domain`、`@deepseek-ai/dsh-llm`（cordis 与 zod 走 peer：前者是宿主单例符号包，后者是官方存储域钦定 schema 语言——都由官方栈提供） |
+| `workprocess` | **领域插件**（对齐宿主 `dsh-goal`）：内核（两层快照 / 事件表 / 折叠 / 七条不变量 / 严格解码 / 服务：CAS + 幂等 + 身份分配）＋ 归属记录落宿主存储域（`ctx.storageDomain`，域由本插件**独占**打开）/ 回合边界驱动（开工 · auto 收口 · 落盘 block · **续跑投递**）/ 提供 **`ctx.workprocess`**（域 API：读 + 全部写动词 + 人机干预）/ 发 **`work/changed`** typed 宿主事件（对齐 `goal/changed`）。内核纯度守在**模块边界**（内核七文件零外部 import，由 `tests/kernel-purity.test.ts` 机械守卫） | `workprocess-round-driver`、`@deepseek-ai/dsh-storage-domain`、`@deepseek-ai/dsh-llm`（cordis 与 zod 走 peer：前者是宿主单例符号包，后者是官方存储域钦定 schema 语言——都由官方栈提供） |
 | `workprocess-round-driver` | 回合驱动器：纯决策树（闸 → 串行门 → 相位机）+ 提示词渲染 | `workprocess` |
-| `tool-workprocess` | 工具面：`get_/create_/update_*` 六个工具 + 授权判据 + 独立插件入口 | `workprocess`、`@deepseek-ai/dsh-tools` |
-| `command-workprocess` | **命令行插件** `/work`（`<目标>` 让 agent 拆阶段建流程 · `edit <目标>` 改目标 · `pause` / `resume` / `clear`）——独立包、独立装载行（对齐宿主 `dsh-command-goal`），只消费 `ctx.workprocess`，**结构化动作投话给 agent 做** | `workprocess`（类型）、`@deepseek-ai/dsh-llm` |
+| `tool-workprocess` | **工具插件**（对齐宿主 `dsh-tool-goal`：`name`/`inject`/`apply(ctx, config)`）：`get_/create_/update_*` 六个工具 + 授权判据 + 通告（`exec.deferContext`）+ 人机确认（`ctx.userQuestions`）+ 常驻策略段；数据只经 **`ctx.workprocess`** | `workprocess`、`@deepseek-ai/dsh-tools`、`@deepseek-ai/dsh-llm`（cordis/dsh-agent/dsh-session-projection/dsh-system-prompt 走 peer，type-only） |
+| `command-workprocess` | **命令行插件** `/work`（`<目标>` 让 agent 拆阶段建流程 · `edit <目标>` 改目标 · `pause` / `resume` / `clear`）——独立包、独立装载行（对齐宿主 `dsh-command-goal`），只消费 `ctx.workprocess` 的四个人机干预方法，**结构化动作投话给 agent 做** | `workprocess`（类型）、`@deepseek-ai/dsh-llm`（cordis/dsh-commands 走 peer，type-only） |
 
 工具面命名与形状对齐宿主 dsh 的 `get_goal / create_goal / update_goal`：
 `get_workstage / create_workstage / update_workstage` 与 `get_worktask / create_worktask / update_worktask`，
@@ -58,7 +58,7 @@ workProcess  id=wp:<scope>   revision（两层的写共用同一个 CAS）
 ```bash
 pnpm install
 pnpm typecheck
-pnpm test          # 165 条：内核（含纯度守卫）53 / 驱动 28 / 工具 34 / 领域插件 37 / 命令行插件 13（含端到端）
+pnpm test          # 166 条：内核（含纯度守卫）53 / 驱动 28 / 工具 34 / 领域插件 37 / 命令行插件 13（含端到端）
 pnpm build         # 出 dist/（宿主加载的是 JS，不是 TS）。两阶段：先 build:bootstrap 垫 dist，
                    # 再正式构建——workprocess ↔ tool-workprocess 的声明级循环（M0 合并产物，
                    # M2–M4 解环后撤除；自映射把各包名字解析回 src，详见各 tsconfig.build.json）

@@ -42,6 +42,12 @@ export const inject = ['commands', 'workprocess']
 
 const USAGE = '用法：/work [<目标>|edit <目标>|pause|resume|clear]'
 
+/**
+ * 命令面只要的**四个干预方法**（接口隔离）：`ctx.workprocess` 是完整域服务，
+ * 命令只读概览 + 做三种人可做的干预——收窄之后测试桩不必补一整套写方法。
+ */
+export type WorkprocessFacade = Pick<WorkprocessService, 'view' | 'discard' | 'pauseActive' | 'resumePaused'>
+
 type WorkCommand =
   | { readonly kind: 'show' }
   | { readonly kind: 'create'; readonly objective: string }
@@ -190,8 +196,8 @@ function deliver(invocation: WorkCommandInvocation, text: string, receipt: strin
   return { kind: 'success', text: receipt }
 }
 
-/** 造命令 handler（对着 `ctx.workprocess` 服务做分派）。 */
-export function workCommandHandler(service: WorkprocessService) {
+/** 造命令 handler（对着 `ctx.workprocess` 的人机干预面做分派）。 */
+export function workCommandHandler(service: WorkprocessFacade) {
   return async (invocation: WorkCommandInvocation): Promise<WorkCommandResult> => {
     const command = parseWorkCommand(invocation.rawInput)
     try {

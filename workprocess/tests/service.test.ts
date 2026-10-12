@@ -38,7 +38,7 @@ async function seeded() {
   await startWorkStage(deps, 'session-1', 'repro')
   await createWorkTask(deps, 'session-1', { stageKey: 'repro', objective: '抓栈', maxRounds: 5 })
   await createWorkTask(deps, 'session-1', { stageKey: 'fix', objective: '改码' })
-  return { store, service: createWorkprocessService(store) }
+  return { store, service: createWorkprocessService({ store, now: () => 1_000 }) }
 }
 
 describe('ctx.workprocess 服务面', () => {

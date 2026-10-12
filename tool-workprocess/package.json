@@ -24,6 +24,13 @@
   },
   "dependencies": {
     "workprocess": "workspace:*",
-    "@deepseek-ai/dsh-tools": "0.2.0-rc.1"
+    "@deepseek-ai/dsh-tools": "0.2.0-rc.1",
+    "@deepseek-ai/dsh-llm": "0.2.0-rc.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.4",
+    "@deepseek-ai/dsh-agent": "0.2.0-rc.1",
+    "@deepseek-ai/dsh-session-projection": "0.2.0-rc.1",
+    "@deepseek-ai/dsh-system-prompt": "0.2.0-rc.1"
   }
 }

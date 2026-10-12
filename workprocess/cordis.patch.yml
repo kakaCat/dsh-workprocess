@@ -4,8 +4,10 @@
 # package.json 声明了 `dsh.bundle.patch: ./cordis.patch.yml` —— DSH 加载器**读不到**该文件时
 # 会**整个跳过**这个 bundle（现象：重启宿主也看不到任何 workprocess 工具）。
 #
-# 两条装载行 = 领域插件 + 命令行插件（与宿主 base bundle 里 `dsh-goal` / `dsh-command-goal`
-# 的关系一致）：命令行是**独立包**，只消费 `ctx.workprocess`，不装命令行也不影响工具面。
+# 三条装载行 = 领域插件 + 工具插件 + 命令行插件（与宿主 base bundle 里
+# `dsh-goal` / `dsh-tool-goal` / `dsh-command-goal` 的关系一致）：后两者都是**独立包**，
+# 只消费 `ctx.workprocess`；不装工具面 = 只有服务没有工具，不装命令行 = 只有工具没有命令。
+# 顺序：领域插件先（provide 服务），工具与命令行随后消费。
 - insert:
     - id: workprocess
       name: "workprocess"
@@ -18,5 +20,7 @@
         defaultMaxRounds: 20
         # 流程收口：auto = 最后一段 done 即收口（缺省）；human = 全阶段 done 后投「请判」轮（判了不落章，方案 B 口径）。
         close: auto
+    - id: tool-workprocess
+      name: "tool-workprocess"
     - id: command-workprocess
       name: "dsh-command-workprocess"

@@ -15,14 +15,18 @@ workprocess 的**插件入口**（组合根）：把「内核 + 驱动 + 工具�
 ## 装配
 
 ```
-inject = ['agents', 'tools', 'sessionProjections', 'storageDomain', 'systemPrompt']
+inject = ['agents', 'sessionProjections', 'storageDomain']
 apply(ctx: Context, config) ⇒
-  · 打开归属记录域（storage domain `workprocess`）
-  · 注册常驻策略段（`ctx.systemPrompt.section('tool:workprocess')`）
-  · 给工具面接上通告口（deferNotice ⇒ exec.deferContext）与人机确认口（askHuman ⇒ ctx.userQuestions）
-  · **发 `work/changed` typed 事件**（declare module '@deepseek-ai/cordis'；写路径统一从组合根进事件总线；
+  · 打开归属记录域（storage domain `workprocess`）——**域由本插件独占**（同名域重复 open 是响亮拒绝）
+  · ctx.provide('workprocess', 域服务)   ← 官方 cordis provide，纯对象即可（无 instanceof Service 检查）
+     域 API：process / createProcess / defineStages / editObjective / closeStage /
+             createTask / editTask / pause·resume·block·complete·clearTask / discardProcess / closeProcess
+     人机干预：view / discard / pauseActive / resumePaused（agent 键）
+  · **发 `work/changed` typed 事件**（declare module '@deepseek-ai/cordis'；写路径统一进事件总线；
      payload = { scope, change }，丢弃为墓碑 change: undefined——外部插件可 ctx.on 订阅）
-  · ctx.provide('workprocess', 服务面)   ← 官方 cordis provide，纯对象即可（无 instanceof Service 检查）
+  · 回合边界驱动（agent/status = idle）+ 续跑投递（M4 迁往 round-driver 插件）
+
+工具面 / 命令行都是**独立包、独立装载行**，只消费 `ctx.workprocess`（见 `cordis.patch.yml` 三行）。
 apply(ctx, config) ⇒
   · 打开归属记录域（storage domain `workprocess`）
   · 六个工具进 ctx.tools.register（get_/create_/update_ × workstage/worktask）

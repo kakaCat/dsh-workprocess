@@ -1,9 +1,9 @@
 /**
  * dsh-workprocess：workprocess 的**插件入口**（宿主装配面）。
  *
- * 【这一层就是"组合根"】内核 / 驱动 / 工具面三件都是库，缺的是把四样东西接上：
+ * 【这一层就是"组合根"】内核 / 驱动两件是库，缺的是把三样东西接上：
  *   ① 归属记录的 `store`（`./domain`：宿主 storage domain——schema 校验 + 写即耐久 + `domain/changed`）；
- *   ② 真人判定 `resolveAuthority`（`./authority`：宿主会话事件切面 → 授权，不接则 human 策略永远拒）；
+ *   ② （工具面的授权判据 / 通告 / 人机确认已随工具面迁到 `tool-workprocess`——那是工具自己的关切）；
  *   ③ 回合边界驱动（`./driver`：开工 / auto 收口 / 落盘 block——只做不需要人的那三种）；
  *   ④ **续跑投递**（`drive`）：空闲边界上把"下一轮该跑什么"投给会话（`agent.followup`），
  *      让任务在没人催的情况下自己往前走；刹车 = 任务的 `max_rounds`（缺省 {@link DEFAULT_MAX_ROUNDS}）。
@@ -22,14 +22,12 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 // 引入模块增强（MessageSourceMap 加 'work' 一格）：类型面的事，运行时不需要它。
 import type {} from './message.js'
 import { workProcessOf } from './kernel.js'
-import {
-  WORK_TOOL_FACTORIES, WORK_TOOL_REGISTRY,
-  type WorkHumanAsk, type WorkHumanVerdict, type WorkToolDeps,
-} from 'tool-workprocess'
+import type { WorkStoreLike } from './kernel.js'
 import type { Context } from '@deepseek-ai/cordis'
-// type-only import：官方包的 `declare module` 增强（ctx.sessionProjections 等）随包入程序。
+// type-only import：官方包的 `declare module` 增强（ctx.agents / agent/status 事件 /
+// ctx.sessionProjections 等）随包入程序——单包编译时不会被别的包顺带拉进来。
+import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-session-projection'
-import { agentOf, authorityResolverOf } from './authority.js'
 import type { WorkChangedPayload } from './events.js'
 import { storageDomainStoreOf } from './storage.js'
 import { createWorkprocessService } from './service.js'
@@ -43,7 +41,6 @@ export type { WorkChangedPayload } from './events.js'
 export { storageDomainStoreOf, workprocessDomain, WORKPROCESS_DOMAIN, WORKPROCESS_DOMAIN_VERSION } from './storage.js'
 export { createWorkprocessService } from './service.js'
 export type { WorkprocessService, WorkprocessStatus } from './service.js'
-export { agentOf, authorityResolverOf } from './authority.js'
 export { DEFAULT_MAX_ROUNDS, askDeliveryOf, effectiveMaxRoundsOf, factsOf, planDeliveryOf, roundDeliveryOf, tickWorkprocess } from './driver.js'
 export type { StorageDomainCtx, DomainTableHandle } from './storage.js'
 export type { RoundDelivery } from './driver.js'
@@ -52,7 +49,7 @@ export type { RoundDelivery } from './driver.js'
 export const name = 'workprocess'
 
 /** 装配依赖：会话/agent 面（授权 + 投递）、工具注册面、会话投影（回合边界）、存储域（归属记录）。 */
-export const inject = ['agents', 'tools', 'sessionProjections', 'storageDomain', 'systemPrompt']
+export const inject = ['agents', 'sessionProjections', 'storageDomain']
 
 /** 装载层配置（`cordis.patch.yml` 的 config 段）。 */
 export interface WorkprocessConfig {
@@ -108,41 +105,12 @@ export function apply(ctx: Context, config?: WorkprocessConfig): void {
       console.warn('[workprocess] work/changed 投递失败：' + String((err as Error)?.message ?? err))
     }
   }
-  const deps: WorkToolDeps = {
-    store,
-    now: () => Date.now(),
-    onChanged: (notification) => emitChanged(notification.scope, notification.change as WorkChangedPayload['change']),
-    onDiscarded: (scope) => emitChanged(scope, undefined),
-    // 归属缺省 = **本会话**（一个会话一条流程；多流程并存时要显式给 scope）。
-    defaultScope: (exec) => agentOf(exec)?.session?.id,
-    resolveAuthority: authorityResolverOf(ctx),
-    // 工具回执之后的**通告**（宿主 `exec.deferContext`）：落成一条自署 `work-tool` 的消息，
-    // 附在该次 tool/result 之后（离决策点最近）。
-    deferNotice: (exec, n) => deferNoticeOf(exec, n),
-    // **人机确认口**（宿主 `ctx.userQuestions`）：策略 human 的阶段收口由**工具自己问人**——
-    // 宿主把人的答复只记成 `ask_user_question` 的工具结果（没有 user/message 事件），
-    // 靠"模型问完再自己落章"是落不了的；`plan-mode` 的 exit 工具也是这个路子。
-    askHuman: (exec, request) => askHumanOf(ctx, exec, request),
-  }
-  for (const entry of WORK_TOOL_REGISTRY) {
-    const build = WORK_TOOL_FACTORIES[entry.handler as keyof typeof WORK_TOOL_FACTORIES]
-    ctx.tools.register(build(deps))
-  }
-  // 把"读 + 人可做的三种干预"提供成服务：命令行包（dsh-command-workprocess）只消费它，
-  // 不自己再开一次存储域（同名域重复 open 是响亮拒绝），也不绕内核改状态。
-  ctx.provide('workprocess', createWorkprocessService(store, (scope) => emitChanged(scope, undefined)))
-  // **常驻策略段**（对齐宿主 `dsh-tool-goal` 的 `ctx.systemPrompt.section`）：
-  // 工具自述只在模型"打算调工具"时被读到，而"阶段串行 / 谁能落 done / 回合预算"这些纪律
-  // 得在每轮都在场。槽位紧跟 TOOL_GOAL（同族工具，顺序数相同由名字定先后）。
-  try {
-    ctx.systemPrompt?.section({
-      name: 'tool:workprocess',
-      order: ctx.systemPrompt.getSectionOrder('TOOL_GOAL'),
-      text: WORK_POLICY_TEXT,
-    })
-  } catch (err) {
-    console.warn('[workprocess] 策略段注册失败（工具面照常）：' + String((err as Error)?.message ?? err))
-  }
+  // **服务面**：域 API（读 + 全部写动词）+ 人机干预。工具面 / 命令行都经它读写——
+  // 存储域只能由本插件独占打开（同名域重复 open 是响亮拒绝），消费方不需要 store。
+  ctx.provide('workprocess', createWorkprocessService(
+    { store, now: () => Date.now(), onChanged: (n) => emitChanged(n.scope, n.change as WorkChangedPayload['change']) },
+    (scope) => emitChanged(scope, undefined),
+  ))
   if (config?.tick !== false) {
     const driveCtx: DriveCtx = {
       drive: config?.drive === true,
@@ -173,7 +141,7 @@ export function apply(ctx: Context, config?: WorkprocessConfig): void {
 
 /** 一个会话事件的处理：只记回合事实（驱动放在空闲边界上，见 `agent/status` 那条）。 */
 async function onSessionEvent(
-  ctx: Context, store: WorkToolDeps['store'], session: SessionRef, event: unknown, drive: DriveCtx,
+  ctx: Context, store: WorkStoreLike, session: SessionRef, event: unknown, drive: DriveCtx,
   emitChanged: (scope: string, change: WorkChangedPayload['change']) => void,
 ): Promise<void> {
   try {
@@ -196,7 +164,7 @@ async function onSessionEvent(
  * 或得出任何**不推进状态**的结论（hold / wait-human / ask-* / 没流程）。
  */
 async function driveAtIdle(
-  ctx: Context, store: WorkToolDeps['store'], session: SessionRef, drive: DriveCtx,
+  ctx: Context, store: WorkStoreLike, session: SessionRef, drive: DriveCtx,
   emitChanged: (scope: string, change: WorkChangedPayload['change']) => void,
 ): Promise<void> {
   try {
@@ -249,7 +217,7 @@ async function driveAtIdle(
  * 只有我们自署来源的回合（`source.kind === 'work'`）才算——人的消息不是回合。
  */
 export async function observeWorkRound(
-  store: WorkToolDeps['store'], scope: string, event: unknown,
+  store: WorkStoreLike, scope: string, event: unknown,
 ): Promise<number | undefined> {
   const ev = event as SessionEventLike | undefined
   const source = ev?.data?.source
@@ -273,7 +241,7 @@ export async function observeWorkRound(
  * `turn/end` 那一拍投影可能还没翻成空闲，翻完之后又不再有事件——驱动器一枪不放（真机踩过）。
  */
 export async function tickAtBoundary(
-  ctx: Context, store: WorkToolDeps['store'], session: SessionRef, drive?: DriveCtx,
+  ctx: Context, store: WorkStoreLike, session: SessionRef, drive?: DriveCtx,
 ): Promise<Awaited<ReturnType<typeof tickWorkprocess>>> {
   const boundary = ctx.sessionProjections?.stateOf(session as never, 'turnBoundary')
   if (boundary?.openTurnStartSeq !== null) return undefined
@@ -287,7 +255,7 @@ export async function tickAtBoundary(
 
 /** 把下一轮投给会话（`agent.followup`）：同一轮只投一次（`taskId:revision:round` 去重）。 */
 export async function deliverRound(
-  ctx: Context, store: WorkToolDeps['store'], session: SessionRef, taskId: string, drive: DriveCtx,
+  ctx: Context, store: WorkStoreLike, session: SessionRef, taskId: string, drive: DriveCtx,
 ): Promise<RoundDelivery | undefined> {
   const process = await workProcessOf({ store }, session.id)
   if (process === undefined) return undefined
@@ -320,7 +288,7 @@ export async function deliverRound(
  * 规划轮不消耗任务预算，也就不该把 `rounds.started` 往前推（那个计数是回合上限的判据）。
  */
 export async function deliverPlanRound(
-  ctx: Context, store: WorkToolDeps['store'], session: SessionRef, stageKey: string,
+  ctx: Context, store: WorkStoreLike, session: SessionRef, stageKey: string,
 ): Promise<RoundDelivery | undefined> {
   const process = await workProcessOf({ store }, session.id)
   if (process === undefined) return undefined
@@ -345,7 +313,7 @@ export async function deliverPlanRound(
  * 来源同样自署 `work`（自动回合，不是人打的字），**不带 `round`**（不消耗任务预算）。
  */
 export async function deliverAskRound(
-  ctx: Context, store: WorkToolDeps['store'], session: SessionRef,
+  ctx: Context, store: WorkStoreLike, session: SessionRef,
   kind: 'ask-stage-done' | 'ask-close', stageKey?: string,
 ): Promise<RoundDelivery | undefined> {
   const process = await workProcessOf({ store }, session.id)
@@ -363,91 +331,4 @@ export async function deliverAskRound(
     },
   }))
   return delivery
-}
-
-/** 常驻策略段（模型面）：工具自述读不到的那几条纪律，放这里每轮都在场。 */
-export const WORK_POLICY_TEXT = [
-  '## workprocess（两层工作模型：流程 → 阶段 → 任务）',
-  '- **阶段严格串行**：前序阶段全部收口后才轮到下一阶段；不要越阶段开工，也不要提前给后续阶段建任务。',
-  '- **阶段开工不是你的动作**：串行门放行后由驱动器在空闲边界落；你只管任务（`create_worktask` / `update_worktask`）。',
-  '- **每个阶段开始时驱动器会提醒你规划**该阶段的任务（1–3 个、写成可核验的陈述）。',
-  '- **收口策略决定谁落 done**：`human`（缺省）——你**只提议**，由人确认（agent 自写会被拒）；',
-  '  `auto`——任务全达成后由驱动器自动收口，你不要自己写。',
-  '- **任务有回合预算**（`max_rounds`，缺省由配置兜底）：到顶会落盘 block，等人裁；不要靠反复重试绕过它。',
-  '- 自动续跑回合会以一条带 `<workprocess_round>` / `<workprocess_plan>` / `<workprocess_ask>` 语义的',
-  '  指令出现（来源自署 `work`）：只做那一轮说的事，做完停手，下一轮由驱动器投递。',
-].join('\n')
-
-/**
- * 把工具通告落成一条**自署来源**的消息，附在该次工具回执之后（宿主 `exec.deferContext`）。
- *
- * 【必须方法调用】`exec.deferContext(...)`——摘成变量再调会让 `this` 丢（与 `followup` 同款的坑）。
- * 【来源自署】`kind: 'work-tool'`：既不是人（`user`）也不是自动回合（`work`），
- * 授权面据此不授任何权限——通告只是说明，不是授权凭据。
- */
-export function deferNoticeOf(exec: unknown, notice: { summary: string; text: string }): void {
-  const surface = exec as { deferContext?: (message: unknown) => void } | undefined
-  if (typeof surface?.deferContext !== 'function') return
-  surface.deferContext(createUserMessage({
-    content: [{ type: 'text', text: notice.text }],
-    source: { kind: 'work-tool', form: 'notice', summary: notice.summary },
-  }))
-}
-
-/** 宿主 `ctx.userQuestions` 的**最小读取面**（`ask` 是唯一用到的入口）。 */
-interface UserQuestionsLike {
-  ask(request: {
-    readonly questions: readonly {
-      readonly id: string
-      readonly header?: string
-      readonly question: string
-      readonly detail?: string
-      readonly options?: readonly { readonly label: string; readonly description?: string }[]
-    }[]
-    readonly agent?: unknown
-    readonly signal?: unknown
-  }): Promise<{ readonly answers: readonly { readonly id: string; readonly selected: readonly string[]; readonly custom?: string }[] }>
-}
-
-/**
- * 把工具面的人机确认请求接到宿主的问题服务上（对齐宿主 `plan-mode` 的 `exit_plan_mode`）。
- *
- * 【四种结局都要如实回收】同意 = `approved`；选了别的 / 自定义输入 = `declined`（带反馈）；
- * 人打断去说话（`ASK_CANCELLED`）、没有弹框通道（`NO_PROVIDER`）、调用者不是活跃根
- * （`CALLER_NOT_LIVE` / `DELEGATED_CALLER`，子 agent 问不了人）——一律 `cancelled`，
- * **绝不把"没问成"当成"同意"**（那才是真正危险的默认值）。
- */
-export async function askHumanOf(
-  ctx: Context, exec: unknown, request: WorkHumanAsk,
-): Promise<WorkHumanVerdict> {
-  const service = ctx.get?.('userQuestions') as UserQuestionsLike | undefined
-  if (typeof service?.ask !== 'function') return { kind: 'no-channel' }
-  const agent = agentOf(exec)
-  const signal = (exec as { signal?: unknown } | undefined)?.signal
-  try {
-    const answer = await service.ask({
-      questions: [{
-        id: request.id,
-        header: request.header,
-        question: request.question,
-        ...(request.detail === undefined ? {} : { detail: request.detail }),
-        options: request.options.map((o) => (
-          o.description === undefined ? { label: o.label } : { label: o.label, description: o.description }
-        )),
-      }],
-      ...(agent === undefined ? {} : { agent }),
-      ...(signal === undefined ? {} : { signal }),
-    })
-    const item = answer.answers.find((a) => a.id === request.id)
-    if (item === undefined) return { kind: 'cancelled', reason: 'no-answer' }
-    if (item.selected.includes(request.approve) && item.custom === undefined) return { kind: 'approved' }
-    return item.custom === undefined || item.custom === ''
-      ? { kind: 'declined' }
-      : { kind: 'declined', feedback: item.custom }
-  } catch (err) {
-    const code = (err as { code?: unknown } | undefined)?.code
-    const reason = typeof code === 'string' ? code : 'ask-failed'
-    // 有服务但没人接这一问 ⇒ 等价于"没有通道"（退回拒绝并指路）；其余（打断 / 中止 / 非活跃根）才是 cancelled。
-    return reason === 'NO_PROVIDER' ? { kind: 'no-channel' } : { kind: 'cancelled', reason }
-  }
 }
