@@ -8,6 +8,10 @@
  * 宿主没有 web 载体（纯 CLI 形态）时 `inject` 不存在，本模块零行为；`webCtx.effect` 的
  * 返回值就是路由撤销句柄（宿主卸载时自动清）。
  *
+ * 【响应形状】`/stages` 的 200 体与 SSE 帧**同构**：`{ scope, process: WorkWire }`——正是客户端
+ * `WorkSnapshot`（`workprocess/client/model.ts`），两路一套解析，不允许各自漂移（跨侧契约测试
+ * 钉在 `tests/http.spec.ts`）。
+ *
  * 【降级口径】无流程 = **`404 { error: 'no-process' }`**（明确缺失，不是 500、也不是空表）；
  * 缺 `scope` = 400；未知路径 = 404。SSE：连上先发一帧 `event: stages` 全量（没有流程发
  * `process: null`——客户端据此"整条不渲染"），之后每次 `work/changed`（scope 相符）推一帧
@@ -186,7 +190,7 @@ async function handleApiRequest(
   const url = new URL(req.url ?? '/', 'http://workprocess.api')
   const scope = url.searchParams.get('scope')
   if (scope === null || scope === '') {
-    jsonReply(res, 400, { error: 'missing-scope', message: '缺少 scope（归属域键）' })
+    jsonReply(res, 400, { error: 'missing-scope', message: '缺少 scope（归属键）' })
     return
   }
   if (url.pathname === WORKPROCESS_API_PREFIX + '/stages') {
@@ -200,15 +204,18 @@ async function handleApiRequest(
   jsonReply(res, 404, { error: 'unknown-path', message: '未知路径 ' + url.pathname })
 }
 
-/** `GET /stages?scope=`：全量快照；无流程 = 404 明确缺失（缺失 ≠ 空表、≠ 500）。 */
+/**
+ * `GET /stages?scope=`：全量快照；无流程 = 404 明确缺失（缺失 ≠ 空表、≠ 500）。
+ * 200 体 = `{ scope, process }`，与 SSE 帧同构（客户端 `WorkSnapshot` 一套解析吃两路）。
+ */
 async function serveStages(domain: WorkprocessService, scope: string, res: ServerResponse): Promise<void> {
   const process = await domain.process(scope)
   if (process === undefined) {
-    jsonReply(res, 404, { scope, error: 'no-process', message: '该归属域还没有流程' })
+    jsonReply(res, 404, { scope, error: 'no-process', message: '该归属还没有流程' })
     return
   }
   const activation = await domain.activation(scope)
-  jsonReply(res, 200, { scope, ...workWireOf(process, activation) })
+  jsonReply(res, 200, { scope, process: workWireOf(process, activation) })
 }
 
 /**

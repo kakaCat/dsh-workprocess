@@ -2,8 +2,9 @@
  * 浏览器只读数据面（`GET /workprocess/api/stages` + `GET /workprocess/api/events`）的处理器测试。
  *
  * 【守护什么】
- *   ① `stages`：200 + 与 `workWireOf` 同名字段的全量 JSON；无流程 = 404 `no-process`（缺失 ≠ 500）；
- *      缺 scope = 400；未知路径 = 404；
+ *   ① `stages`：200 + `{ scope, process }` 全量 JSON（**与 SSE 帧同构**、字段与 `workWireOf` 同源）；
+ *      无流程 = 404 `no-process`（缺失 ≠ 500）；缺 scope = 400；未知路径 = 404；
+ *   ①′ 跨侧契约：200/404 真实出参直接喂客户端 `viewModelOf`——ready / none，两侧不再各自漂移；
  *   ② `events`：SSE 头 + `: connected` 首帧 + **首帧全量**（无流程发 `process: null`）；
  *      `work/changed`（scope 相符）触发再推一帧全量；`close` 退订并清心跳。
  */
@@ -11,6 +12,7 @@ import { describe, it, expect, vi } from 'vitest'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createWorkprocessApiHandler } from 'tool-workprocess/http'
 import { createWorkprocessService, createWorkProcess, createWorkTask, startWorkStage } from 'workprocess'
+import { viewModelOf } from '../../workprocess/client/model.js'
 import type { WorkRecordLike, WorkStoreLike } from 'workprocess'
 
 function mapStore(): WorkStoreLike & { records: Map<string, WorkRecordLike> } {
@@ -106,7 +108,7 @@ function mockSubscribe() {
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
 
 describe('GET /workprocess/api/stages', () => {
-  it('200 + 全量 JSON（字段与 workWireOf 同源）', async () => {
+  it('200 + 全量 JSON（{ scope, process }，与 SSE 帧同构；字段与 workWireOf 同源）', async () => {
     const domain = await seededDomain()
     const res = mockRes()
     createWorkprocessApiHandler(domain, mockSubscribe().subscribe)(
@@ -114,11 +116,33 @@ describe('GET /workprocess/api/stages', () => {
     await flush()
     expect(res.status).toBe(200)
     const body = JSON.parse(res.body)
+    expect(Object.keys(body).sort()).toEqual(['process', 'scope'])   // 没有平铺泄漏
     expect(body.scope).toBe('session-1')
-    expect(body.objective).toBe('修 bug')
-    expect(body.stages[0]).toMatchObject({ key: 'repro', state: 'active', tasks: 1, tasks_done: 0 })
-    expect(body.current_stage).toBe('repro')
-    expect(body.tasks[0]).toMatchObject({ id: 'wt:repro:1', stage_key: 'repro', phase: 'active' })
+    expect(body.process.objective).toBe('修 bug')
+    expect(body.process.stages[0]).toMatchObject({ key: 'repro', state: 'active', tasks: 1, tasks_done: 0 })
+    expect(body.process.current_stage).toBe('repro')
+    expect(body.process.tasks[0]).toMatchObject({ id: 'wt:repro:1', stage_key: 'repro', phase: 'active' })
+  })
+
+  it('跨侧契约：真实出参过客户端 viewModelOf——200 ⇒ ready，404 ⇒ none（两侧不再各自漂移）', async () => {
+    const domain = await seededDomain()
+    const handler = createWorkprocessApiHandler(domain, mockSubscribe().subscribe)
+
+    // 200：响应体就是客户端 WorkSnapshot，裁决必须出 ready（StageDock 才会渲染）。
+    const res = mockRes()
+    handler(mockReq('/workprocess/api/stages?scope=session-1'), res as unknown as ServerResponse)
+    await flush()
+    expect(res.status).toBe(200)
+    const vm = viewModelOf(JSON.parse(res.body), false)
+    expect(vm.kind).toBe('ready')
+    expect(vm.kind === 'ready' && vm.wire.stages[0]?.key).toBe('repro')
+
+    // 404 no-process：响应体没有 process 键 ⇒ 裁决 none（整条不渲染），不是 error。
+    const res404 = mockRes()
+    handler(mockReq('/workprocess/api/stages?scope=nope'), res404 as unknown as ServerResponse)
+    await flush()
+    expect(res404.status).toBe(404)
+    expect(viewModelOf(JSON.parse(res404.body), false)).toEqual({ kind: 'none' })
   })
 
   it('无流程 = 404 no-process（缺失 ≠ 空表 ≠ 500）', async () => {

@@ -13,7 +13,7 @@ import { describe, it, expect } from 'vitest'
 import { apply, inject, name } from 'workprocess-round-driver'
 import type { Context } from '@deepseek-ai/cordis'
 
-interface Sent { readonly source?: Record<string, unknown>; readonly content?: unknown }
+interface Sent { readonly id?: string; readonly source?: Record<string, unknown>; readonly content?: unknown }
 
 /** 极简宿主：够驱动器决策 + 投递 + 围栏即可（流程状态用一个假域服务喂）。 */
 function harness(options: {
@@ -21,6 +21,16 @@ function harness(options: {
   process?: unknown
   activation?: string
   asked?: { plan?: { key: string; revision: number }; ask?: { key: string; revision: number } }
+  /** 投递即抛错（queue-failed 纪律的观测面）。 */
+  followupThrows?: boolean
+  /** 域读数（process）即抛错（"校验自身抛错 ⇒ disarm" 的观测面）。 */
+  processThrows?: boolean
+  /**
+   * 模拟**插件热重载**：apply 时 agent 已经在场（ctx.agents.list 能列到）。
+   * 缺省 false = 冷启动时序（插件先于 agent 装载，list 为空）——注意 get 不受此影响
+   * （极简面的妥协：get 永远找得到这个 agent，够驱动路径用即可）。
+   */
+  preexisting?: boolean
 } = {}) {
   const sent: Sent[] = []
   const hooks: string[] = []
@@ -35,20 +45,41 @@ function harness(options: {
       }],
     }],
   }
+  /** cancel / whenIdle 的观测面（卸载路径用）。 */
+  const cancels: unknown[] = []
+  const whenIdleCalls: number[] = []
+  const inbox = {
+    nextStep: [] as unknown[],
+    nextTurn: [] as unknown[],
+    prepend(target: 'next-step' | 'next-turn', message: unknown): void {
+      (target === 'next-step' ? this.nextStep : this.nextTurn).unshift(message)
+    },
+  }
   const agent: Record<string, unknown> = {
     id: 'session-1',
     get status() { return status },
     session: { id: 'session-1' },
-    inbox: { nextStep: [], nextTurn: [] as unknown[] },
-    followup: (message: Sent): void => { sent.push(message) },
+    inbox,
+    followup: (message: Sent): void => {
+      if (options.followupThrows === true) throw new Error('inbox closed')
+      sent.push(message)
+    },
+    cancel: (cause: unknown): void => { cancels.push(cause) },
+    whenIdle: async (): Promise<void> => { whenIdleCalls.push(1) },
   }
   let activation = options.activation ?? 'armed'
+  /** 域读数（process）是否抛错（可中途打开：模拟"投递成功后通道才坏"）。 */
+  let processThrows = options.processThrows ?? false
   /** 逐任务回合账（与归属记录同形：预算按任务计）。 */
   let taskRounds: Record<string, { rounds: number; grants: number }> = {}
   let asked: { plan?: { key: string; revision: number }; ask?: { key: string; revision: number } } | undefined
     = options.asked
   const disarms: string[] = []
   const marks: string[] = []
+  /** 被落盘暂停的任务 id（`pauseDroppedRound` 的观测面；桩顺带把流程里的任务相位改掉，模拟域折叠）。 */
+  const pauses: string[] = []
+  /** 被落盘 block 的任务（`queue-failed` / `prompt-rejected` 的观测面；桩同样模拟域折叠）。 */
+  const blocks: Array<{ taskId: string; code?: string }> = []
   const domain = {
     activation: async (): Promise<string> => activation,
     asked: async (): Promise<typeof asked> => asked,
@@ -64,7 +95,28 @@ function harness(options: {
       activation = next
       return true
     },
-    process: async (): Promise<unknown> => process,
+    pauseTask: async (_scope: string, taskId: string, _revision?: number): Promise<boolean> => {
+      pauses.push(taskId)
+      // 模拟域折叠：任务 paused、任务修订与流程修订各前进一格（pauseDroppedRound 靠它判重）。
+      const current = process as {
+        revision: number
+        stages: Array<{ tasks: Array<{ id: string; phase: string; revision: number }> }>
+      }
+      current.revision += 1
+      for (const stage of current.stages) {
+        for (const task of stage.tasks) {
+          if (task.id === taskId && task.phase === 'active') {
+            task.phase = 'paused'
+            task.revision += 1
+          }
+        }
+      }
+      return true
+    },
+    process: async (): Promise<unknown> => {
+      if (processThrows) throw new Error('store offline')
+      return process
+    },
     roundsStarted: async (): Promise<number> =>
       Object.values(taskRounds).reduce((sum, entry) => sum + entry.rounds, 0),
     taskRounds: async (): Promise<typeof taskRounds> => taskRounds,
@@ -75,7 +127,24 @@ function harness(options: {
     },
     startStage: async (): Promise<boolean> => false,
     closeStage: async (): Promise<boolean> => false,
-    blockTask: async (): Promise<boolean> => false,
+    blockTask: async (_scope: string, taskId: string, reason?: { code?: string }): Promise<boolean> => {
+      blocks.push({ taskId, code: reason?.code })
+      // 模拟域折叠：任务 blocked、任务修订与流程修订各前进一格。
+      const current = process as {
+        revision: number
+        stages: Array<{ tasks: Array<{ id: string; phase: string; revision: number }> }>
+      }
+      current.revision += 1
+      for (const stage of current.stages) {
+        for (const task of stage.tasks) {
+          if (task.id === taskId && task.phase === 'active') {
+            task.phase = 'blocked'
+            task.revision += 1
+          }
+        }
+      }
+      return true
+    },
     closeProcess: async (): Promise<boolean> => false,
   }
   const ctx = {
@@ -85,6 +154,8 @@ function harness(options: {
     logger: { warn: (): void => {} },
     agents: {
       get: (id: string) => (id === 'session-1' ? agent : undefined),
+      // 装载时在场清单（热重载模拟；见 harness 选项 preexisting）。
+      list: () => (options.preexisting === true ? [agent] : []),
       currentInitiator: () => agent,
       withoutInitiator: <T,>(fn: () => T): T => {
         const out = fn()
@@ -98,25 +169,68 @@ function harness(options: {
     },
     effect: (fn: () => Generator<unknown, void, unknown>) => {
       const iter = fn()
-      for (let next = iter.next(); !next.done; next = iter.next()) void next.value
+      let cleanup: unknown
+      for (let next = iter.next(); !next.done; next = iter.next()) cleanup = next.value
+      cleanups.push(cleanup)
       return (): void => {}
     },
   }
+  /** ctx.effect 产出的卸载回调（宿主卸载插件时跑的那个）。 */
+  const cleanups: unknown[] = []
   const settle = async (): Promise<void> => {
     for (let i = 0; i < 20; i += 1) {
       const pending = runs.splice(0)
-      if (pending.length === 0) { await Promise.resolve(); if (runs.length === 0) return; continue }
+      if (pending.length === 0) {
+        // 宏任务一拍：把不在 runs 里的 fire-and-forget 链（disarm 等）也等完。
+        await new Promise((r) => setTimeout(r, 0))
+        if (runs.length === 0) return
+        continue
+      }
       await Promise.allSettled(pending)
     }
+  }
+  /** 投一条会话事件（`session/event` 监听器的签名是 (session, event)）。 */
+  const fireSession = async (event: unknown): Promise<void> => {
+    for (const h of handlers.get('session/event') ?? []) await h({ id: 'session-1' }, event)
+    await settle()
   }
   return {
     ctx: ctx as unknown as Context, sent, hooks, settle,
     setStatus: (next: string) => { status = next },
-    setProcess: (next: typeof process) => { process = next },
+    // 流程没了 ⇒ 模拟内核 discardWorkProcess 的摘除：耐久"已经问过"记号随流程一起清
+    // （kernel.ts：否则重建的流程可能撞上旧记号——同阶段键 + 同 revision）。
+    setProcess: (next: typeof process) => { if (next === undefined) asked = undefined; process = next },
     agent,
     competing: (message: unknown) => { (agent.inbox as { nextTurn: unknown[] }).nextTurn.push(message) },
     disarms,
     marks,
+    pauses,
+    blocks,
+    cancels,
+    whenIdleCalls,
+    setProcessThrows: (next: boolean) => { processThrows = next },
+    /** 跑宿主卸载路径（ctx.effect 的清理回调，异步）。 */
+    dispose: async (): Promise<void> => {
+      for (const cleanup of cleanups) await (cleanup as () => Promise<void>)()
+      await settle()
+    },
+    /**
+     * 跑一次 `agent/pre-step` waterfall：messages = 本批被认领的消息；
+     * behavior.next 扮下游（缺省放行 enter），behavior.signal 可给中止信号。
+     */
+    firePreStep: async (messages: unknown[], behavior?: {
+      next?: () => Promise<unknown>
+      signal?: AbortSignal
+    }): Promise<unknown> => {
+      const signal = behavior?.signal ?? new AbortController().signal
+      const next = behavior?.next ?? (async () => ({ kind: 'enter', messages }))
+      let result: unknown
+      for (const h of handlers.get('agent/pre-step') ?? []) {
+        result = await h({ agent, messages, turn: 1, step: 1, signal }, next)
+      }
+      await settle()
+      return result
+    },
     setRounds: (n: number, taskId = 't-1') => {
       taskRounds = { ...taskRounds, [taskId]: { rounds: n, grants: taskRounds[taskId]?.grants ?? 0 } }
     },
@@ -126,6 +240,15 @@ function harness(options: {
     fire: async (event: string, payload: unknown): Promise<void> => {
       for (const h of handlers.get(event) ?? []) await h(payload)
       await settle()
+    },
+    fireSession,
+    /** 我们那条被受理：按消息身份记 admitted，顺带让回合计数前进（模拟宿主真事件）。 */
+    fireAdmitted: async (): Promise<void> => {
+      const message = sent.at(-1) as { id: string; source: { round?: number; taskId?: string } }
+      await fireSession({
+        type: 'user/message',
+        data: { id: message.id, source: { kind: 'work', round: message.source.round, taskId: message.source.taskId } },
+      })
     },
     fireStatus: async (next: string): Promise<void> => {
       status = next
@@ -241,6 +364,9 @@ describe('驱动器插件：宿主 goal-round-driver 同款设计', () => {
     // blocked 收束轮同时到手，agent 一次手都没动）。
     await h.fire('work/changed', { scope: 'session-1', change: undefined })
     expect(h.sent).toHaveLength(1)                    // ← 关键：旧实现在这里会当场投第 2 轮（预算被烧光）
+    // 真机时序：上一轮被受理跑完（admitted + turn/end completed），才轮到下一次空闲转换。
+    await h.fireAdmitted()
+    await h.fireSession({ type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
     // 真·空闲转换 + 这一轮确实被接手（计数前进）⇒ 才撤预约、投下一轮。
     h.setRounds(1)
     await h.fireStatus('idle')
@@ -276,9 +402,560 @@ describe('驱动器插件：宿主 goal-round-driver 同款设计', () => {
     expect(h.marks).toEqual(['plan:prep@2'])              // 并且把新记号落下去
   })
 
+  it('人拒绝收口 → 补任务 → 再次全 complete ⇒ 必须**再次**提请收口（内存"已问过"随域变更作废）', async () => {
+    // S3 回归：旧实现的 planAsked/askAsked 只加不清——人拒绝一次收口后内存集永久命中，
+    // 决策树永远 wait-human，流程静默停死（会话内无解，重启才恢复）。
+    const processWith = (revision: number, extra: unknown[] = []) => ({
+      id: 'wp:session-1', revision, objective: 'x',
+      stages: [{
+        key: 'prep', statement: '准备', doneCriteria: ['就绪'], state: 'active',
+        tasks: [{ id: 't-1', objective: '清洗', phase: 'complete', revision: 1, maxRounds: 5 }, ...extra],
+      }],
+    })
+    const h = harness({ process: processWith(1) })
+    apply(h.ctx, { drive: true })
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(1)                          // 任务全 complete ⇒ 第一次提请收口
+    expect(h.marks).toEqual(['ask:stage-done:prep@1'])
+    // 同一修订无变更：这一轮跑完后的空闲边界不重复投（进程内快挡语义保住）。
+    await h.fireAdmitted()
+    await h.fireSession({ type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(1)
+    // 人拒绝收口、补了一个任务（修订前进）⇒ 驱动器转而推新任务。
+    h.setProcess(processWith(2, [{ id: 't-2', objective: '补做', phase: 'active', revision: 1, maxRounds: 5 }]))
+    await h.fire('work/changed', { scope: 'session-1', change: undefined })
+    expect(h.sent).toHaveLength(2)
+    expect((h.sent[1].source as { taskId?: string }).taskId).toBe('t-2')
+    // 补做的任务跑完（修订再前进）⇒ 再次全 complete ⇒ 再次提请收口。
+    // 旧实现：内存集仍命中 'stage-done:prep' ⇒ 永远 wait-human，这条断言红。
+    await h.fireAdmitted()
+    await h.fireSession({ type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } })
+    h.setProcess(processWith(3, [{ id: 't-2', objective: '补做', phase: 'complete', revision: 2, maxRounds: 5 }]))
+    await h.fire('work/changed', { scope: 'session-1', change: undefined })
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(3)
+    expect(h.marks).toEqual(['ask:stage-done:prep@1', 'ask:stage-done:prep@3'])
+    // 第二次提请之后：同修订依旧不重复投（快挡不是"问过一次就废"）。
+    await h.fireAdmitted()
+    await h.fireSession({ type: 'turn/end', data: { turn: 3, reason: { kind: 'completed' } } })
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(3)
+  })
+
+  it('阶段规划轮同款：域变更（修订前进）后再次提请规划，不永久停手', async () => {
+    const emptyStage = (revision: number) => ({
+      id: 'wp:session-1', revision, objective: 'x',
+      stages: [{ key: 'prep', statement: '准备', doneCriteria: ['就绪'], state: 'active', tasks: [] }],
+    })
+    const h = harness({ process: emptyStage(1) })
+    apply(h.ctx, { drive: true })
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(1)                          // 阶段空着 ⇒ 第一次提请规划
+    expect(h.marks).toEqual(['plan:prep@1'])
+    await h.fireAdmitted()
+    await h.fireSession({ type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(1)                          // 同修订不重复投
+    // 域变了（人改了目标 / 别的插件动过流程：修订前进）⇒ 规划轮该重新提请。
+    h.setProcess(emptyStage(2))
+    await h.fire('work/changed', { scope: 'session-1', change: undefined })
+    expect(h.sent).toHaveLength(2)
+    expect(h.marks).toEqual(['plan:prep@1', 'plan:prep@2'])
+  })
+
+  it('/work clear 后重建同键阶段 ⇒ 内存"已问过"不挡新流程（墓碑通知同样清快挡）', async () => {
+    const emptyStage = (revision: number) => ({
+      id: 'wp:session-1', revision, objective: 'x',
+      stages: [{ key: 'prep', statement: '准备', doneCriteria: ['就绪'], state: 'active', tasks: [] }],
+    })
+    const h = harness({ process: emptyStage(1) })
+    apply(h.ctx, { drive: true })
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(1)                          // 旧流程已为 prep 投过规划轮
+    expect(h.marks).toEqual(['plan:prep@1'])
+    // 旧流程那轮跑完、撤掉预约（否则后续触发都被挂着的预约挡住——那不是本用例要看的东西）。
+    await h.fireAdmitted()
+    await h.fireSession({ type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(1)
+    // 整条丢弃（墓碑通知 change=undefined）→ 重建同键阶段（revision 从 1 重新计）。
+    // 旧实现：内存集按阶段键命中 ⇒ 新流程的规划轮被"上一辈子的记号"挡死。
+    h.setProcess(undefined as never)
+    await h.fire('work/changed', { scope: 'session-1', change: undefined })
+    expect(h.sent).toHaveLength(1)                          // 流程没了：一拍都不投
+    h.setProcess(emptyStage(1))
+    await h.fire('work/changed', { scope: 'session-1', change: undefined })
+    expect(h.sent).toHaveLength(2)                          // 新流程的规划轮照常提请
+    expect(h.marks).toEqual(['plan:prep@1', 'plan:prep@1'])
+  })
+
   it('tick:false ⇒ 一条监听都不挂（等于没装驱动器）', () => {
     const h = harness()
     apply(h.ctx, { tick: false })
     expect(h.hooks).toEqual([])
+  })
+})
+
+/**
+ * 双 agent 宿主：复刻单 agent 版的极小面（流程/记号按 scope 分账），只为钉住
+ * "askedRevision 是**每 agent** 的"——它曾经是 apply 级共享变量，两个会话的驱动拍
+ * 在 await 点交错时互相覆盖（A 的修订被拿去判 B 的"已问过"，或反过来）。
+ */
+function twoAgentHarness() {
+  type Asked = { plan?: { key: string; revision: number }; ask?: { key: string; revision: number } }
+  const emptyStage = (id: string, revision: number) => ({
+    id, revision, objective: 'x',
+    stages: [{ key: 'prep', statement: '准备', doneCriteria: ['就绪'], state: 'active', tasks: [] }],
+  })
+  const processes: Record<string, unknown> = {}
+  const askedStore: Record<string, Asked | undefined> = {}
+  const sent: Record<string, Sent[]> = { 'session-a': [], 'session-b': [] }
+  const marks: string[] = []
+  const handlers = new Map<string, Array<(a: unknown, b?: unknown) => unknown>>()
+  const agents: Record<string, Record<string, unknown>> = {}
+  for (const id of ['session-a', 'session-b']) {
+    agents[id] = {
+      id, status: 'idle',
+      session: { id },
+      inbox: { nextStep: [], nextTurn: [] },
+      followup: (message: Sent): void => { sent[id].push(message) },
+    }
+  }
+  /** 某个 scope 的下一次 asked() 挂起，直到 releaseAsked 放行——用来排出确定的交错顺序。 */
+  const askedGates = new Map<string, Promise<void>>()
+  const askedReleases = new Map<string, () => void>()
+  /** 域方法调用计数（交错断言的同步点：不靠"刷几拍应该够了"猜时序）。 */
+  const calls: Record<string, { asked: number; process: number }> = {
+    'session-a': { asked: 0, process: 0 },
+    'session-b': { asked: 0, process: 0 },
+  }
+  const domain = {
+    activation: async (): Promise<string> => 'armed',
+    asked: async (scope: string): Promise<Asked | undefined> => {
+      calls[scope].asked += 1
+      const gate = askedGates.get(scope)
+      if (gate !== undefined) {
+        askedGates.delete(scope)
+        await gate
+      }
+      return askedStore[scope]
+    },
+    markAsked: async (scope: string, kind: 'plan' | 'ask', key: string, revision: number): Promise<boolean> => {
+      askedStore[scope] = { ...askedStore[scope], [kind]: { key, revision } }
+      marks.push(scope + ' ' + kind + ':' + key + '@' + String(revision))
+      return true
+    },
+    setActivation: async (): Promise<boolean> => false,
+    pauseTask: async (): Promise<boolean> => false,
+    process: async (scope: string): Promise<unknown> => {
+      calls[scope].process += 1
+      return processes[scope]
+    },
+    roundsStarted: async (): Promise<number> => 0,
+    taskRounds: async (): Promise<Record<string, never>> => ({}),
+    observeRound: async (): Promise<void> => {},
+    startStage: async (): Promise<boolean> => false,
+    closeStage: async (): Promise<boolean> => false,
+    blockTask: async (): Promise<boolean> => false,
+    closeProcess: async (): Promise<boolean> => false,
+  }
+  const ctx = {
+    workprocess: domain,
+    fiber: { state: 2 },
+    sessions: { flush: async (): Promise<boolean> => true },
+    logger: { warn: (): void => {} },
+    agents: {
+      get: (id: string) => agents[id],
+      list: () => [],          // 冷启动时序：插件先于 agent 装载
+      currentInitiator: () => undefined,
+      withoutInitiator: <T,>(fn: () => T): T => fn(),
+    },
+    on: (event: string, cb: (a: unknown, b?: unknown) => unknown) => {
+      handlers.set(event, [...(handlers.get(event) ?? []), cb])
+    },
+    effect: (fn: () => Generator<unknown, void, unknown>) => {
+      const iter = fn()
+      for (let next = iter.next(); !next.done; next = iter.next()) void next.value
+      return (): void => {}
+    },
+  }
+  /** 刷宏观任务直到条件成立（ gated 的那条 run 不设条件时绝不能 await 它——会挂死）。 */
+  const flushUntil = async (cond: () => boolean, max = 100): Promise<void> => {
+    for (let i = 0; i < max && !cond(); i += 1) await new Promise((r) => setTimeout(r, 0))
+  }
+  return {
+    ctx: ctx as unknown as Context, sent, marks, calls,
+    setProcess: (which: 'a' | 'b', revision: number): void => {
+      processes['session-' + which] = emptyStage('wp:session-' + which, revision)
+    },
+    setAsked: (which: 'a' | 'b', asked: Asked): void => { askedStore['session-' + which] = asked },
+    /** 下一次该 scope 的 asked() 挂起（驱动拍已读出修订、正要决策的那一瞬）。 */
+    suspendAsked: (which: 'a' | 'b'): void => {
+      const scope = 'session-' + which
+      askedGates.set(scope, new Promise<void>((resolve) => askedReleases.set(scope, resolve)))
+    },
+    releaseAsked: (which: 'a' | 'b'): void => { askedReleases.get('session-' + which)?.() },
+    idle: async (which: 'a' | 'b'): Promise<void> => {
+      const agent = agents['session-' + which]
+      for (const h of handlers.get('agent/status') ?? []) await h({ agent, status: 'idle' })
+    },
+    flushUntil,
+  }
+}
+
+describe('多会话并发：askedRevision 是每 agent 的（驱动拍交错也不串扰）', () => {
+  it('A 的记号有效、B 没问过：交错后 A 不因 B 的修订误判"没问过"（不重复打扰）', async () => {
+    const h = twoAgentHarness()
+    // A：修订 2，耐久记号 plan:prep@2（**已问过** ⇒ 一拍都不该投）。
+    h.setProcess('a', 2)
+    h.setAsked('a', { plan: { key: 'prep', revision: 2 } })
+    // B：修订 3，没问过（该投一条规划轮）。
+    h.setProcess('b', 3)
+    apply(h.ctx, { drive: true })
+
+    // 交错：A 先驱动（读出修订 2）并卡在 asked() 上；B 完整跑完一拍（修订 3 投出规划轮）；
+    // 然后放行 A。旧实现里 askedRevision 是共享变量——此刻它是 B 写的 3，
+    // A 拿自己的记号(2)去比 ⇒ 误判"没问过"而重复打扰。每 agent 各记各的之后：A 比对的是 2。
+    h.suspendAsked('a')
+    await h.idle('a')
+    await h.flushUntil(() => h.calls['session-a'].asked === 1)  // A 已读出修订、卡在门前
+    await h.idle('b')
+    await h.flushUntil(() => h.sent['session-b'].length === 1)
+    expect(h.marks).toEqual(['session-b plan:prep@3'])
+    h.releaseAsked('a')
+    // A 的一拍跑完（drive 读一次 process、tick 再读一次；其后无投递、无记号）。
+    await h.flushUntil(() => h.calls['session-a'].process >= 2)
+    await h.flushUntil(() => false, 10)
+    expect(h.sent['session-a']).toHaveLength(0)                // 记号有效 ⇒ 不重复打扰
+    expect(h.sent['session-b']).toHaveLength(1)                // B 的规划轮照常投出
+    expect(h.marks).toEqual(['session-b plan:prep@3'])         // A 没落任何新记号
+  })
+
+  it('A 的修订恰好等于 B 的记号修订：B 不误判"已问过"而停死（该问照问）', async () => {
+    const h = twoAgentHarness()
+    // A：修订 2，没问过（该投一条规划轮）。
+    h.setProcess('a', 2)
+    // B：修订 5，带着旧修订的记号 plan:prep@2（**已作废** ⇒ 也该重新问）。
+    h.setProcess('b', 5)
+    h.setAsked('b', { plan: { key: 'prep', revision: 2 } })
+    apply(h.ctx, { drive: true })
+
+    // 交错：B 先驱动（读出修订 5）并卡在 asked() 上；A 完整跑完一拍（修订 2 投出规划轮）；
+    // 然后放行 B。旧实现：共享 askedRevision 此刻是 A 写的 2，恰好等于 B 的记号修订 ⇒
+    // B 误判"已问过" ⇒ 决策停手等人，规划轮永远投不出去（流程静默停死）。
+    h.suspendAsked('b')
+    await h.idle('b')
+    await h.flushUntil(() => h.calls['session-b'].asked === 1)  // B 已读出修订、卡在门前
+    await h.idle('a')
+    await h.flushUntil(() => h.sent['session-a'].length === 1)
+    expect(h.marks).toEqual(['session-a plan:prep@2'])
+    h.releaseAsked('b')
+    await h.flushUntil(() => h.sent['session-b'].length === 1)
+    expect(h.sent['session-a']).toHaveLength(1)
+    expect(h.sent['session-b']).toHaveLength(1)                // 记号作废 ⇒ 该问就问
+    expect(h.marks).toEqual(['session-a plan:prep@2', 'session-b plan:prep@5'])
+  })
+})
+
+describe('停止语义（宿主 stop 按钮：turn/end aborted ⇒ 真的停住，对齐宿主 goal driver）', () => {
+  it('人停止正在跑的回合 ⇒ 任务落盘暂停，且不再投下一轮', async () => {
+    const h = harness()
+    apply(h.ctx, { drive: true })
+    await h.fireStatus('idle')                  // 投第 1 轮
+    expect(h.sent).toHaveLength(1)
+    await h.fireAdmitted()                      // 被受理、开跑
+    // 宿主 stop 按钮：中止当回合（来源 kind:'user'）。
+    await h.fireSession({ type: 'turn/end', data: { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } } })
+    await h.fireStatus('idle')                  // 空闲边界：旧实现在这里立刻投第 2 轮（"停了又跑"）
+    expect(h.pauses).toEqual(['t-1'])           // 任务落盘暂停：停得看得见、/work resume 放行
+    expect(h.sent).toHaveLength(1)              // 没有下一轮
+  })
+
+  it('正常跑完的回合（completed）⇒ 不暂停，接着投下一轮', async () => {
+    const h = harness()
+    apply(h.ctx, { drive: true })
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(1)
+    await h.fireAdmitted()
+    await h.fireSession({ type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    await h.fireStatus('idle')
+    expect(h.pauses).toEqual([])                // 跑成过的轮次不暂停（否则每个回合都要人 resume）
+    expect(h.sent).toHaveLength(2)
+  })
+
+  it('中止的回合不是我们投的 ⇒ 收回续跑许可（disarmed），自动推进停住', async () => {
+    const h = harness()
+    apply(h.ctx, { drive: true })
+    await h.fireStatus('idle')                  // 投第 1 轮（随后该空闲转换已撤预约）
+    expect(h.sent).toHaveLength(1)
+    // 人在自己的消息回合里点了停止：中止的回合与我们挂着的预约无关。
+    await h.fireSession({ type: 'turn/end', data: { turn: 2, reason: { kind: 'aborted', reason: { kind: 'user' } } } })
+    expect(h.disarms).toEqual(['disarmed'])
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(1)              // 许可已收回：一拍都不投
+  })
+
+  it('回合到输出上限（max-tokens）⇒ 收回续跑许可（配置不适配，不许无限自动续跑）', async () => {
+    const h = harness()
+    apply(h.ctx, { drive: true })
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(1)
+    await h.fireSession({ type: 'turn/end', data: { turn: 1, reason: { kind: 'max-tokens' } } })
+    expect(h.disarms).toEqual(['disarmed'])
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(1)
+  })
+
+  it('排队中就被丢弃的回合 ⇒ 空闲边界同样把任务落盘暂停（fail closed）', async () => {
+    const h = harness()
+    apply(h.ctx, { drive: true })
+    await h.fireStatus('idle')                  // 投第 1 轮（仍在收件箱排队，未开跑）
+    expect(h.sent).toHaveLength(1)
+    // 围栏身份比对是 sameQueued（内容 + 来源逐字节深比对）：丢弃事件要带**整条**消息。
+    await h.fire('agent/inbox/discarded', { agent: h.agent, message: h.sent[0] })
+    await h.fireStatus('idle')
+    expect(h.pauses).toEqual(['t-1'])
+    expect(h.sent).toHaveLength(1)
+  })
+
+  it('许可已收回（disarmed）时 dropped 回合不落盘暂停：驱动器不碰状态', async () => {
+    const h = harness()
+    apply(h.ctx, { drive: true })
+    await h.fireStatus('idle')                  // 投第 1 轮
+    expect(h.sent).toHaveLength(1)
+    await h.fire('agent/created', { agent: h.agent, source: 'resume' })   // resume ⇒ 自动收回许可
+    expect(h.disarms).toEqual(['disarmed'])
+    await h.fireAdmitted()
+    await h.fireSession({ type: 'turn/end', data: { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } } })
+    await h.fireStatus('idle')
+    expect(h.pauses).toEqual([])                // 许可不在 ⇒ 不替人落暂停（停手就够了）
+    expect(h.sent).toHaveLength(1)
+  })
+})
+
+/**
+ * **pre-step 围栏**（M1：宿主 `validReservation` 七核 + 三段式 waterfall 的本域移植）。
+ * 预约校验 fail closed：过期修订 / 竞争插队（stale）/ 校验异常，都进步骤前拦下——
+ * reject 丢弃整个提议步骤，所以同批其它消息必须放回 `next-step`（restoreOtherClaimed）。
+ */
+describe('pre-step 围栏（宿主 validReservation + 三段式 waterfall）', () => {
+  /** 投出第 1 轮并让它被认领（phase: queued → claimed），返回那条消息。 */
+  const deliverAndClaim = async (h: ReturnType<typeof harness>): Promise<unknown> => {
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(1)
+    const message = h.sent[0]
+    await h.fire('agent/inbox/claimed', { agent: h.agent, message })
+    return message
+  }
+
+  it('claimed → admitted：预约有效 ⇒ 正常进入步骤且带 startsRequestSeries', async () => {
+    const h = harness()
+    apply(h.ctx, { drive: true })
+    const message = await deliverAndClaim(h)
+    const decision = await h.firePreStep([message])
+    expect(decision).toEqual({ kind: 'enter', messages: [message], startsRequestSeries: true })
+    // 受理 ⇒ admitted + 回合记数前进；跑完后空闲边界正常投下一轮（围栏不误伤好回合）。
+    await h.fireAdmitted()
+    await h.fireSession({ type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(2)
+    expect((h.sent[1].source as { round?: number }).round).toBe(2)
+  })
+
+  it('拒过期回合（投递后修订已前进）：reject + 同批其它消息放回 inbox + 重拍投出新修订的一轮', async () => {
+    const h = harness()
+    apply(h.ctx, { drive: true })
+    const message = await deliverAndClaim(h)
+    // 等待认领/进步的期间域前进了（人改过任务：修订 1 → 2）。
+    h.setProcess({
+      id: 'wp:session-1', revision: 2, objective: '把数据洗干净',
+      stages: [{
+        key: 'prep', statement: '准备', doneCriteria: ['就绪'], state: 'active', tasks: [{
+          id: 't-1', objective: '清洗', phase: 'active', revision: 2, maxRounds: 5,
+        }],
+      }],
+    })
+    const other = { id: 'other-1', content: [{ type: 'text', text: '人插的话' }], source: { kind: 'user' } }
+    let nextCalled = false
+    const decision = await h.firePreStep([message, other], {
+      next: async () => { nextCalled = true; return { kind: 'enter', messages: [message, other] } },
+    })
+    expect(nextCalled).toBe(false)                       // 没过闸：下游一步都不走
+    expect(decision).toEqual({ kind: 'reject' })
+    // 同批的人的消息被放回 next-step（reject 丢弃整个步骤，不放回 = 把人的话弄丢）。
+    expect((h.agent.inbox as { nextStep: unknown[] }).nextStep).toEqual([other])
+    // 重拍：预约已撤、去重键作废 ⇒ 按新修订投出新一轮（不是空转，也不是旧轮重投）。
+    expect(h.sent).toHaveLength(2)
+    expect((h.sent[1].source as { revision?: number }).revision).toBe(2)
+  })
+
+  it('拒 stale（排队期间被别的消息插队）：stale 字段不再是写了不读的死代码', async () => {
+    const h = harness()
+    apply(h.ctx, { drive: true })
+    await h.fireStatus('idle')
+    const message = h.sent[0]
+    // 别的消息排进 next-turn ⇒ 竞争插队：我们的预约被落 stale（此刻还在 queued）。
+    h.competing({ id: 'someone-else', source: { kind: 'user' } })
+    await h.fire('agent/inbox/inserted', { agent: h.agent, message: { id: 'someone-else' } })
+    // 随后我们的消息被认领、进步骤 ⇒ 围栏读 stale 拒收。
+    await h.fire('agent/inbox/claimed', { agent: h.agent, message })
+    const decision = await h.firePreStep([message])
+    expect(decision).toEqual({ kind: 'reject' })
+    // 竞争消息还没跑完（competingQueued 在）：重拍不投新轮（让路纪律不变）。
+    expect(h.sent).toHaveLength(1)
+    // 竞争消息跑完、真·空闲转换 ⇒ 去重键已作废，同一轮重新投出（不停死）。
+    ;(h.agent.inbox as { nextTurn: unknown[] }).nextTurn.length = 0
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(2)
+    expect((h.sent[1].source as { round?: number }).round).toBe(1)
+    expect(h.pauses).toEqual([])                         // 围栏拒收 ≠ 跑丢：不落盘暂停
+  })
+
+  it('拒收时同批消息按原顺序放回 next-step 队首（restoreOtherClaimed 是正确性的一部分）', async () => {
+    const h = harness()
+    apply(h.ctx, { drive: true })
+    const message = await deliverAndClaim(h)
+    h.setProcess({
+      id: 'wp:session-1', revision: 2, objective: '把数据洗干净',
+      stages: [{
+        key: 'prep', statement: '准备', doneCriteria: ['就绪'], state: 'active', tasks: [{
+          id: 't-1', objective: '清洗', phase: 'active', revision: 2, maxRounds: 5,
+        }],
+      }],
+    })
+    const first = { id: 'other-1', content: [], source: { kind: 'user' } }
+    const second = { id: 'other-2', content: [], source: { kind: 'user' } }
+    const decision = await h.firePreStep([first, message, second])
+    expect(decision).toEqual({ kind: 'reject' })
+    expect((h.agent.inbox as { nextStep: unknown[] }).nextStep).toEqual([first, second])
+  })
+
+  it('下游 reject ⇒ 清预约 + 任务落盘 block（prompt-rejected；域服务直调，不走工具面门槛）', async () => {
+    const h = harness()
+    apply(h.ctx, { drive: true })
+    const message = await deliverAndClaim(h)
+    const decision = await h.firePreStep([message], { next: async () => ({ kind: 'reject' }) })
+    expect(decision).toEqual({ kind: 'reject' })
+    expect(h.blocks).toEqual([{ taskId: 't-1', code: 'prompt-rejected' }])
+    // 任务已 blocked ⇒ 停手等人：不再投下一轮（域折叠由桩模拟：phase → blocked）。
+    expect(h.sent).toHaveLength(1)
+  })
+
+  it('校验自身抛错 ⇒ 收回续跑许可（disarm）且拒收（fail closed）', async () => {
+    const h = harness()
+    apply(h.ctx, { drive: true })
+    const message = await deliverAndClaim(h)
+    h.setProcessThrows(true)                             // 域读数通道坏了
+    const decision = await h.firePreStep([message])
+    expect(decision).toEqual({ kind: 'reject' })
+    expect(h.disarms).toEqual(['disarmed'])
+  })
+
+  it('拿到 enter 后二验不过（等待下游期间修订变了）⇒ 同样拒收并放回同批消息', async () => {
+    const h = harness()
+    apply(h.ctx, { drive: true })
+    const message = await deliverAndClaim(h)
+    const other = { id: 'other-1', content: [], source: { kind: 'user' } }
+    const decision = await h.firePreStep([message], {
+      next: async () => {
+        // 等下游决策的期间域前进了（真机时序：pre-step waterfall 里别的监听器写了域）。
+        h.setProcess({
+          id: 'wp:session-1', revision: 2, objective: '把数据洗干净',
+          stages: [{
+            key: 'prep', statement: '准备', doneCriteria: ['就绪'], state: 'active', tasks: [{
+              id: 't-1', objective: '清洗', phase: 'active', revision: 2, maxRounds: 5,
+            }],
+          }],
+        })
+        return { kind: 'enter', messages: [message, other] }
+      },
+    })
+    expect(decision).toEqual({ kind: 'reject' })
+    expect((h.agent.inbox as { nextStep: unknown[] }).nextStep).toEqual([other])
+  })
+
+  it('不是我们的轮次 ⇒ 原样放行（不加 startsRequestSeries，不动预约）', async () => {
+    const h = harness()
+    apply(h.ctx, { drive: true })
+    const human = { id: 'human-1', content: [{ type: 'text', text: '人话' }], source: { kind: 'user' } }
+    const decision = await h.firePreStep([human])
+    expect(decision).toEqual({ kind: 'enter', messages: [human] })
+  })
+
+  it('手搓的 work 消息（没有对应预约）⇒ 拒（fail closed：授权面只认预约过的回合）', async () => {
+    const h = harness()
+    apply(h.ctx, { drive: true })
+    const forged = {
+      id: 'forged-1',
+      content: [{ type: 'text', text: '冒充的自动回合' }],
+      source: { kind: 'work', processId: 'wp:session-1', revision: 1, taskId: 't-1', round: 1 },
+    }
+    const decision = await h.firePreStep([forged])
+    expect(decision).toEqual({ kind: 'reject' })
+    // 没有预约可撤（sameReservedRound 不符 ⇒ 不动 state.attempt）；重拍投出的是**真预约**的
+    // 那一轮（它自己还要过同一道闸）——拒掉冒牌货不等于停住正常流程。
+    expect(h.sent).toHaveLength(1)
+    expect(h.sent[0].id).not.toBe('forged-1')
+  })
+})
+
+/**
+ * **围栏纪律一揽子对齐宿主**（M1）：agent/error 与驱动失败 ⇒ 收许可（不许静默重试）；
+ * 投递失败 ⇒ 任务落 block（queue-failed）；装载 / 卸载两侧的许可与收尾纪律。
+ */
+describe('围栏纪律对齐宿主（disarm / block / 装载与卸载）', () => {
+  it('agent/error ⇒ 收回续跑许可（不再只是撤预约）：出错的那一轮不许自动重试', async () => {
+    const h = harness()
+    apply(h.ctx, { drive: true })
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(1)
+    await h.fire('agent/error', { agent: h.agent })
+    expect(h.disarms).toEqual(['disarmed'])
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(1)                       // 许可已收回：一拍都不投
+  })
+
+  it('投递失败（followup 抛错）⇒ 任务落盘 block（queue-failed），不只 warn', async () => {
+    const h = harness({ followupThrows: true })
+    apply(h.ctx, { drive: true })
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(0)
+    expect(h.blocks).toEqual([{ taskId: 't-1', code: 'queue-failed' }])
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(0)                       // 任务已 blocked：不再反复投递
+  })
+
+  it('drive() 失败（域读数通道坏了）⇒ 收回续跑许可（不许静默重试）', async () => {
+    const h = harness({ processThrows: true })
+    apply(h.ctx, { drive: true })
+    await h.fireStatus('idle')
+    expect(h.disarms).toEqual(['disarmed'])
+    expect(h.sent).toHaveLength(0)
+  })
+
+  it('装载时对已经在场的 agent 收回许可（热重载不偷跑；冷启动 list 为空不受影响）', async () => {
+    const h = harness({ preexisting: true })
+    apply(h.ctx, { drive: true })
+    await h.settle()
+    expect(h.disarms).toEqual(['disarmed'])
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(0)
+  })
+
+  it('卸载：收许可 + 预约置 stale + cancel 在跑回合 + 等 idle/run 收尾（不只置 stopping）', async () => {
+    const h = harness()
+    apply(h.ctx, { drive: true })
+    await h.fireStatus('idle')                           // 投第 1 轮，预约挂着
+    expect(h.sent).toHaveLength(1)
+    h.setStatus('running')                               // 回合在跑
+    await h.dispose()
+    expect(h.disarms).toEqual(['disarmed'])              // 许可收回
+    expect(h.cancels).toEqual([{ kind: 'parent' }])      // 在跑回合被 cancel
+    expect(h.whenIdleCalls).toHaveLength(1)              // 等它收尾
+    // 卸载后再来空闲信号也不投（stopping + 许可已收回）。
+    h.setStatus('idle')
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(1)
   })
 })

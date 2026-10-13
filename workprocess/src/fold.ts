@@ -328,6 +328,11 @@ export function applyWorkEvent(current: WorkProcess | undefined, event: WorkEven
       if (current === undefined) return no(undefined, 'task-create:no-process')
       const draft = event.task
       if (draft.objective.trim() === '') return no(current, 'task-create:objective-required')
+      // 与 task-edit 同口径（decode 的 requirePositiveInt 就是这条线）：坏 maxRounds 一旦落盘，
+      // 下一次 decodeExisting 就抛 WORK_CORRUPT——scope 的读/写/discard 全锁死，工具面没有恢复路径。
+      if (draft.maxRounds !== undefined && (!Number.isSafeInteger(draft.maxRounds) || draft.maxRounds <= 0)) {
+        return no(current, 'task-create:bad-round-cap')
+      }
       const stage = stageOf(current, draft.stageKey)
       if (stage === undefined) return no(current, 'task-create:unknown-stage:' + draft.stageKey)
       // 已收口的阶段不许再塞任务：否则串行门会被"悄悄地"作废（要加活先重开阶段）。
@@ -356,7 +361,7 @@ export function applyWorkEvent(current: WorkProcess | undefined, event: WorkEven
       if ((objective === undefined || objective === '') && event.maxRounds === undefined) {
         return no(current, 'task-edit:nothing-to-change')
       }
-      if (event.maxRounds !== undefined && (!Number.isInteger(event.maxRounds) || event.maxRounds <= 0)) {
+      if (event.maxRounds !== undefined && (!Number.isSafeInteger(event.maxRounds) || event.maxRounds <= 0)) {
         return no(current, 'task-edit:bad-round-cap')
       }
       const nextObjective = objective === undefined || objective === '' ? task.objective : objective

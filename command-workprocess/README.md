@@ -48,7 +48,7 @@ goal 的目标是一句话，命令自己就能落库；workprocess 的流程**�
 ## 投出去的消息来源自署 `user`
 
 这一轮是**人敲了命令**才发生的（`/goal` 提交附件同款）。授权面据此判"本回合由人发起"，
-于是 `update_workstage action=edit`、`human` 策略的阶段收口这类**真人专属**动作才落得下章；
+于是 `update_workstage action=edit`、`human` 策略的阶段收口这类**真人专属**动作才作数；
 `workprocess` 驱动的自动续跑回合则自署 `work`（判为自治）——两者绝不混淆。
 
 ## 其它纪律

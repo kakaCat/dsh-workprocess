@@ -11,7 +11,7 @@
 import { describe, it, expect } from 'vitest'
 import * as tools from 'tool-workprocess'
 import {
-  WORK_TOOL_REGISTRY, authorityFromEvents, isActionAuthorized, requireActionAuthority,
+  WORK_TOOL_REGISTRY, authorityFromEvents, callerVerifierOf, isActionAuthorized, requireActionAuthority,
   createWorkstage, createWorktask, getWorkstage, getWorktask, updateWorkstage, updateWorktask,
   type WorkToolDeps, type WorkHumanVerdict,
 } from 'tool-workprocess'
@@ -70,7 +70,7 @@ describe('登记表自洽（两层 × get/create/update，命名对齐宿主 dsh
 
 describe('授权口径（对齐宿主 update 政策）', () => {
   it('缺省策略（human）下：stage_done（收口确认）+ task_edit / process_edit（改目标）+ task_resume（改人的意图）+ process_discard（撤流程）+ process_arm（放行/收回续跑）都是真人专属', () => {
-    for (const action of ['stage_done', 'task_edit', 'process_edit', 'task_resume', 'process_discard', 'process_arm'] as const) {
+    for (const action of ['stage_done', 'task_edit', 'process_define', 'process_edit', 'task_resume', 'process_discard', 'process_arm'] as const) {
       expect(isActionAuthorized(action, { kind: 'autonomous' })).toBe(false)
       expect(isActionAuthorized(action, { kind: 'direct-human' })).toBe(true)
     }
@@ -79,7 +79,7 @@ describe('授权口径（对齐宿主 update 政策）', () => {
     }
   })
 
-  it('越权时抛结构化错误（WORK_TOOL_AUTHORITY_REQUIRED，指路宿主界面 / 策略开关）', () => {
+  it('越权时抛结构化错误（WORK_TOOL_AUTHORITY_REQUIRED，指路人工确认路径 / 策略开关）', () => {
     expect(() => requireActionAuthority('stage_done', { kind: 'autonomous' }))
       .toThrowError(/本阶段收口策略是 `human`/)
     expect(() => requireActionAuthority('stage_done', { kind: 'autonomous' }, { stageClosePolicy: 'auto' })).not.toThrow()
@@ -98,7 +98,7 @@ describe('授权口径（对齐宿主 update 政策）', () => {
     expect(isActionAuthorized('stage_done', { kind: 'autonomous' })).toBe(false)
     expect(isActionAuthorized('stage_done', { kind: 'autonomous' }, {})).toBe(false)
     // 收口策略不改变其余真人专属动作：edit / resume / 丢流程永远要人直接发起。
-    for (const action of ['task_edit', 'process_edit', 'task_resume', 'process_discard'] as const) {
+    for (const action of ['task_edit', 'process_define', 'process_edit', 'task_resume', 'process_discard'] as const) {
       expect(isActionAuthorized(action, { kind: 'autonomous' }, { stageClosePolicy: 'auto' })).toBe(false)
     }
   })
@@ -118,6 +118,82 @@ describe('授权口径（对齐宿主 update 政策）', () => {
   })
 })
 
+describe('调用者门（verifyCaller 接线后：写面要"活跃根 agent + 本回合发起者"，非根只读）', () => {
+  /** 假宿主 agents 面：注册表 / 状态 / 本回合发起者都可控（对齐 callerVerifierOf 读的那三面）。 */
+  function fakeHost() {
+    const root: Record<string, unknown> = { id: 'agent-root', status: 'running', session: { id: 'ws-a' } }
+    const sub: Record<string, unknown> = { id: 'agent-sub', status: 'running', session: { id: 'ws-a' }, parentAgent: root }
+    const registry = new Map<string, unknown>([[root.id as string, root], [sub.id as string, sub]])
+    let initiator: unknown = root
+    const ctx = {
+      agents: {
+        get: (id: string) => registry.get(id),
+        currentInitiator: () => initiator,
+      },
+    }
+    return { ctx, root, sub, setInitiator: (agent: unknown) => { initiator = agent } }
+  }
+
+  it('callerVerifierOf：缺 agent / 不在注册表 / 非 running / 非发起者 / 非根 一律拒；合法根放行', () => {
+    const { ctx, root, sub, setInitiator } = fakeHost()
+    const verify = callerVerifierOf(ctx as never)
+    // 没有调用者 / 调用者不在注册表（旧引用、别的会话的 agent）。
+    expect(verify(undefined).ok).toBe(false)
+    expect(verify({}).ok).toBe(false)
+    expect(verify({ agent: { id: 'ghost', status: 'running' } }).ok).toBe(false)
+    // 在注册表但不在跑（停手/回收中的 agent 不许写）。
+    root.status = 'idle'
+    expect(verify({ agent: root }).ok).toBe(false)
+    root.status = 'running'
+    // 不是本回合的发起者（别的回合里的旧引用）。
+    setInitiator(sub)
+    expect(verify({ agent: root }).ok).toBe(false)
+    // 子 agent：注册表在、running、是它自己回合的发起者——三重全过，照样拒（流程按会话归属，非根只读）。
+    setInitiator(sub)
+    expect(verify({ agent: sub }).ok).toBe(false)
+    expect(String(verify({ agent: sub }).reason)).toContain('只读')
+    // 合法根 agent：注册表内 + running + 本回合发起者 ⇒ 放行。
+    setInitiator(root)
+    expect(verify({ agent: root })).toEqual({ ok: true })
+  })
+
+  it('写工具：非根 / 非发起者 / 非 running / 无调用者 ⇒ WORK_TOOL_CALLER_REQUIRED；合法根照常；读面不拦', async () => {
+    const { ctx, root, sub, setInitiator } = fakeHost()
+    const records = { 'ws-a': { updatedAt: 1 } }
+    // 照组合根的接法把 verifyCaller 接进 deps（production 里是 workToolDepsOf 做的）。
+    const deps = { ...depsOf(records), verifyCaller: callerVerifierOf(ctx as never) }
+    const exec = { agent: root }
+    await createWorkstage(deps, { scope: 'ws-a', objective: '把模型发上线', stages: STAGES }, exec)
+    await startWorkStage(deps, 'ws-a', 'prep')
+    await createWorktask(deps, { scope: 'ws-a', stage_key: 'prep', objective: '清洗数据' }, exec)
+
+    const complete = (e?: unknown) => updateWorktask(deps, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'complete' }, e)
+    // 子 agent 自己的回合（三重校验全过）也写不了——这是"非根只读"的那颗牙。
+    setInitiator(sub)
+    expect(await complete({ agent: sub })).toMatchObject({ success: false, code: 'WORK_TOOL_CALLER_REQUIRED' })
+    // 根 agent 但不是本回合发起者。
+    expect(await complete(exec)).toMatchObject({ success: false, code: 'WORK_TOOL_CALLER_REQUIRED' })
+    // 根 agent 但不在 running。
+    setInitiator(root)
+    root.status = 'idle'
+    expect(await complete(exec)).toMatchObject({ success: false, code: 'WORK_TOOL_CALLER_REQUIRED' })
+    root.status = 'running'
+    // 没有调用者（exec 缺 agent）。
+    expect(await complete({})).toMatchObject({ success: false, code: 'WORK_TOOL_CALLER_REQUIRED' })
+    expect(await complete(undefined)).toMatchObject({ success: false, code: 'WORK_TOOL_CALLER_REQUIRED' })
+    // 合法根 agent 照常写（任务真的落成 complete）。
+    expect(await complete(exec)).toMatchObject({ success: true, changed: true })
+    // 读面不挂调用者门：子 agent 照样读得到（只读 ≠ 看不见）。
+    setInitiator(sub)
+    expect(await getWorktask(deps, { scope: 'ws-a', task_id: 'wt:prep:1' }, { agent: sub }))
+      .toMatchObject({ success: true })
+    expect(await getWorkstage(deps, { scope: 'ws-a' }, { agent: sub })).toMatchObject({ success: true })
+    // 其余三个写工具同样挂门（抽查 create_workstage 的越会话写）。
+    expect(await createWorkstage(deps, { scope: 'ws-b', objective: 'x', stages: STAGES }, { agent: sub }))
+      .toMatchObject({ success: false, code: 'WORK_TOOL_CALLER_REQUIRED' })
+  })
+})
+
 describe('层1 处理器 · 阶段', () => {
   it('get_workstage：缺参 / 无流程（明说的缺失）/ 建好之后读到两层结构', async () => {
     const deps = depsOf({ 'ws-a': { updatedAt: 1 } })
@@ -125,7 +201,7 @@ describe('层1 处理器 · 阶段', () => {
     expect((await getWorkstage(deps, {})).code).toBe('WORK_TOOL_INVALID_ARGS')
     expect(await getWorkstage(deps, { scope: 'ws-a' })).toEqual({
       success: false, scope: 'ws-a', code: 'WORK_NO_PROCESS',
-      error: '该归属域还没有流程（先调 create_workstage 建流程）',
+      error: '该归属下还没有流程（先调 create_workstage 建流程）',
     })
 
     const created = await createWorkstage(deps, { scope: 'ws-a', objective: '把模型发上线', stages: STAGES })
@@ -161,6 +237,62 @@ describe('层1 处理器 · 阶段', () => {
     const dropped = await createWorkstage(deps2, { scope: 'ws-b', stages: [{ key: 'train', statement: '训练模型' }] })
     expect(dropped.changed).toBe(false)
     expect(String(dropped.reason)).toContain('would-drop-tasks:prep')
+  })
+
+  it('create_workstage 替换路径的授权门（S1）：自治回合改已开工阶段定义被拒；人发起可改；pending 阶段不设门', async () => {
+    const records = { 'ws-a': { updatedAt: 1 } }
+    const agent = depsOf(records)
+    const human = depsOf(records, true)
+    await createWorkstage(agent, { scope: 'ws-a', objective: 'x', stages: STAGES })
+    await createWorktask(agent, { scope: 'ws-a', stage_key: 'prep', objective: '清洗数据' })
+    await startWorkStage(agent, 'ws-a', 'prep')
+    await updateWorktask(agent, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'complete' })
+
+    // 攻击面复现：任务全 complete 后把 active 阶段的 close_policy 改成 auto ⇒ 拒，流程原样留在 human
+    const attack = await createWorkstage(agent, {
+      scope: 'ws-a',
+      stages: [
+        { key: 'prep', statement: '准备数据', done_criteria: ['数据可用'], close_policy: 'auto' },
+        { key: 'train', statement: '训练模型' },
+      ],
+    })
+    expect(attack.code).toBe('WORK_TOOL_AUTHORITY_REQUIRED')
+    expect(String(attack.error)).toContain('prep')
+    const intact = await getWorkstage(agent, { scope: 'ws-a' })
+    expect((intact.stages as Array<{ close_policy: string }>).map((s) => s.close_policy)).toEqual(['human', 'human'])
+
+    // 改陈述 / 判据同样过这道门（定义的三件套同级）；缺省不写 = human，也算"把 auto 改回 human"
+    const restated = await createWorkstage(agent, {
+      scope: 'ws-a',
+      stages: [{ key: 'prep', statement: '换个说法', done_criteria: ['数据可用'] }, { key: 'train', statement: '训练模型' }],
+    })
+    expect(restated.code).toBe('WORK_TOOL_AUTHORITY_REQUIRED')
+
+    // 不动已开工阶段：改 pending 阶段定义 + 追加新阶段 ⇒ 自治合法（还没开工，没承诺过"怎么算成"）
+    const appended = await createWorkstage(agent, {
+      scope: 'ws-a',
+      stages: [
+        { key: 'prep', statement: '准备数据', done_criteria: ['数据可用'] },
+        { key: 'train', statement: '训练模型', close_policy: 'auto' },
+        { key: 'release', statement: '发布上线' },
+      ],
+    })
+    expect(appended).toMatchObject({ success: true, changed: true })
+
+    // 人发起的回合（/work 投话来源自署 user ⇒ direct-human）：可改已开工阶段的 close_policy
+    const byHuman = await createWorkstage(human, {
+      scope: 'ws-a',
+      stages: [
+        { key: 'prep', statement: '准备数据', done_criteria: ['数据可用'], close_policy: 'auto' },
+        { key: 'train', statement: '训练模型', close_policy: 'auto' },
+        { key: 'release', statement: '发布上线' },
+      ],
+    })
+    expect(byHuman).toMatchObject({ success: true, changed: true })
+    const flipped = await getWorkstage(agent, { scope: 'ws-a' })
+    expect((flipped.stages as Array<{ close_policy: string }>).map((s) => s.close_policy)).toEqual(['auto', 'auto', 'human'])
+    // 运行态不被重定义动作冲掉：prep 仍 active、任务仍在（定义以草案为准 ≠ 运行态以草案为准）
+    expect((flipped.stages as Array<{ state: string }>)[0].state).toBe('active')
   })
 
   it('update_workstage：只认 action=done；agent 越权被拒；由人确认也要过内核收口条件', async () => {
@@ -240,7 +372,7 @@ describe('层1 处理器 · 阶段', () => {
     expect(await updateWorkstage(human, { scope: 'ws-a', action: 'discard' }))
       .toEqual({ success: true, scope: 'ws-a', action: 'discard', changed: true })
     expect(await getWorkstage(agent, { scope: 'ws-a' }))
-      .toMatchObject({ success: false, error: '该归属域还没有流程（先调 create_workstage 建流程）' })
+      .toMatchObject({ success: false, error: '该归属下还没有流程（先调 create_workstage 建流程）' })
 
     // 幂等：没有流程 ⇒ 零写入（changed:false，不报错）
     expect(await updateWorkstage(human, { scope: 'ws-a', action: 'discard' }))
@@ -308,7 +440,7 @@ describe('人机确认（工具自己问人：对齐宿主 plan-mode 的 exit �
     return { deps, asks }
   }
 
-  it('人确认 ⇒ 落章（弹框里问清阶段与判据；不靠模型转述）', async () => {
+  it('人确认 ⇒ 落定（弹框里问清阶段与判据；不靠模型转述）', async () => {
     const { deps, asks } = await seededAsk({ kind: 'approved' })
     const out = await updateWorkstage(deps, { scope: 'ws-a', stage_key: 'prep', action: 'done' })
     expect(out).toMatchObject({ success: true, changed: true, close_policy: 'human' })
@@ -370,7 +502,7 @@ describe('工具通告（deferContext 适配：把"下一步"说在决策点上�
     expect(notices).toHaveLength(1)
     expect(notices[0].summary).toContain('task-complete: wt:prep:1')
     expect(notices[0].text).toContain('到此为止')
-    expect(notices[0].text).toContain('不要顺手开新任务')
+    expect(notices[0].text).toContain('不要开新任务')
   })
 
   it('幂等重放（changed:false）不发通告：没发生的事不该被说成发生了', async () => {
@@ -433,6 +565,37 @@ describe('层2 处理器 · 任务', () => {
     const deps = await seeded()
     expect((await createWorktask(deps, { scope: 'ws-a', objective: 'x' })).error).toContain('stage_key')
     expect((await createWorktask(deps, { scope: 'ws-a', stage_key: 'prep' })).error).toContain('objective')
+  })
+
+  it('create_worktask：非法 max_rounds 写前拒（WORK_TOOL_INVALID_ARGS），合法值照常建任务', async () => {
+    // 审计 S2：非法值一旦落盘，严格解码器拒读 → scope 读/写/discard 全锁死；
+    // 工具面必须写前拒并说清理由（域层的静默 false 只会让模型盲重试）。
+    const deps = await seeded()
+    for (const cap of [0, -1, 1.5, NaN, '7']) {
+      const r = await createWorktask(deps, { scope: 'ws-a', stage_key: 'prep', objective: '清洗数据', max_rounds: cap })
+      expect(r).toMatchObject({ success: false, code: 'WORK_TOOL_INVALID_ARGS' })
+      expect(String(r.error)).toContain('max_rounds 必须是正整数')
+    }
+    expect((await getWorktask(deps, { scope: 'ws-a' })).tasks).toEqual([])      // 零写入
+    // 合法值与"不给"照常放行。
+    expect(await createWorktask(deps, { scope: 'ws-a', stage_key: 'prep', objective: '清洗数据', max_rounds: 5 }))
+      .toMatchObject({ success: true, changed: true, task_id: 'wt:prep:1' })
+    expect(await createWorktask(deps, { scope: 'ws-a', stage_key: 'prep', objective: '对齐口径' }))
+      .toMatchObject({ success: true, changed: true, task_id: 'wt:prep:2' })
+    const got = await getWorktask(deps, { scope: 'ws-a', task_id: 'wt:prep:1' })
+    expect((got.tasks as { max_rounds?: number }[])[0].max_rounds).toBe(5)
+  })
+
+  it('update_worktask edit：非法 max_rounds 写前拒；合法值照常改上限', async () => {
+    const deps = await seeded(true)
+    await createWorktask(deps, { scope: 'ws-a', stage_key: 'prep', objective: '清洗数据' })
+    for (const cap of [0, -1, 1.5, NaN]) {
+      const r = await updateWorktask(deps, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'edit', max_rounds: cap })
+      expect(r).toMatchObject({ success: false, code: 'WORK_TOOL_INVALID_ARGS' })
+      expect(String(r.error)).toContain('max_rounds 必须是正整数')
+    }
+    expect(await updateWorktask(deps, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'edit', max_rounds: 9 }))
+      .toMatchObject({ success: true, changed: true })
   })
 
   it('create_worktask：给**后续阶段**建任务被工具拒（WORK_TOOL_NOT_CURRENT_STAGE）——域层允许，纪律的牙在工具面', async () => {
@@ -579,5 +742,109 @@ describe('新建流程与续跑许可（重启后不许"一开就静默停住"�
     expect((await updateWorkstage(human, { scope: 'ws-a', action: 'discard' })).changed).toBe(true)
     expect(await createWorkstage(human, { scope: 'ws-a', objective: 'x', stages: stage })).toMatchObject({ success: true, created: true })
     expect(await tools.getWorkstage(human, { scope: 'ws-a' })).toMatchObject({ activation: 'armed' })
+  })
+})
+
+describe('归属边界（审计 M5：读开放、写收窄、跨域写真人专属）', () => {
+  /** 假宿主 agents 面（与「调用者门」那组同形）：注册表 / 状态 / 本回合发起者都可控。 */
+  function fakeHost() {
+    const root: Record<string, unknown> = { id: 'agent-root', status: 'running', session: { id: 'ws-a' } }
+    const registry = new Map<string, unknown>([[root.id as string, root]])
+    const ctx = {
+      agents: {
+        get: (id: string) => registry.get(id),
+        currentInitiator: () => root,
+      },
+    }
+    return { ctx, root }
+  }
+
+  /** 调用者归属 = ws-a 的 deps（`defaultScope` 即组合根的"本会话 id"投影）。 */
+  function callerDeps(records: Record<string, WorkRecordLike>, human = false): TestDeps {
+    return { ...depsOf(records, human), defaultScope: () => 'ws-a' }
+  }
+
+  /** 在两个归属各备一条流程（ws-b 那条由"它自己"的 deps 建，不靠跨域写）。 */
+  async function seedBoth(human = false) {
+    const records: Record<string, WorkRecordLike> = { 'ws-a': { updatedAt: 1 }, 'ws-b': { updatedAt: 1 } }
+    const a = callerDeps(records, human)
+    const b = { ...depsOf(records, true), defaultScope: () => 'ws-b' }
+    await createWorkstage(a, { scope: 'ws-a', objective: '甲的流程', stages: STAGES })
+    await createWorkstage(b, { scope: 'ws-b', objective: '乙的流程', stages: STAGES })
+    await startWorkStage(b, 'ws-b', 'prep')
+    await createWorktask(b, { scope: 'ws-b', stage_key: 'prep', objective: '乙的任务' })
+    return { records, a, b }
+  }
+
+  it('自治回合跨会话写：四个写工具逐个被拒（WORK_TOOL_AUTHORITY_REQUIRED），目标流程零变化', async () => {
+    const { a } = await seedBoth()
+    // 任务层的两个动作（complete / 建任务）本身**不是**真人专属——拒它们的就是跨域闸本身。
+    const attempts = [
+      () => createWorkstage(a, { scope: 'ws-b', objective: '替乙改流程', stages: [{ key: 'x', statement: 'x' }] }),
+      () => updateWorkstage(a, { scope: 'ws-b', action: 'discard' }),
+      () => createWorktask(a, { scope: 'ws-b', stage_key: 'prep', objective: '替乙建任务' }),
+      () => updateWorktask(a, { scope: 'ws-b', task_id: 'wt:prep:1', action: 'complete' }),
+    ]
+    for (const attempt of attempts) {
+      const out = await attempt()
+      expect(out).toMatchObject({ success: false, code: 'WORK_TOOL_AUTHORITY_REQUIRED', scope: 'ws-b' })
+      expect(String(out.error)).toContain('跨会话写流程要人直接发起')
+      expect(String(out.error)).toContain('ws-b')
+    }
+    // 零写入：ws-b 的流程原样（一个任务、没人 complete 它、流程没被 discard）。
+    const intact = await getWorktask(a, { scope: 'ws-b' })
+    expect((intact.tasks as Array<{ phase: string }>).map((t) => t.phase)).toEqual(['active'])
+    expect(await getWorkstage(a, { scope: 'ws-b' })).toMatchObject({ success: true, objective: '乙的流程' })
+  })
+
+  it('人发起的回合跨会话写放行（跨域写 = 真人专属，不是"一律不许"）', async () => {
+    const { a } = await seedBoth(true)   // resolveAuthority ⇒ direct-human
+    // 建任务不是真人专属动作——它能成，靠的就是跨域闸对 direct-human 放行。
+    expect(await createWorktask(a, { scope: 'ws-b', stage_key: 'prep', objective: '人替乙补一张' }))
+      .toMatchObject({ success: true, changed: true, task_id: 'wt:prep:2' })
+    // 人直接发起：给**全新的**归属建流程也放行（项目侧开新工作区正是这条路）。
+    expect(await createWorkstage(a, { scope: 'ws-c', objective: '人开第三条', stages: [{ key: 'p', statement: 'p' }] }))
+      .toMatchObject({ success: true, created: true })
+  })
+
+  it('本会话写不受影响：scope 缺省 / 显式等于调用者归属，自治回合照常写', async () => {
+    const records: Record<string, WorkRecordLike> = { 'ws-a': { updatedAt: 1 } }
+    const a = callerDeps(records)
+    expect(await createWorkstage(a, { objective: '缺省 = 本会话', stages: STAGES }))
+      .toMatchObject({ success: true, created: true })
+    expect(await createWorktask(a, { scope: 'ws-a', stage_key: 'prep', objective: '显式本会话' }))
+      .toMatchObject({ success: true, task_id: 'wt:prep:1' })
+    // exec.agent.session.id 那一半（生产里 defaultScope 就是它的投影，两处同值、各自兜底）。
+    const exec = { agent: { id: 'agent-x', session: { id: 'ws-a' } } }
+    expect(await updateWorktask(a, { scope: 'ws-a', task_id: 'wt:prep:1', action: 'pause' }, exec))
+      .toMatchObject({ success: true, changed: true })
+    expect((await updateWorktask(a, { scope: 'ws-b', task_id: 'wt:prep:1', action: 'pause' }, exec)).code)
+      .toBe('WORK_TOOL_AUTHORITY_REQUIRED')
+  })
+
+  it('读任意归属放行（数据面 / 诊断场景合法；读面不挂归属门）', async () => {
+    const { a } = await seedBoth()
+    expect(await getWorkstage(a, { scope: 'ws-b' })).toMatchObject({ success: true, objective: '乙的流程' })
+    expect(await getWorktask(a, { scope: 'ws-b', task_id: 'wt:prep:1' }))
+      .toMatchObject({ success: true, tasks: [{ id: 'wt:prep:1', phase: 'active' }] })
+  })
+
+  it('无 exec.agent 的显式跨域写：M3 的调用者门先拦（WORK_TOOL_CALLER_REQUIRED，轮不到跨域闸）', async () => {
+    const { ctx } = fakeHost()
+    const records: Record<string, WorkRecordLike> = { 'ws-a': { updatedAt: 1 }, 'ws-b': { updatedAt: 1 } }
+    // 照组合根的接法：verifyCaller + defaultScope 都接上（production 里 workToolDepsOf 一次接好）。
+    const deps = { ...callerDeps(records), verifyCaller: callerVerifierOf(ctx as never) }
+    const out = await createWorkstage(deps, { scope: 'ws-b', objective: 'x', stages: STAGES }, {})
+    expect(out).toMatchObject({ success: false, code: 'WORK_TOOL_CALLER_REQUIRED' })
+    // 合法根 agent 写**别的**归属：过了调用者门，才轮到跨域闸拒。
+    const cross = await createWorkstage(deps, { scope: 'ws-b', objective: 'x', stages: STAGES }, { agent: (ctx as never as { agents: { currentInitiator(): unknown } }).agents.currentInitiator() })
+    expect(cross).toMatchObject({ success: false, code: 'WORK_TOOL_AUTHORITY_REQUIRED' })
+  })
+
+  it('归属判不出（未接 defaultScope 且无 exec.agent）不拦：生产由调用者门兜底，裸 deps 单测维持现状', async () => {
+    // 这是刻意的分工（crossScopeDenial 的第三条分支）：门各守一道，不重复设卡。
+    const deps = depsOf({ 'ws-b': { updatedAt: 1 } })
+    expect(await createWorkstage(deps, { scope: 'ws-b', objective: 'x', stages: STAGES }))
+      .toMatchObject({ success: true, created: true })
   })
 })

@@ -6,8 +6,8 @@
  * 于是本插件把**域 API**（读 + 全部写动词）做成服务提供出去：消费方拿 `ctx.workprocess` 就够了，
  * 不需要 store、不需要内核函数——这正是宿主 `tool-goal` 调 `ctx.goals.complete(...)` 的形状。
  *
- * 【两套键】写/读的**域 API 按 `scope` 键**（一个归属域一条流程；多流程并存时显式给 scope），
- * 人可直接做的干预**按 `agent` 键**（`agent.session.id` = 归属域，命令面用，同 `ctx.goals.get(agent)`）。
+ * 【两套键】写/读的**域 API 按 `scope` 键**（一个归属一条流程；多流程并存时显式给 scope），
+ * 人可直接做的干预**按 `agent` 键**（`agent.session.id` = 归属，命令面用，同 `ctx.goals.get(agent)`）。
  *
  * @module workprocess/service
  */
@@ -30,7 +30,7 @@ interface AgentLike { readonly session?: { readonly id?: string } }
 
 /** 审计发现（`audit()`）：一条已落盘记录的自洽性问题（**不是**运行期错误，是"历史里躺着坏数据"）。 */
 export interface WorkAuditFinding {
-  /** 归属域键。 */
+  /** 归属键。 */
   readonly scope: string
   /** 人可读的问题说明（含内核严格解码给出的原因）。 */
   readonly problem: string
@@ -42,7 +42,7 @@ export interface WorkAuditReport {
   readonly snapshots: readonly { readonly scope: string; readonly process: WorkProcess }[]
 }
 
-/** 命令/看板要读的流程概览（够排版即可；没有 ⇒ undefined）。 */
+/** 命令/数据面要读的流程概览（够排版即可；没有 ⇒ undefined）。 */
 export interface WorkprocessStatus {
   readonly objective: string
   readonly stages: readonly WorkStage[]
@@ -68,7 +68,7 @@ export interface WorkprocessStatus {
  */
 export interface WorkprocessService {
   // ── 读（域 API）────────────────────────────────────────────────
-  /** 流程快照（缺省 = 该归属域没有流程）。 */
+  /** 流程快照（缺省 = 该归属没有流程）。 */
   process(scope: string): Promise<WorkProcess | undefined>
   /** 读该 agent 会话的流程概览（没有流程 ⇒ undefined；缺失 ≠ 空）。 */
   view(agent: unknown): Promise<WorkprocessStatus | undefined>
@@ -115,7 +115,7 @@ export interface WorkprocessService {
   markAsked(scope: string, kind: 'plan' | 'ask', key: string, revision: number): Promise<boolean>
 
   // ── 回合计数（驱动器的回合预算判据；耐久在归属记录里）────────────
-  /** 该归属域**累计**已准入回合数（跨任务累加；缺省 = 没记录过）。 */
+  /** 该归属**累计**已准入回合数（跨任务累加；缺省 = 没记录过）。 */
   roundsStarted(scope: string): Promise<number | undefined>
   /**
    * **逐任务**回合账（键 = 任务 id；缺省 = 空账）。
@@ -137,7 +137,7 @@ export interface WorkprocessService {
   resumePaused(agent: unknown): Promise<readonly string[]>
 }
 
-/** 归属域键 = 调用者会话（命令与动作都挂在这条会话上）。 */
+/** 归属键 = 调用者会话（命令与动作都挂在这条会话上）。 */
 function scopeOfAgent(agent: unknown): string | undefined {
   const id = (agent as AgentLike | undefined)?.session?.id
   return typeof id === 'string' && id.length > 0 ? id : undefined

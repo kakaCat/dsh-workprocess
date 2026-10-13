@@ -18,7 +18,7 @@ import { apply as applyDriver } from 'workprocess-round-driver'
 import { applyWorkEvent, createWorkProcess, editWorkObjective, startWorkStage, workProcessOf } from 'workprocess'
 
 interface ToolLike { execute(args: Record<string, unknown>, exec?: unknown): Promise<Record<string, unknown>> }
-interface HostEvent { type?: string; data?: { source?: { kind?: string; round?: number; taskId?: string; revision?: number } } }
+interface HostEvent { type?: string; data?: { id?: string; source?: { kind?: string; round?: number; taskId?: string; revision?: number } } }
 interface Sent { readonly content: unknown; readonly source: Record<string, unknown> }
 
 /** 假域设施：把域后端换成内存表（键→记录），并记录写次数。 */
@@ -124,6 +124,8 @@ function fakeHost(): FakeHost {
   const ctx = {
     agents: {
       get: (id: string) => (id === agent.id ? agent : undefined),
+      // 冷启动时序：插件先于 agent 装载（驱动器装载时对在场 agent 收许可，这里为空）。
+      list: () => [],
       currentInitiator: () => agent,
       // 宿主同款：驱动器在"无发起者"作用域里跑（不把自动回合记成人的动作）。
       withoutInitiator: <T,>(fn: () => T): T => {
@@ -139,7 +141,29 @@ function fakeHost(): FakeHost {
     logger: { warn: (line: string) => { warnings.push(line) } },
     sessionProjections: { stateOf: () => ({ openTurnStartSeq }) },
     storageDomain: domain.facility,
-    tools: { register: (t: unknown) => { const tool = t as { name: string } & ToolLike; tools[tool.name] = tool; return (): void => {} } },
+    tools: {
+      register: (t: unknown) => {
+        const tool = t as { name: string } & ToolLike
+        // 真机上工具只在 agent 的回合里执行（那一刻 status 必是 'running'——宿主 tool-goal 的
+        // 调用者校验就靠这个不变量，本仓 `callerVerifierOf` 同款）。夹具里测试常在"空闲边界之后"
+        // 直接调工具：包一层把**执行期间**建模成 running，调完（promise 落定）再还原。
+        const raw = tool.execute.bind(tool)
+        tool.execute = (args: Record<string, unknown>, exec?: unknown) => {
+          const prev = status
+          status = 'running'
+          let out: Promise<Record<string, unknown>>
+          try {
+            out = raw(args, exec)
+          } catch (err) {
+            status = prev
+            throw err
+          }
+          return Promise.resolve(out).finally(() => { status = prev })
+        }
+        tools[tool.name] = tool
+        return (): void => {}
+      },
+    },
     on: (event: string, cb: (a: unknown, b: unknown) => void | Promise<void>) => {
       hooks.push(event)
       handlers.set(event, [...(handlers.get(event) ?? []), cb])
@@ -210,8 +234,17 @@ beforeEach(() => {
 })
 
 const call = (tool: string, args: Record<string, unknown> = {}) => host.tools[tool].execute(args, host.exec())
-const roundAccepted = (round: number): HostEvent => ({
-  type: 'user/message', data: { source: { kind: 'work', round, taskId: 'wt:prep:1', revision: 1 } },
+/**
+ * 投一条"我们那条回合被受理"的会话事件：消息身份照抄**真投出去的那条**（宿主 `user/message`
+ * 事件的数据就是消息本身，驱动器按 `id` 记 admitted——"这一轮跑成过"的记号）。
+ */
+const roundAccepted = (h: FakeHost, round: number): HostEvent => ({
+  type: 'user/message',
+  data: {
+    // 没投过轮时（纯计数用例）没有真消息可抄——id 反正对不上任何预约，受理记号不生效。
+    id: (h.sent.at(-1) as unknown as { id: string } | undefined)?.id ?? 'synthetic-round',
+    source: { kind: 'work', round, taskId: 'wt:prep:1', revision: 1 },
+  },
 })
 
 /**
@@ -234,6 +267,7 @@ describe('插件装配面', () => {
     expect(host.hooks).toEqual([
       'agent/created', 'agent/disposed', 'agent/error', 'agent/status', 'work/changed',
       'session/event', 'agent/inbox/inserted', 'agent/inbox/claimed', 'agent/inbox/discarded',
+      'agent/pre-step',
     ])
   })
 
@@ -330,7 +364,7 @@ describe('真人判定（组合根接线之后）', () => {
     expect((await call('update_workstage', { stage_key: 'prep', action: 'done' })).code).toBe('WORK_TOOL_AUTHORITY_REQUIRED')
   })
 
-  it('本回合有人的消息 ⇒ 授权为 direct-human，收口落章', async () => {
+  it('本回合有人的消息 ⇒ 授权为 direct-human，收口落定', async () => {
     await call('create_workstage', { objective: 'x', stages: [{ key: 'prep', statement: '准备' }] })
     await call('create_worktask', { stage_key: 'prep', objective: '清洗数据' })
     await idleTick()
@@ -451,7 +485,7 @@ describe('续跑投递（drive）', () => {
     const h = await seeded({ drive: true, defaultMaxRounds: 1 })
     await h.emitStatus('idle')              // 开工 + 投第 1 轮
     expect(h.sent).toHaveLength(1)
-    await h.emit(roundAccepted(1))          // 宿主侧：这条回合消息被接受
+    await h.emit(roundAccepted(h, 1))          // 宿主侧：这条回合消息被接受
     expect(h.record()?.rounds?.started).toBe(1)
     await h.emitStatus('idle')              // 到上限 ⇒ 落盘 block（不再投第 2 轮任务）
     // 但**多投一条终局收束轮**：机器停住了要人说一句（goal 的 `<goal_blocked>` 同款）。
@@ -467,11 +501,31 @@ describe('续跑投递（drive）', () => {
     const h = await seeded({ drive: true, defaultMaxRounds: 5 })
     await h.emit({ type: 'user/message', data: { source: { kind: 'user' } } })
     expect(h.record()?.rounds?.started ?? 0).toBe(0)
-    await h.emit(roundAccepted(2))
+    await h.emit(roundAccepted(h, 2))
     expect(h.record()?.rounds?.started).toBe(2)
     const writes = h.domain.writes.length
-    await h.emit(roundAccepted(2))           // 重复观察旧回合：零写入
+    await h.emit(roundAccepted(h, 2))           // 重复观察旧回合：零写入
     expect(h.domain.writes.length).toBe(writes)
+  })
+
+  it('人点停止（turn/end aborted）⇒ 任务落盘暂停、不再投下一轮（真机 bug："停了又跑"）', async () => {
+    const h = await seeded({ drive: true, defaultMaxRounds: 5 })
+    await h.emitStatus('idle')                  // 开工 + 投第 1 轮
+    expect(h.sent).toHaveLength(1)
+    await h.emit(roundAccepted(h, 1))           // 被受理、开跑
+    // 宿主 stop 按钮 = 取消当回合（来源 kind:'user'）。
+    await h.emit({ type: 'turn/end', data: { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } } })
+    await h.emitStatus('idle')                  // 旧实现在这里立刻投第 2 轮
+    const tasks = await h.tools.get_worktask.execute({ stage_key: 'prep' }, h.exec())
+    expect(tasks.tasks).toMatchObject([{ id: 'wt:prep:1', phase: 'paused' }])   // 停得看得见…
+    expect(h.sent).toHaveLength(1)                                             // …且真的停了
+    // 人放行（resume，真人专属：开放回合 + 人的消息两件套）后照常续跑：修订已前进，不会被停止栅栏重暂停。
+    h.setStatus('running')
+    h.setOpenTurn(0)
+    h.setEvents([{}, { type: 'user/message', data: { source: { kind: 'user' } } }])
+    await h.tools.update_worktask.execute({ task_id: 'wt:prep:1', action: 'resume' }, h.exec())
+    await h.emitStatus('idle')
+    expect(h.sent).toHaveLength(2)
   })
 })
 
@@ -493,7 +547,7 @@ describe('阶段规划轮（阶段开工了却没任务 ⇒ 让 agent 建任务�
     await h.emitStatus('idle')
     expect(h.sent).toHaveLength(1)
     const text = JSON.stringify(h.sent[0].content)
-    expect(text).toContain('阶段规划轮')
+    expect(text).toContain('还没有任务')
     expect(text).toContain('create_worktask')
     expect(text).toContain('界面与交互')
     // 来源自署 work；**不带 round**（规划轮不消耗任务预算，不推进 rounds.started）
@@ -538,7 +592,7 @@ describe('收口确认轮（任务全达成 + 策略 human ⇒ 请人拍板，�
     return local
   }
 
-  it('策略 human：投一轮请 agent 向人确认（说清"done 由人落"，并给出落章路径）', async () => {
+  it('策略 human：投一轮请 agent 向人确认（说清"done 由人落"，并给出落定路径）', async () => {
     const h = await seededDone('human')
     await h.emitStatus('idle')
     expect(h.sent).toHaveLength(1)
@@ -626,7 +680,7 @@ describe('人机确认接线（工具自己问人：宿主 userQuestions）', ()
     return local
   }
 
-  it('agent 提请收口 ⇒ 工具弹框；人确认才落章（不靠模型转述人的答复）', async () => {
+  it('agent 提请收口 ⇒ 工具弹框；人确认才落定（不靠模型转述人的答复）', async () => {
     const h = await readyToClose()
     h.setUserAnswers([{ id: 'workprocess-stage-done:prep', selected: ['确认收口'] }])
     const out = await h.tools.update_workstage.execute({ stage_key: 'prep', action: 'done' }, h.exec())
@@ -650,6 +704,19 @@ describe('人机确认接线（工具自己问人：宿主 userQuestions）', ()
     h.setUserAnswers(['ASK_CANCELLED'])
     const out = await h.tools.update_workstage.execute({ stage_key: 'prep', action: 'done' }, h.exec())
     expect(out).toMatchObject({ success: false, code: 'WORK_TOOL_HUMAN_UNAVAILABLE' })
+    expect((await h.tools.get_workstage.execute({}, h.exec())).stages)
+      .toMatchObject([{ key: 'prep', state: 'active' }])
+  })
+
+  it('人点了「跳过」（宿主 UI 编码 selected: []、无 custom）⇒ 不算「还要补做」，停手等人', async () => {
+    // 宿主弹框 UI 的「跳过」就是回 { id, selected: [] }、不带 custom
+    //（deepseek-harness/packages/client/ui-user-questions/src/client/QuestionComposer.tsx:214）。
+    // 「跳过」不是对「确认收口/还要补做」二选一的回答——把它报成 DECLINED 等于替人编造一句指令。
+    const h = await readyToClose()
+    h.setUserAnswers([{ id: 'workprocess-stage-done:prep', selected: [] }])
+    const out = await h.tools.update_workstage.execute({ stage_key: 'prep', action: 'done' }, h.exec())
+    expect(out).toMatchObject({ success: false, code: 'WORK_TOOL_HUMAN_UNAVAILABLE' })
+    expect(String(out.error)).not.toContain('还要补做')          // 不得替人编造选择
     expect((await h.tools.get_workstage.execute({}, h.exec())).stages)
       .toMatchObject([{ key: 'prep', state: 'active' }])
   })
@@ -726,7 +793,7 @@ describe('流程收口（close: auto 缺省 / human 显式）', () => {
 })
 
 describe('装载时自审（坏记录不等被读出来才炸）', () => {
-  it('表里有别的归属域的坏快照 ⇒ 装载那一刻记一行（不阻断装载）', async () => {
+  it('表里有别的归属的坏快照 ⇒ 装载那一刻记一行（不阻断装载）', async () => {
     const h = fakeHost()
     // 往域里塞一条**别的 scope** 的坏记录：读路径永远不会碰它（没人读那个 scope）。
     h.domain.recordsOf('processes').set('session-broken', {

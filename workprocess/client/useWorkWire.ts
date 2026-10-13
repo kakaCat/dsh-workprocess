@@ -14,9 +14,9 @@ import { viewModelOf, type WorkSnapshot, type WorkViewModel } from './model.js'
 const API_BASE = '/workprocess/api'
 
 /**
- * 订阅某归属域的全量线值。
+ * 订阅某归属的全量线值。
  *
- * @param scope - 归属域键（dock 槽的标准 prop `sessionId`）。
+ * @param scope - 归属键（dock 槽的标准 prop `sessionId`）。
  * @returns 降级三态裁决结果（渲染侧只认它，不自己判空）。
  */
 export function useWorkWire(scope: unknown): WorkViewModel {

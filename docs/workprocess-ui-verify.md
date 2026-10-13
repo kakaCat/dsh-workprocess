@@ -1,7 +1,7 @@
 # 真机验收对照表（wt:verify:1）
 
 流程：dsh 的 goal 有 UI 展示，workprocess 也需要一个 UI 展示有哪些阶段，类似 todo 的样子
-归属域键（scope）：`session-e301aa22-d34d-45d6-8612-36c1361b0672`（本会话）
+归属键（scope）：`session-e301aa22-d34d-45d6-8612-36c1361b0672`（本会话）
 **读数快照时刻：revision 29**（verify 段在办，任务相位会随后续推进变化——核对时以"元素一致性"为准，不以本表的冻结数字为准；实时读数随时可让我再拉一份）。
 
 ## 一、工具读数 vs UI 应显示（逐项对照）
@@ -69,7 +69,7 @@
 4. **dock 槽**：若产物 200 但界面上没有，看同槽其它条目（todo/goal/queue）在不在——在 = 注册成功
    但渲染了空（无流程时整条不渲染是**正确行为**；本会话有流程不该空）；都不在 = 槽本身没渲染。
 5. **数据面**：DevTools 里看 `/workprocess/api/stages?scope=<本会话id>` 应 200 且 JSON 里有
-   `stages[]`；404 `no-process` = 数据面活了但读的是别的 scope（检查请求里的 scope 是不是会话 id）。
+   `process.stages[]`；404 `no-process` = 数据面活了但读的是别的 scope（检查请求里的 scope 是不是会话 id）。
 
 ## 六、验收结果（2026-10-12，重启后观测）
 

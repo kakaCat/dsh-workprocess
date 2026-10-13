@@ -5,7 +5,8 @@
  *       `isActionAuthorized` / `requireActionAuthority` 按动作分级（`task_resume` 恒为真人专属；
  *       `stage_done` 按阶段收口策略：`human` = 真人专属，`auto` = 自治回合放行）。
  * 下半：**宿主适配**——把官方 cordis 面接到工具执行点上：授权判据读取（`authorityResolverOf`）、
- *       工具回执之后的通告（`exec.deferContext`）、人机确认（`ctx.userQuestions`）与通告的来源声明。
+ *       写工具调用者门（`callerVerifierOf`）、工具回执之后的通告（`exec.deferContext`）、
+ *       人机确认（`ctx.userQuestions`）与通告的来源声明。
  *
  * 【与宿主的分工对照】宿主把"授权"独立成 `authority` 模块、把"回合结束话术"独立成 `wrapup` 模块
  * （见其 `lib/index.js` 的打包分区）；我们这两件事都落在本模块——它们的共同点是
@@ -91,7 +92,8 @@ export function authorityFromEvents(
 /** 需要真人授权的**全部**动作（唯一一份：改这里即改全部调用点）。 */
 export type WorkAuthorityAction =
   | 'task_edit' | 'task_pause' | 'task_resume' | 'task_block' | 'task_complete' | 'task_clear'
-  | 'stage_done' | 'process_edit' | 'process_discard' | 'process_arm'
+  | 'stage_done' | 'process_define' | 'process_edit' | 'process_discard' | 'process_arm'
+  | 'process_cross_scope'
 
 /** 调用者解析结果（对齐宿主 `GoalToolExecution` 的最小面）。 */
 export interface WorkToolExecution {
@@ -122,9 +124,11 @@ export function workToolExecution(
  * 真人专属动作：改目标（`task_edit` / `process_edit`）、继续（`resume`）、**丢弃流程**（`process_discard`）。
  * 前三个是"改人的意图"（改的是要达成什么 / 要不要继续），第四个是"撤掉整条流程"，
  * 第五个是"要不要让它自己往下跑"（续跑许可）——都是 agent 自行发起就会推翻人的决定的那类。
+ * `process_cross_scope`（审计 M5）：**写别的归属**的流程——多归属是特性（scope 参数保留，
+ * 别的会话/项目各有自己的流程），但自治回合写别的会话/项目的流程等于替别人动工；读任意归属不受限。
  */
 const HUMAN_ONLY: ReadonlySet<WorkAuthorityAction> = new Set<WorkAuthorityAction>(
-  ['task_edit', 'task_resume', 'process_edit', 'process_discard', 'process_arm'],
+  ['task_edit', 'task_resume', 'process_define', 'process_edit', 'process_discard', 'process_arm', 'process_cross_scope'],
 )
 
 /**
@@ -134,6 +138,10 @@ const HUMAN_ONLY: ReadonlySet<WorkAuthorityAction> = new Set<WorkAuthorityAction
 export interface WorkAuthorityContext {
   /** `stage_done` 的目标阶段收口策略（缺省 `human` = 人工确认）。 */
   readonly stageClosePolicy?: WorkStageClosePolicy
+  /** `process_define` 被改动定义的**已开工**阶段键（进拒绝文案，供人复核是哪一段）。 */
+  readonly stageKeys?: readonly string[]
+  /** `process_cross_scope` 的目标归属键（进拒绝文案，供人复核想写的是谁那条）。 */
+  readonly scope?: string
 }
 
 /** 该动作在当前授权与上下文下是否放行（纯函数，可单测）。 */
@@ -154,15 +162,26 @@ export function requireActionAuthority(
   throw new WorkToolError(
     action === 'stage_done'
       ? '本阶段收口策略是 `human`（人工确认）：agent 自行 stage_done 等于替人判定"这一段算不算成了"'
-        + '——请由人在宿主界面上确认，或由人把该阶段改成 auto（close_policy）后自动收口'
+        + '——请人在会话里确认（工具会自己弹框），或由人把该阶段改成 auto（close_policy）后自动收口'
       : action === 'process_discard'
         ? '丢弃流程是不可逆的（流程与任务墓碑一起消失、回合计数归零）：只能由人直接发起'
           + '——agent 自撤流程会抹掉"这里曾经有一条流程"这段历史'
-        : action === 'process_edit'
+        : action === 'process_define'
+          ? '整体替换阶段表改了已开工阶段'
+            + (ctx?.stageKeys !== undefined && ctx.stageKeys.length > 0 ? '「' + ctx.stageKeys.join(' / ') + '」' : '')
+            + '的定义（statement / done_criteria / close_policy）：这是"改这一段怎么算成"——'
+            + 'agent 自行把 human 阶段改成 auto 等于自己给自己免掉人工收口确认，'
+            + '请由人直接发起（如 `/work edit` 投来的重排指令：来源自署 user，授权检查才认）'
+          : action === 'process_edit'
           ? '改流程目标是"改人的意图"：agent 自行改目标会让流程悄悄跑偏到另一件事上'
             + '——请由人直接发起（如 `/work edit <目标>`，命令行会以人的名义把这句交给 agent）'
+          : action === 'process_cross_scope'
+          ? '跨会话写流程要人直接发起'
+            + (ctx?.scope === undefined ? '' : '（这次想写的归属是 `' + ctx.scope + '`，不是本会话这条）')
+            + '：多归属是特性，但自治回合只能写**自己这条**——'
+            + '读任意归属不受限；要改别的会话/项目的流程，请人在会话里直接发起'
           : '`' + action + '` 需要人显式发起（agent 自行 ' + action + ' 会推翻人的意图或越权确认）'
-            + '——请由人在宿主界面上确认，或由人直接调本工具',
+            + '——请人在会话里确认，或由人直接调本工具',
     'WORK_TOOL_AUTHORITY_REQUIRED',
   )
 }
@@ -233,6 +252,53 @@ export function authorityResolverOf(
   }
 }
 
+/** 调用者存活校验的裁决（`WorkToolDeps.verifyCaller` 的回型）。 */
+export interface WorkCallerVerdict {
+  readonly ok: boolean
+  readonly reason?: string
+}
+
+/**
+ * 造 `WorkToolDeps.verifyCaller`：写工具调用者的**身份与存活**校验。
+ *
+ * 【口径（对齐宿主 tool-goal 的 `goalToolExecution`，并加严一重）】宿主的三重校验原样照搬——
+ * agent 必须**正是注册表里那个**（`ctx.agents.get(id) === agent`）、状态 `running`、
+ * 且正是**本回合的发起者**（`currentInitiator()`）；在此之上本包加第四重：**只认根 agent**
+ * （`parentAgent === undefined`）。
+ *
+ * 【为什么比宿主多一重】宿主 goal 按 **agent** 记账（子 agent 拿到的是自己的空 goal 槽，
+ * 过了调用者门也摸不到根 agent 的目标）；本域按**会话**归归属（`defaultScope` = 会话 id），
+ * 子 agent 与根 agent **共享同一条流程**——子 agent 在自己的回合里三重校验全过
+ * （它就是注册表里那个、在跑、是它自己回合的发起者），若到此为止，它就会经
+ * `authorityFromEvents` 的非根拒绝落到 `autonomous` 兜底，把 complete/clear/pause/block
+ * 全做掉。故写面把非根 agent 整批挡掉：**非根 agent 对这条流程只读**
+ * （读工具不挂本校验——看得见的进度不该锁，能改状态的写面才要门）。
+ *
+ * 【缺 exec / 缺 agent = 拒】写工具的调用者身份说不清就当没有——与"判不出就别放行"同一条保守侧。
+ */
+export function callerVerifierOf(ctx: Context): (exec: unknown) => WorkCallerVerdict {
+  return (exec: unknown): WorkCallerVerdict => {
+    const agent = (exec as { agent?: unknown } | undefined)?.agent
+    if (agent === undefined || agent === null) {
+      return { ok: false, reason: 'workprocess 写工具要求一次真实的 agent 调用（exec 里没有调用者）' }
+    }
+    if (ctx.agents.get((agent as { id: string }).id as never) !== agent) {
+      return { ok: false, reason: 'workprocess 写工具要求调用者正是 agents 注册表里的那个活跃 agent' }
+    }
+    if ((agent as { status?: string }).status !== 'running') {
+      return { ok: false, reason: 'workprocess 写工具要求调用者处于 running（不是在停手/回收中的 agent）' }
+    }
+    if (ctx.agents.currentInitiator() !== agent) {
+      return { ok: false, reason: 'workprocess 写工具要求调用者正是本回合的发起者（不是别的回合里的旧引用）' }
+    }
+    if ((agent as { parentAgent?: unknown }).parentAgent !== undefined) {
+      return { ok: false, reason: 'workprocess 写工具只对根 agent 开放：子 agent 对这条流程是**只读**的'
+        + '（流程按会话归属，子 agent 与根共享同一条；要写请由根 agent 在自己的回合里发起）' }
+    }
+    return { ok: true }
+  }
+}
+
 /**
  * 把工具通告落成一条**自署来源**的消息，附在该次工具回执之后（宿主 `exec.deferContext`）。
  *
@@ -269,7 +335,7 @@ interface UserQuestionsLike {
  * 把工具面的人机确认请求接到宿主的问题服务上（对齐宿主 `plan-mode` 的 `exit_plan_mode`）。
  *
  * 【为什么必须由工具自己问】宿主把 `ask_user_question` 的答复**只记成工具结果**，不产生
- * `user/message` 事件 ⇒ 授权面看不见；"模型问完再自己落章"必然被拒（真机踩过）。
+ * `user/message` 事件 ⇒ 授权面看不见；"模型问完再自己落定"必然被拒（真机踩过）。
  *
  * 【四种结局都要如实回收】同意 = `approved`；选了别的 / 自定义输入 = `declined`（带反馈）；
  * 人打断去说话（`ASK_CANCELLED`）、调用者不是活跃根（`CALLER_NOT_LIVE` / `DELEGATED_CALLER`，
@@ -300,6 +366,11 @@ export async function askHumanOf(
     const item = answer.answers.find((a) => a.id === request.id)
     if (item === undefined) return { kind: 'cancelled', reason: 'no-answer' }
     if (item.selected.includes(request.approve) && item.custom === undefined) return { kind: 'approved' }
+    // 宿主 UI 的「跳过」= selected 空、无 custom：这不是对选项的回答——算「没问成」，
+    // 报成 declined 等于替人编造一句「还要补做」（与"绝不把没问成当成同意"同一条纪律）。
+    if (item.selected.length === 0 && (item.custom === undefined || item.custom === '')) {
+      return { kind: 'cancelled', reason: 'skipped' }
+    }
     return item.custom === undefined || item.custom === ''
       ? { kind: 'declined' }
       : { kind: 'declined', feedback: item.custom }

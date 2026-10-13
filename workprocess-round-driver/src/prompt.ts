@@ -4,11 +4,15 @@
  * 对齐宿主 `dsh-goal-round-driver` 的 `renderGoalRoundPrompt`（它内联在 index 里，
  * 我们因为有多种轮次而单独立一个模块）。
  *
- * 【写作纪律】
- * - 动作一律写**可照抄的工具调用**（工具名 + 参数名）：模型不需要猜"task-complete"是事件还是工具；
- * - 投递只带"本轮数据 + 本轮动作 + 本轮停手条件"：跨轮规则（串行 / 预算 / 终局）在常驻策略段
- *   （`tool:workprocess`），不在每轮复述；
- * - 提示词不许要求模型引用它看不到的数据（要它"对着判据说"，就得把判据投给它）。
+ * 【写作标准】
+ * - 标签即身份：`<workprocess_*>` 已说明"这是自动投递的一轮"，正文不再重复报名；
+ * - 先事实后动作：一段事实（目标 / 阶段 / 判据 / 任务 / 轮号），再写"做什么 + 调什么"；
+ * - 只写指令，不附辩护词：设计理由与踩坑史留在代码注释，不进投递正文；
+ * - 人称统一用"你"；工具调用写成可照抄的**合法 JSON** 行内码（key 带引号、参数原值），不用缩进伪代码块；
+ * - 停手条件并入动作分支，不单独开节；
+ * - 跨轮不变的规则（串行 / 预算 / 授权）归常驻策略段（`tool:workprocess`），投递不复述；
+ * - 信息契约一个字不少：判据原文、轮号、门槛数字、收口策略都是逐阶段数据，
+ *   要模型"对着判据说"，就得把判据投给它。
  *
  * @module workprocess-round-driver/prompt
  */
@@ -23,13 +27,12 @@ interface StageProjection {
   readonly closePolicy?: WorkStageClosePolicy
 }
 
-/** 渲染「当前阶段」段落：陈述 + 达成判据（没登记就如实说，不编造）。 */
+/** 渲染「当前阶段」事实行：陈述 + 达成判据（没登记就如实说，不编造）。 */
 function stageSection(stage: StageProjection, emptyNote: string): string[] {
   const criteria = stage.doneCriteria.length === 0
     ? ['（' + emptyNote + '）']
     : stage.doneCriteria.map((c) => '- ' + c)
   return [
-    '## 当前阶段',
     '阶段 `' + stage.key + '`：' + stage.statement,
     '达成判据：',
     ...criteria,
@@ -78,31 +81,21 @@ export function renderWorkRoundPrompt(input: WorkRoundPromptInput): string {
   // 策略错写会让模型"替人收口"或"该自动却停手等人"。
   const closeHint = stageClosePolicyOf(input.stage) === 'auto'
     ? '本阶段收口策略 `auto`：判据齐了由驱动器自动收口。'
-    : '本阶段收口策略 `human`：判据齐了**请人确认**（工具会自己弹框）。'
+    : '本阶段收口策略 `human`：任务全达成后需人确认（工具会自行弹框）。'
   return wrap('workprocess_round', [
-    '# 本轮任务（workprocess）',
-    '',
     '流程目标：' + input.processObjective,
     '',
     ...stageSection(input.stage, '本阶段未登记达成判据——按阶段陈述推进'),
     '',
-    '## 本轮任务',
-    '任务 `' + input.task.id + '`：' + input.task.objective,
-    '回合：第 ' + String(input.round) + ' 轮（上限 ' + cap + '）。',
+    '任务 `' + input.task.id + '`（第 ' + String(input.round) + ' 轮，上限 ' + cap + '）：' + input.task.objective,
     closeHint,
     '',
-    '## 停手条件',
-    '- 达成：按判据自评，过了就调（action 与 task_id 照抄）：',
-    '',
-    '      update_worktask { task_id: "' + input.task.id + '", action: "complete" }',
-    '',
-    '  然后停手——不要顺手开新任务，后续轮次由驱动器投给你。',
-    '- 推不动：卡点写进回执，**在本任务上先撑满 ' + String(blockedAfter) + ' 轮**（不足会被拒）；'
-      + '满 ' + String(blockedAfter) + ' 轮仍推不动才调：',
-    '',
-    '      update_worktask { task_id: "' + input.task.id + '", action: "block", reason: "被什么挡住、等谁" }',
-    '',
-    '  （reason 必填；落 block 后等人裁，别自己再试。）',
+    '完成本任务，按结果二选一：',
+    '- 仅当在本任务上先撑满 ' + String(blockedAfter) + ' 轮仍推不动 → '
+      + '`update_worktask { "task_id": "' + input.task.id + '", "action": "block", "reason": "被什么挡住、等谁" }`'
+      + '；落 block 后停手等人裁。',
+    '- 判据通过 → `update_worktask { "task_id": "' + input.task.id + '", "action": "complete" }`；'
+      + '然后停手，下一轮由驱动器投递。',
   ])
 }
 
@@ -123,25 +116,20 @@ export interface WorkPlanPromptInput {
  *
  * 【为什么这一轮不带轮号】规划轮不消耗任何任务的回合预算，也**不会重投**（同一阶段只问一次，
  * 之后决策树改停手等人）——投"第几轮"只会误导模型以为还有下一次。
+ *
+ * 【为什么"只建不动手"】真机踩过：规划轮写着"建完直接动手"，两阶段流程跑完 `rounds.started`
+ * 还是 0——回合预算与 block 门槛都按任务轮计数，在这一轮把活干掉等于它们都没启用。
  */
 export function renderWorkPlanPrompt(input: WorkPlanPromptInput): string {
   return wrap('workprocess_plan', [
-    '# 阶段规划轮（workprocess）',
-    '',
     '流程目标：' + input.processObjective,
     '',
     ...stageSection(input.stage, '本阶段未登记达成判据——按阶段陈述拆任务'),
     '',
-    '## 现在要做的唯一一件事',
-    '本阶段已开工、**还没有任务**。用 `create_worktask`（`stage_key: "' + input.stage.key + '"`）把本阶段拆成任务：',
-    '- 一个任务一个判据：objective 写成**可核验**的陈述（跑什么、看到什么算过）——一条判据能算清的别拆成两条，',
-    '  要不同判据的别塞进一个；**拆几个由你定**。',
-    '**只建任务，这一轮不要动手**：建完就停手，任务轮会由驱动器投给你（带 `<workprocess_round>` 标签）。',
-    '（理由一行：回合预算与 block 门槛都按任务轮计数——在这一轮把活干掉，预算等于没启用。）',
-    '',
-    '## 停手条件',
-    '- 这是本阶段**唯一一次**规划轮（问过不再重投）：建完任务、或判定本阶段确实无事可做，',
-    '  都明说一声然后停手等人，不要反复空转。',
+    '本阶段已开工、还没有任务。用 `create_worktask`（`stage_key: "' + input.stage.key + '"`）把本阶段拆成任务：',
+    '一个任务一个判据——objective 写成可核验的陈述（跑什么、看到什么算过），拆几个由你定。',
+    '这一轮只建任务、不要动手执行：任务轮由驱动器另行投递（回合预算与 block 门槛按任务轮计数）。',
+    '建完任务、或判定本阶段无事可做，都用一句话回报然后停手——本轮只问一次，不会重投。',
   ])
 }
 
@@ -162,53 +150,45 @@ export interface WorkAskPromptInput {
 /**
  * 渲染**收口确认轮**的提示词：到这里机器能做的都做完了，剩下的是**人的判断**。
  *
- * 【为什么必须投这一轮】`human` 策略下 done 由人落、agent 只提议（授权面把 agent 自写拒掉）。
+ * 【为什么必须投这一轮】`human` 策略下 done 由人落、agent 只提议（授权检查把 agent 自写拒掉）。
  * 但"提议"得真的**说出口**：没有这一轮，流程会安静地停在阶段边界上——**看起来就是卡死**
  * （真机踩过：任务全 complete、策略 human、没有任何人被告知）。
- * 没有弹框通道时，让 agent 用 `ask_user_question`（或直接开口）把这件事摆到人面前；
- * 人一回答就是普通的人类回合，agent 落章时授权面自然放行。
+ *
+ * 【为什么必须走工具确认，而不是 ask_user_question】宿主把人的答复只记成 `ask_user_question`
+ * 的工具结果，不产生 `user/message` 事件 ⇒ 授权面看不见，模型问完再自己落定必然被拒（真机踩过）。
+ * 故收口确认由 `update_workstage` 工具自己弹框问人。
  */
 export function renderWorkAskPrompt(input: WorkAskPromptInput): string {
   if (input.kind === 'close' || input.stage === undefined) {
     return wrap('workprocess_ask', [
-      '# 流程收口待人工判断（workprocess）',
+      '流程收口待人工判断。',
       '',
       '流程目标：' + input.processObjective,
       '',
-      '## 现在要做的唯一一件事',
-      '全部阶段都已收口——但**流程没有"完成"态**：成没成是判据，由人来判。',
-      '请把这件事摆到人面前并等他回答（用 `ask_user_question` 问一句，或直接开口说清）：',
-      '- 目标达成了没有？还有没有要补做的事？',
-      '人的两种回答，分别这么办：',
-      '- 人说「达成了」：如实转告结果、停手等下一条指令——**不要**自己宣布完成（落章是人的动作）；',
-      '- 人说还要做：用 `create_workstage` 替换阶段表（或新起一条流程），别自己宣布完成。',
+      '全部阶段都已收口，但流程没有"完成"态——算不算达成由人来判。',
+      '请把这件事摆到人面前并等他回答（`ask_user_question` 或直接开口说清）：目标达成了没有？还有没有要补做的？',
+      '- 达成 → 如实转告结果，停手等下一条指令，不要自己宣布完成；',
+      '- 还要做 → 用 `create_workstage` 替换阶段表（或新起一条流程）。',
     ])
   }
   const stage = input.stage
   return wrap('workprocess_ask', [
-    '# 阶段收口待人工确认（workprocess）',
+    '阶段收口待人工确认。',
     '',
     '流程目标：' + input.processObjective,
     '',
     ...stageSection(stage, '本阶段未登记达成判据——按阶段陈述与人核对'),
     '',
-    '## 现在要做的唯一一件事',
-    '本阶段的任务**已全部达成**，而本阶段的收口策略是 `human`（**人工确认**）。',
-    '请直接调：',
+    '本阶段任务已全部达成，收口策略为 `human`（需人确认）。直接调用：',
     '',
-    '    update_workstage { action: "done", stage_key: "' + stage.key + '" }',
+    '`update_workstage { "action": "done", "stage_key": "' + stage.key + '" }`',
     '',
-    '（若工具要求 CAS revision，先 `get_workstage` 取当前值再带上。）',
-    '**工具会自己弹框请人确认**（不用你先用 `ask_user_question` 问一遍——人的答复只有走这个工具',
-    '才落得下章：答复记在工具结果里，会话事件里没有"人说过话"的痕迹）。三种结果：',
-    '- 人确认收口 ⇒ 工具落 done，本阶段收口，下一阶段由驱动器开工；',
-    '- 人选「还要补做」（或写了补充）⇒ 工具回 `WORK_TOOL_HUMAN_DECLINED` 并转达人的话：',
-    '  按人说的用 `create_worktask` 补任务，**不要**再提请收口；',
-    '- 人没答 / 打断了去说话 ⇒ 工具回 `WORK_TOOL_HUMAN_UNAVAILABLE`：停手等人开口，别自己收口。',
-    '',
-    '## 边界',
-    '- 不要用 `ask_user_question` 代替这个工具来做收口确认：答复不走工具，授权面不认，白跑一轮。',
-    '- 人也可能改主意（把该阶段改成 `close_policy: auto`，由驱动器自动收口）——按人说的办。',
+    '工具会自行弹框请人确认——不要先用 `ask_user_question` 问：答复不走工具，系统不认。'
+      + '若要求 CAS revision，先 `get_workstage` 取当前值。三种结果：',
+    '- 人确认 → 落 done，下一阶段由驱动器开工；',
+    '- 人选「还要补做」（或写了补充）→ 工具回 `WORK_TOOL_HUMAN_DECLINED` 并转达：'
+      + '按人说的用 `create_worktask` 补任务，不要再提请收口；',
+    '- 人未答 / 被打断 → 工具回 `WORK_TOOL_HUMAN_UNAVAILABLE`：停手等人开口。',
   ])
 }
 
@@ -245,35 +225,24 @@ export function renderWorkWrapupPrompt(input: WorkWrapupPromptInput): string {
   })
   if (input.kind === 'complete') {
     return wrap('workprocess_done', [
-      '# 流程收口（workprocess）',
-      '',
       '流程目标：' + input.processObjective,
       ...(done.length === 0 ? [] : ['', '已收口的阶段：', ...done]),
       '',
-      '## 现在要做的唯一一件事',
-      '这条流程**已经全部收口落幕**，本次自动续跑到此结束。请给用户写一句结束语：',
-      '- 说清**做成了什么**（对着流程目标与上面各阶段判据说，不要复述过程）；',
-      '- 说清**怎么验的**（跑过什么、看到什么）；',
-      '- 指出**还需要人看什么**（若有）。',
-      '',
-      '## 边界',
-      '- **不要再调任何工具**：这一轮只说话，后续工作等人下一条指令。',
-      '- 只报这一会话里真正确立的事；细节不在会话里就如实说"不确定"。',
+      '这条流程已经全部收口落幕，自动续跑到此结束。给用户写一句结束语：',
+      '- 做成了什么（对着流程目标与各阶段判据说，不复述过程）；',
+      '- 怎么验的（跑过什么、看到什么）；',
+      '- 还需要人看什么（若有）。',
+      '这一轮只说话：不要再调任何工具，后续工作等人下一条指令。',
+      '只报真正确立的事，不确定就说不确定。',
     ])
   }
   return wrap('workprocess_blocked', [
-    '# 流程停住（workprocess）',
-    '',
     '流程目标：' + input.processObjective,
     ...(input.blockedReason === undefined ? [] : ['', '停住的原因：' + input.blockedReason]),
     '',
-    '## 现在要做的唯一一件事',
-    '这条流程**停住了，需要人来裁**（回合预算到顶 / 卡在外部条件 / 需要人的决定）。',
-    '请给用户写一句说明：已经做到哪一步、**具体被什么挡住**、需要人做什么才能继续。',
-    '',
-    '## 边界',
-    '- **不要再调任何工具**，也不要自己"再试一次"绕过刹车：这一轮只说话，等人裁决。',
-    '- 只报这一会话里真正确立的事；不确定就说不确定。',
+    '这条流程停住了，需要人来裁。给用户写清：已经做到哪一步、具体被什么挡住、需要人做什么才能继续。',
+    '这一轮只说话：不要再调任何工具，也不要自己"再试一次"绕过刹车。',
+    '只报真正确立的事，不确定就说不确定。',
   ])
 }
 

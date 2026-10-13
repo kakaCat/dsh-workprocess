@@ -133,6 +133,35 @@ describe('串行门 · 阶段之间串行（一个阶段装多个任务）', () 
     expect(r.reason).toBe('task-create:stage-done:prep')
   })
 
+  it('task-create：非法 maxRounds（0 / -1 / 1.5 / NaN）一律零写入——落盘即锁死 scope，fold 必须挡', () => {
+    // 回归钉死（审计 S2）：decode 的 requirePositiveInt 会拒读非法 maxRounds，
+    // 所以 fold 必须在写入侧就拒——否则事件落盘后 decodeExisting 抛 WORK_CORRUPT，
+    // 该 scope 的读 / 写 / discard 全部锁死，工具面没有恢复路径。
+    const p = apply(initProcess(), { kind: 'stage-start', stageKey: 'prep' })
+    for (const [i, cap] of [0, -1, 1.5, NaN].entries()) {
+      const r = applyWorkEvent(p, {
+        kind: 'task-create',
+        task: { id: 'wt:prep:' + (i + 1), stageKey: 'prep', objective: '清洗数据', maxRounds: cap },
+      })
+      expect(r.changed).toBe(false)
+      expect(r.reason).toBe('task-create:bad-round-cap')
+    }
+    expect(p.stages[0].tasks).toEqual([])              // 一次都没写进去
+    // 合法值（含"不给"= 用装载配置兜底）照常建任务。
+    const withCap = apply(p, { kind: 'task-create', task: { id: 'wt:prep:1', stageKey: 'prep', objective: '清洗数据', maxRounds: 7 } })
+    expect(withCap.stages[0].tasks[0].maxRounds).toBe(7)
+    const noCap = apply(withCap, { kind: 'task-create', task: { id: 'wt:prep:2', stageKey: 'prep', objective: '对齐口径' } })
+    expect(noCap.stages[0].tasks[1].maxRounds).toBeUndefined()
+  })
+
+  it('task-edit：非安全整数（2^53）也不许过——与解码器 requirePositiveInt 同一条线', () => {
+    const p = apply(apply(initProcess(), { kind: 'stage-start', stageKey: 'prep' }),
+      { kind: 'task-create', task: { id: 'wt:prep:1', stageKey: 'prep', objective: '清洗数据' } })
+    const r = applyWorkEvent(p, { kind: 'task-edit', taskId: 'wt:prep:1', maxRounds: Number.MAX_SAFE_INTEGER + 1 })
+    expect(r.changed).toBe(false)
+    expect(r.reason).toBe('task-edit:bad-round-cap')
+  })
+
   it('收口判据：全阶段 done 才算流程可收口（空阶段表恒不可）', () => {
     expect(processAllowsClose(initProcess())).toBe(false)
     let p = apply(initProcess(), { kind: 'stage-define', stages: [{ key: 'only', statement: '独苗' }] })

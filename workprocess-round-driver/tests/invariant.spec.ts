@@ -162,7 +162,7 @@ describe('驱动器不变量伴生插件（宿主 goal-round-driver invariant �
       revision: delivery.revision, round: delivery.round, maxRounds: delivery.maxRounds,
     }, delivery.prompt)
     const seen = await audit(process, event)
-    expect(seen[0]).toContain('与该归属域的流程')
+    expect(seen[0]).toContain('与该归属的流程')
   })
 
   it('带 taskId 却不带 round ⇒ 点名（驱动器从不这么投）', async () => {

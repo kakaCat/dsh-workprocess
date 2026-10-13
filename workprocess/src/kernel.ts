@@ -118,7 +118,7 @@ export interface WorkTaskRounds {
 export interface WorkRoundLedger {
   /**
    * 全流程**累计**准入回合数（跨任务累加）。
-   * `block` 的轮数门槛（"先撑满 N 轮"）与看板读数用它——**轮号按任务从 1 起，跨任务不可比**。
+   * `block` 的轮数门槛（"先撑满 N 轮"）与数据面读数用它——**轮号按任务从 1 起，跨任务不可比**。
    */
   started?: number
   /** 逐任务的回合账（键 = 任务 id）：回合预算数这里。 */
@@ -464,7 +464,7 @@ export async function createWorkTask(
     throw new WorkError('建任务需要非空 objective（写清这个工作单元要达成什么）', 'WORK_OBJECTIVE_REQUIRED')
   }
   return mutateWork(deps, scope, (prev) => {
-    if (prev === undefined) throw new WorkError('该归属域还没有流程（先 createWorkProcess）', 'WORK_NO_PROCESS')
+    if (prev === undefined) throw new WorkError('该归属还没有流程（先 createWorkProcess）', 'WORK_NO_PROCESS')
     return {
       kind: 'task-create',
       task: {

@@ -95,6 +95,9 @@ describe('工具面插件入口（apply / name / inject）', () => {
     expect(deps.defaultScope?.({ agent: { session: { id: 'session-1' } } })).toBe('session-1')
     expect(deps.defaultScope?.({})).toBeUndefined()
     expect(typeof deps.resolveAuthority).toBe('function')
+    // 调用者门已接线（不接它，子 agent 经授权兜底就能把写面全做掉）。
+    expect(typeof deps.verifyCaller).toBe('function')
+    expect(deps.verifyCaller?.({})).toMatchObject({ ok: false })   // 无调用者 ⇒ 拒
     expect(typeof deps.deferNotice).toBe('function')
     expect(typeof deps.askHuman).toBe('function')
     // 通告口在 exec 没有 deferContext 时静默不发（降级不抛）。

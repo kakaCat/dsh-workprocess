@@ -122,7 +122,7 @@ export type RoundDecision =
   }
   /** 停手等人（人工确认 / 弹框在途 / 任务 paused-blocked）——不写健康位、不改人的意图。 */
   | { readonly kind: 'wait-human'; readonly processId: string; readonly reason: string }
-  /** 停手（闸拦下 / 无立项 / 无可跑之事）——reason 必填，进诊断面。 */
+  /** 停手（闸拦下 / 无流程 / 无可跑之事）——reason 必填，进诊断面。 */
   | { readonly kind: 'hold'; readonly reason: string; readonly processId?: string }
 
 const hold = (reason: string, processId?: string): RoundDecision =>

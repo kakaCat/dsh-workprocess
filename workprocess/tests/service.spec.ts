@@ -1,7 +1,7 @@
 /**
  * `ctx.workprocess` 服务面（**给命令行等消费者用的那一层**）。
  *
- * 【守护什么】读与三种干预都在**真内核**上生效，且都按 `agent.session.id` 定位归属域：
+ * 【守护什么】读与三种干预都在**真内核**上生效，且都按 `agent.session.id` 定位归属：
  *   ① `view`：阶段表 / 当前阶段 / 任务 / 已准入回合（没有流程 ⇒ undefined，不编）；
  *   ② `pauseActive` / `resumePaused`：只动**当前阶段**的对应相位任务，返回真被改的 id；
  *   ③ `discard`：幂等（没有流程 ⇒ false），丢了就读不到。

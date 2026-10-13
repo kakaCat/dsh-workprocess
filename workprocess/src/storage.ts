@@ -8,7 +8,7 @@
  * `ignorable: true`，持久化读路径对"不认识的类型 + 无 ignorable"是**拒绝解释整条会话日志**
  * （`session-persistence/src/storage-contract.ts` 的 `validateStoredEvents`）。
  *
- * 【一条记录 = 一个归属域】表名 `processes`，键 = 归属域键（缺省即会话 id），
+ * 【一条记录 = 一个归属】表名 `processes`，键 = 归属键（缺省即会话 id），
  * 值 = `WorkRecordLike`（`workProcess` / `updatedAt` / `rounds`）。
  *
  * 【谁校验】`workProcess` 的**权威校验器是内核**（`decodeWorkProcess`）：本 schema 只查

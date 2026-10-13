@@ -12,7 +12,7 @@ export const WORK_CHANGE_VERSION = 1
 
 /**
  * 流程身份构造（唯一入口：别处手拼 `'wp:' + scope` 会漂移）。
- * 一次流程一个 id，由**归属域键**（scope）派生——与宿主"一会话一 goal"同构，只是归属键由调用方给。
+ * 一次流程一个 id，由**归属键**（scope）派生——与宿主"一会话一 goal"同构，只是归属键由调用方给。
  */
 export function WorkProcessId(scope: string): WorkProcessIdType {
   return 'wp:' + scope

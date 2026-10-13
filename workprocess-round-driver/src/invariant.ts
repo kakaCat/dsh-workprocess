@@ -110,10 +110,10 @@ export async function validateWorkRoundMessage(
   // ── 重建的锚：修订相等（见文件头；投递那一刻锚必成立）──
   const process = await domain.process(scope)
   if (process === undefined) {
-    return fail(`work 来源消息指向的归属域（${scope}）没有流程`)
+    return fail(`work 来源消息指向的归属（${scope}）没有流程`)
   }
   if (process.id !== source.processId) {
-    return fail(`work 来源消息的 processId（${source.processId}）与该归属域的流程（${process.id}）不符`)
+    return fail(`work 来源消息的 processId（${source.processId}）与该归属的流程（${process.id}）不符`)
   }
   const delivery = reconstructDelivery(process, source, fail)
   const expected: unknown = [{ type: 'text', text: delivery.prompt }]
@@ -152,8 +152,11 @@ export function reconstructAnchorOf(
  * 两种锚见 `reconstructAnchorOf`：任务轮锚任务 revision，其余锚流程 revision。来源语言本身
  * 还有歧义（收口确认轮 / 终局收束轮都长这样：只有 processId + revision），用流程状态消歧。
  * 这也正是校验的意义：状态对不上的"work 消息"必然是假的。
+ *
+ * 【第二个消费方】驱动器的 pre-step 围栏对**规划 / 确认 / 收束轮**（无 round）用的就是这份
+ * 判据（`matchesCurrentState`，见 `index.ts`）——两处共用一个实现，不会漂移。
  */
-function reconstructDelivery(
+export function reconstructDelivery(
   process: WorkProcess,
   source: NonNullable<WorkRoundMessageLike['data']>['source'] & object,
   fail: (message: string) => never,

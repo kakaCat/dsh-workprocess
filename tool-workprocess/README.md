@@ -17,7 +17,7 @@ workprocess 的**工具面**：两层各三工具（`src/tools.ts` 顶部的登�
 | 工具 | 层 | 作用 |
 |---|---|---|
 | `get_workstage` | 层1 | 读阶段表（顺序即串行顺序）+ 当前阶段 + 串行门 + 收口条件 + 每阶段的收口策略（`close_policy`） |
-| `create_workstage` | 层1 | 建流程（带阶段表：`key / statement / done_criteria? / close_policy?`）或整体替换阶段表；会丢掉**非空**阶段的一律被内核拒 |
+| `create_workstage` | 层1 | 建流程（带阶段表：`key / statement / done_criteria? / close_policy?`）或整体替换阶段表；会丢掉**非空**阶段的一律被内核拒；改动**已开工**阶段的定义（含 close_policy）是真人专属（`process_define` 授权门） |
 | `update_workstage` | 层1 | `action=done`：阶段收口落定——按**该阶段 `close_policy`** 判谁来落（`human` = **真人专属**；`auto` = 驱动器/自治回合可落）；任务须非空且全部 complete。`action=edit`：**改流程目标**（要 `objective`；阶段与任务原样保留；**真人专属**）。`action=discard`：**丢弃整条流程**（不需要 `stage_key`，不可逆，**真人专属**）。`action=arm` / `disarm`：**续跑许可**（**真人专属**；`disarm` 时驱动器停手，`arm` 由人在说"继续"时放回） |
 | `get_worktask` | 层2 | 读任务（给 `task_id` 读一条 / 给 `stage_key` 读一阶段 / 都不给读全部） |
 | `create_worktask` | 层2 | 在某阶段建任务；身份由内核分配 `wt:<阶段键>:<序号>`，回执直接给 `task_id` 与**聚合 `revision`** |
@@ -76,6 +76,38 @@ workprocess 的**工具面**：两层各三工具（`src/tools.ts` 顶部的登�
    其余口径一致：`edit` / `resume` 需人直接发起，`pause` / `block` / `complete` 可由 agent 发起；
    阶段收口 `stage_done` 多一条**按阶段策略分流**（`human` 人工确认 / `auto` 自动收口）。
 
+## 调用者门（verifyCaller：非根 agent 只读）
+
+四个写工具（`create_workstage` / `update_workstage` / `create_worktask` / `update_worktask`）在动参数之前
+先过 `callerRejection`：调用者必须是**注册表内、`running`、正是本回合发起者的根 agent**
+（`callerVerifierOf`，`src/authority.ts`），缺一即 `WORK_TOOL_CALLER_REQUIRED`。
+**读工具不挂这道门**——子 agent 看得见进度，但改不了状态。
+
+口径取舍（对照宿主 tool-goal 的 `goalToolExecution`）：宿主的三重校验（注册表 / running / 当回合发起者）
+原样照搬；宿主**没有**"只认根"这一重——它不需要：goal 按 **agent** 记账，子 agent 过了门也只摸到自己的
+空 goal 槽。本域按**会话**归归属（`defaultScope` = 会话 id），子 agent 与根**共享同一条流程**；
+子 agent 在自己的回合里三重校验全过，若到此为止，它会经 `authorityFromEvents` 的非根拒绝落到
+`autonomous` 兜底，把 complete / clear / pause / block 全做掉。故本包加第四重：**非根 agent 全拒（写面）**，
+净效果 = 非根 agent 对这条流程**只读**。
+
+## 归属边界（scope：读开放、写收窄、跨域写真人专属）
+
+六个工具都吃 `scope`（归属键：宿主用会话 id，项目侧可用工作区/项目 id）——**多归属是特性**，
+参数保留（不能照抄宿主 tool-goal 把它砍掉：它根本没有 scope，goal 严格绑会话；本包要服务
+"项目侧用工作区/项目 id 当归属"的形态）。收窄的是**写**（审计 M5：原来写路径无归属校验，
+任何会话的 agent 都能读写别的会话的流程）：
+
+| 面 | 口径 |
+|---|---|
+| 读工具（`get_workstage` / `get_worktask`） | **任意归属放行**——看板 / 诊断场景跨域读合法；HTTP 数据面（只读 + loopback + 同源，见下节）维持现状不动 |
+| 写四件套（`create_` / `update_workstage`、`create_` / `update_worktask`） | scope === 调用者会话 id ⇒ 放行（现状）；是**别的**归属 ⇒ `process_cross_scope` 授权门（进 `HUMAN_ONLY`）：人直接发起放行，自治回合拒 `WORK_TOOL_AUTHORITY_REQUIRED`（文案写明"跨会话写流程要人直接发起"） |
+
+- **门序**：`callerRejection`（上面的调用者门）先拦，跨域闸（`crossScopeDenial`，`src/tools.ts`）
+  紧随其后——「无 exec.agent + 显式 scope」的形态由调用者门拒掉，跨域闸拿到的必是可信调用者。
+- **调用者归属**取 `exec.agent.session.id`（组合根的 `defaultScope` 正是它的投影，两处同值、各自兜底）；
+  判不出（未接 `defaultScope` 且无 exec.agent）不拦——生产由调用者门兜底，门各守一道、不重复设卡。
+- `command-workprocess` 的 `/work` 只操作本会话（投话给 agent，归属缺省即本会话），不受影响。
+
 ## 人机确认（工具自己问人）
 
 `update_workstage { action: 'done' }` 在**缺授权**（策略 `human` 且本轮不是人发起的）时，
@@ -84,7 +116,7 @@ workprocess 的**工具面**：两层各三工具（`src/tools.ts` 顶部的登�
 
 | 裁决 | 工具回什么 | 效果 |
 |---|---|---|
-| `approved` | 正常落章 | 阶段 done（与"人直接在会话里说一句"等价） |
+| `approved` | 正常落定 | 阶段 done（与"人直接在会话里说一句"等价） |
 | `declined`（选了别的 / 自定义输入） | `WORK_TOOL_HUMAN_DECLINED` + 人的原话 | 不收口，模型按人说的补任务 |
 | `cancelled`（打断去说话 / 中止） | `WORK_TOOL_HUMAN_UNAVAILABLE` | 不收口，停手等人开口 |
 | `no-channel`（没弹框通道 / 没人接这一问） | 退回 `WORK_TOOL_AUTHORITY_REQUIRED`（带指路） | CLI / 无头 / 子 agent 场景的原口径 |
@@ -136,7 +168,11 @@ workprocess 的**工具面**：两层各三工具（`src/tools.ts` 顶部的登�
 - **真人专属**：`task_edit`（改目标——对齐宿主 dsh「edit, pause, and resume require a direct top-level human request」）、
   `process_edit`（改**整条流程**的目标——agent 自行改会让流程悄悄跑偏到另一件事上）、
   `task_resume`（改人的意图——agent 自行 continue 会推翻人的暂停）、
-  `process_discard`（丢整条流程——agent 自撤会抹掉"这里曾经有一条流程"这段历史；误建流程的补救口只给人）。
+  `process_discard`（丢整条流程——agent 自撤会抹掉"这里曾经有一条流程"这段历史；误建流程的补救口只给人）、
+  `process_define`（`create_workstage` 整体替换阶段表时改动**已开工（非 pending）阶段**的定义——
+  statement / done_criteria / close_policy 或移除该阶段：agent 自行把 `human` 改成 `auto` 等于
+  自己给自己免掉人工收口确认（审计 S1）；pending 阶段还没开工、改它不设门）、
+  `process_cross_scope`（写**别的**归属的流程——审计 M5；读任意归属不受限，见上节）。
 - **按阶段的收口策略判**：`stage_done` 的目标阶段 `close_policy=human`（缺省）时是**人工确认**（真人专属）；
   `close_policy=auto` 时**放行自治回合**——阶段自己声明了"任务全完成即自动收口"，此时再按人工确认拦
   等于把声明作废。策略从流程里读（`stageClosePolicyOf`），**授权面不自己猜**；拿不到上下文就按保守的
@@ -190,5 +226,5 @@ workprocess 的**工具面**：两层各三工具（`src/tools.ts` 顶部的登�
 ## 测试
 
 ```bash
-cd workprocess/tool-workprocess && pnpm test   # 64 条：登记表自洽 / 模型面措辞（单行·无术语·取数点名·语义只写一处·门槛随配置）/ 授权口径（含收口策略与 process_edit）/ 六工具行为（含"任务只属于当前阶段"的写前拒）/ 回执 CAS 可用性 / 人机确认（userQuestions）/ 工具通告（deferContext 适配）/ 数据面访问判据（跨源·跨站·非本机 Host·只读方法）/ **两套词汇的机械守卫**（码表自洽·不许串门·不许手写未登记的码）
+cd tool-workprocess && pnpm test   # 76 条：登记表自洽 / 模型面措辞（单行·无术语·取数点名·语义只写一处·门槛随配置）/ 授权口径（含收口策略与 process_edit）/ **归属边界**（跨域写真人专属·读开放·调用者门先拦）/ 六工具行为（含"任务只属于当前阶段"的写前拒）/ 回执 CAS 可用性 / 人机确认（userQuestions）/ 工具通告（deferContext 适配）/ 数据面访问判据（跨源·跨站·非本机 Host·只读方法）/ **两套词汇的机械守卫**（码表自洽·不许串门·不许手写未登记的码）
 ```

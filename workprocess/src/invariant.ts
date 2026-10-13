@@ -58,7 +58,7 @@ export const apply = (ctx: Context): unknown =>
  */
 const install = ((ctx: Context, fail: (message: string) => never): void => {
   const domain = workprocessOf(ctx)
-  /** 影子折叠状态（每归属域一份）：只由**事件**推出来，与盘上快照互为校验。 */
+  /** 影子折叠状态（每归属一份）：只由**事件**推出来，与盘上快照互为校验。 */
   const shadow = new Map<string, WorkProcess | undefined>()
   /** 发布前暂存的候选状态（键 = 载荷对象本身；宿主同款两段式：先验、发布时提交）。 */
   const staged = new Map<WorkChangedPayload, { scope: string; state: WorkProcess | undefined }>()

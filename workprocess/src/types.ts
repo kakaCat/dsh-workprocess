@@ -17,7 +17,7 @@
  * @module workprocess/types
  */
 
-/** 流程身份（跨修订稳定；形态 `wp:<scope>`，scope = 归属域键）。 */
+/** 流程身份（跨修订稳定；形态 `wp:<scope>`，scope = 归属键）。 */
 export type WorkProcessId = string
 
 /** 任务身份（跨修订稳定；形态 `wt:<stageKey>:<seq>`，seq 在该阶段内不复用）。 */

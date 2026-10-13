@@ -27,10 +27,10 @@
 
 | 方法 | 路径 | 用途 | 成功体 |
 | --- | --- | --- | --- |
-| GET | `/workprocess/api/stages?scope=<归属域键>` | 全量快照（拉一次 + 重连后兜底） | `200 application/json`，见下 |
-| GET | `/workprocess/api/events?scope=<归属域键>` | SSE：连上先补一帧全量，之后每次流程写入推一帧全量（帧名 `stages`），25s 心跳 | `text/event-stream` |
+| GET | `/workprocess/api/stages?scope=<归属键>` | 全量快照（拉一次 + 重连后兜底） | `200 application/json`，见下 |
+| GET | `/workprocess/api/events?scope=<归属键>` | SSE：连上先补一帧全量，之后每次流程写入推一帧全量（帧名 `stages`），25s 心跳 | `text/event-stream` |
 
-- **`scope` 由客户端显式传**（HTTP 侧没有会话上下文）：取 dock 条目标准 prop `sessionId`（见 §2），值 = 归属域键。
+- **`scope` 由客户端显式传**（HTTP 侧没有会话上下文）：取 dock 条目标准 prop `sessionId`（见 §2），值 = 归属键。
 - 失败一律 `4xx/5xx` + `{ "error": "<人话>" }`；**无流程不是错误**，见下。
 - SSE 头与帧先例：`dsh-pmboard/pm/src/http/routers/stages.ts:241-290`（`text/event-stream; charset=utf-8` + `Cache-Control: no-store` + `: connected\n\n` 首帧 + `event: <kind>\ndata: <json>\n\n` + `req.on('close')` 清理）。
 
@@ -38,36 +38,40 @@
 
 来源：`tool-workprocess/src/tools.ts:274-303`（`getWorkstage`）+ `tool-workprocess/src/tools.ts:252-262`（`taskView`）。内核侧类型：`workprocess/src/types.ts`（`WorkStageState` / `WorkTaskPhase`）。
 
+外层信封与 SSE 帧同构（客户端 `WorkSnapshot` 一套解析吃两路）：`{ "scope": …, "process": <WorkWire> }`；无流程 = `404 { "error": "no-process" }`（SSE 首帧则发 `"process": null`）。
+
 ```jsonc
 {
-  "scope": "session-…",            // = 归属域键
-  "process_id": "…",
-  "objective": "…",
-  "revision": 12,                   // CAS 用；UI 只展示/比对，不写
-  "stages": [{
-    "key": "design",
-    "statement": "…",
-    "state": "active",              // pending | active | done
-    "done_criteria": ["…", "…"],    // 字符串数组；未登记时该键缺省（见降级态②）
-    "close_policy": "human",        // human | auto（缺省 human）
-    "tasks": 3,                     // 本阶段任务总数
-    "tasks_done": 1                 // phase === 'complete' 的条数
-  }],
-  "current_stage": "design",        // 内核 currentStageOf；全收口时为 null
-  "allows_start": false,            // 串行门：当前阶段 pending 且前序全 done
-  "allows_close": false,            // 是否具备收口条件
-  "closed_at": 0,                   // 仅已收口时出现
-  "activation": "armed",            // 仅归属记录里有时出现
-  "tasks": [{                       // 全量任务（展开行只需 current_stage 的子集）
-    "id": "wt:design:2",
-    "stage_key": "design",
+  "scope": "session-…",            // = 归属键
+  "process": {                     // WorkWire（无流程时本键不出现——404）
+    "process_id": "…",
     "objective": "…",
-    "phase": "active",              // active | paused | blocked | complete
-    "revision": 1,
-    "blocked_reason": "…",          // 仅 blocked 时出现（lower-kebab-case）
-    "blocked_message": "…",         // 仅 blocked 时出现
-    "max_rounds": 20                // 仅在显式设过时出现
-  }]
+    "revision": 12,                   // CAS 用；UI 只展示/比对，不写
+    "stages": [{
+      "key": "design",
+      "statement": "…",
+      "state": "active",              // pending | active | done
+      "done_criteria": ["…", "…"],    // 字符串数组；未登记时该键缺省（见降级态②）
+      "close_policy": "human",        // human | auto（缺省 human）
+      "tasks": 3,                     // 本阶段任务总数
+      "tasks_done": 1                 // phase === 'complete' 的条数
+    }],
+    "current_stage": "design",        // 内核 currentStageOf；全收口时为 null
+    "allows_start": false,            // 串行门：当前阶段 pending 且前序全 done
+    "allows_close": false,            // 是否具备收口条件
+    "closed_at": 0,                   // 仅已收口时出现
+    "activation": "armed",            // 仅归属记录里有时出现
+    "tasks": [{                       // 全量任务（展开行只需 current_stage 的子集）
+      "id": "wt:design:2",
+      "stage_key": "design",
+      "objective": "…",
+      "phase": "active",              // active | paused | blocked | complete
+      "revision": 1,
+      "blocked_reason": "…",          // 仅 blocked 时出现（lower-kebab-case）
+      "blocked_message": "…",         // 仅 blocked 时出现
+      "max_rounds": 20                // 仅在显式设过时出现
+    }]
+  }
 }
 ```
 
@@ -78,22 +82,24 @@
 ```json
 {
   "scope": "session-e301aa22-d34d-45d6-8612-36c1361b0672",
-  "objective": "dsh 的 goal 有 UI 展示，workprocess 也需要一个 UI 展示有哪些阶段，类似 todo 的样子",
-  "revision": 12,
-  "stages": [
-    { "key": "recon", "state": "done", "close_policy": "auto", "tasks": 2, "tasks_done": 2 },
-    { "key": "design", "state": "active", "close_policy": "human", "tasks": 3, "tasks_done": 1 },
-    { "key": "implement", "state": "pending", "close_policy": "auto", "tasks": 0, "tasks_done": 0 },
-    { "key": "verify", "state": "pending", "close_policy": "human", "tasks": 0, "tasks_done": 0 }
-  ],
-  "current_stage": "design",
-  "allows_start": false,
-  "allows_close": false,
-  "tasks": [
-    { "id": "wt:design:1", "stage_key": "design", "phase": "complete", "revision": 2 },
-    { "id": "wt:design:2", "stage_key": "design", "phase": "active", "revision": 1 },
-    { "id": "wt:design:3", "stage_key": "design", "phase": "active", "revision": 1 }
-  ]
+  "process": {
+    "objective": "dsh 的 goal 有 UI 展示，workprocess 也需要一个 UI 展示有哪些阶段，类似 todo 的样子",
+    "revision": 12,
+    "stages": [
+      { "key": "recon", "state": "done", "close_policy": "auto", "tasks": 2, "tasks_done": 2 },
+      { "key": "design", "state": "active", "close_policy": "human", "tasks": 3, "tasks_done": 1 },
+      { "key": "implement", "state": "pending", "close_policy": "auto", "tasks": 0, "tasks_done": 0 },
+      { "key": "verify", "state": "pending", "close_policy": "human", "tasks": 0, "tasks_done": 0 }
+    ],
+    "current_stage": "design",
+    "allows_start": false,
+    "allows_close": false,
+    "tasks": [
+      { "id": "wt:design:1", "stage_key": "design", "phase": "complete", "revision": 2 },
+      { "id": "wt:design:2", "stage_key": "design", "phase": "active", "revision": 1 },
+      { "id": "wt:design:3", "stage_key": "design", "phase": "active", "revision": 1 }
+    ]
+  }
 }
 ```
 

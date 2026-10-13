@@ -112,7 +112,7 @@ export interface WorkMessageSource {
  */
 export interface WorkChangedNotification {
   readonly processId: string
-  /** 归属域键（`processId` 去掉 `wp:` 前缀）：事件载荷按它路由。 */
+  /** 归属键（`processId` 去掉 `wp:` 前缀）：事件载荷按它路由。 */
   readonly scope: string
   readonly change: WorkChange
 }
@@ -135,7 +135,7 @@ export interface WorkRejection {
  * 每个码都带 `WORK_` 前缀、且没有一个 `WORK_` 码混进 `WORK_TOOL_` 那一本。
  */
 export const WORK_ERROR_CODES = [
-  /** 该归属域没有流程（读/写的前提不成立）。 */
+  /** 该归属没有流程（读/写的前提不成立）。 */
   'WORK_NO_PROCESS',
   /** 按 id 找不到任务 / 阶段。 */
   'WORK_NOT_FOUND',

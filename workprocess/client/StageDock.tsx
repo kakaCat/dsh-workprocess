@@ -15,7 +15,7 @@ import styles from './StageDock.module.css'
 
 /** dock 槽给 occupant 的标准 prop（本条目只用 `sessionId`）。 */
 export interface StageDockProps {
-  /** 会话 id = 归属域键（缺省）——数据面的 `scope`。 */
+  /** 会话 id = 归属键（缺省）——数据面的 `scope`。 */
   readonly sessionId?: string
 }
 

@@ -14,7 +14,7 @@ import type { WorkprocessService } from './service.js'
 
 /** 变更载荷：有效变更带事件 + 快照；`change: undefined` = 整条流程被丢弃（墓碑）。 */
 export interface WorkChangedPayload {
-  /** 归属域键（缺省即会话 id）。 */
+  /** 归属键（缺省即会话 id）。 */
   readonly scope: string
   /** 有效变更（`work/change`：事件 + 变更后全量快照）；丢弃时为 `undefined`。 */
   readonly change: WorkChange | undefined
@@ -32,7 +32,7 @@ declare module '@deepseek-ai/cordis' {
   interface Events {
     /**
      * workprocess 变更已落盘（对齐宿主 `goal/changed` 口径）。
-     * @param payload - 归属域键 + 变更（或丢弃墓碑）。
+     * @param payload - 归属键 + 变更（或丢弃墓碑）。
      * @mode emit
      */
     'work/changed'(payload: WorkChangedPayload): void

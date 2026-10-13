@@ -21,7 +21,7 @@ import type {} from '@deepseek-ai/dsh-system-prompt'
 import { workprocessOf } from 'workprocess'
 import { WORK_TOOL_FACTORIES, WORK_TOOL_REGISTRY, DEFAULT_BLOCKED_AFTER_ROUNDS, type WorkToolDeps } from './tools.js'
 import { registerWorkprocessApi } from './http.js'
-import { agentOf, askHumanOf, authorityResolverOf, deferNoticeOf } from './authority.js'
+import { agentOf, askHumanOf, authorityResolverOf, callerVerifierOf, deferNoticeOf } from './authority.js'
 
 //#region 常驻策略段（模型面纪律：工具自述只在"打算调工具"时被读到，纪律得每轮在场）
 /** 策略段名（宿主 systemPrompt 的段名空间；与 goal 的 `tool:goal` 同族）。 */
@@ -38,23 +38,24 @@ export const WORK_POLICY_SECTION = 'tool:workprocess'
 export function workPolicyText(blockedAfter: number): string {
   return [
     '## workprocess（一条流程 = 一个目标；阶段串行，阶段下挂任务）',
-    '- **阶段严格串行**：前序阶段全部收口后才轮到下一阶段；不要越阶段开工，也不要提前给后续阶段建任务',
-    '  （后者会被工具拒：`WORK_TOOL_NOT_CURRENT_STAGE`——留到它成为当前阶段再拆）。',
+    '- **阶段严格串行**：前序阶段全部收口后才轮到下一阶段；不要越阶段开工，也不要提前给后续阶段建任务'
+      + '（会被拒：`WORK_TOOL_NOT_CURRENT_STAGE`）。',
     '- **阶段开工不是你的动作**：串行门放行后由驱动器在空闲边界落；你只管任务（`create_worktask` / `update_worktask`）。',
-    '- **每个阶段开始时驱动器会提醒你规划**该阶段的任务（写成可核验的陈述；拆几个由你定）。',
-    '- **收口策略决定谁落 done**：`human`（缺省）——你**只提议**，由人确认（agent 自写会被拒）；',
-    '  `auto`——任务全达成后由驱动器自动收口，你不要自己写。',
-    '- **任务有回合预算**（`max_rounds`，缺省由配置兜底）：到顶由内核落盘 block、等人裁'
-      + '（恢复要人来：`update_worktask action=resume`）；不要靠反复重试绕过它。',
-    '- **落 block 有门槛**（与预算到顶是两件事）：在**这个任务上**至少撑过 ' + String(blockedAfter) + ' 轮（该任务的回合账）才允许宣告"被挡住"——'
-      + '第一轮遇到难处就停手会被拒（真人直接发起不受此限）。',
-    '- 自动续跑回合会以一条带 `<workprocess_round>` / `<workprocess_plan>` / `<workprocess_ask>` 语义的',
-    '  指令出现（来源自署 `work`）：只做那一轮说的事，做完停手，下一轮由驱动器投递。',
-    '- **收口是写库、不投轮**：所以终局会专门投一条 `<workprocess_done>`（流程落幕）或',
-    '  `<workprocess_blocked>`（停住等人）让你**给用户说一句结束语**——那一轮只说话、不要再调工具。',
-    '- **续跑许可是耐久的**（`get_workstage` 回执里的 `activation`）：会话从盘上恢复（宿主重启）后',
-    '  驱动器会自动把它置为 `disarmed` 并停手；**人说"继续 / 接着跑"时**，你调',
-    '  `update_workstage action=arm` 把许可放回去（真人专属，agent 不能自己放行自己）。',
+    '- **每个阶段开工后驱动器会提醒你规划**该阶段的任务（objective 写成可核验的陈述，拆几个由你定）。',
+    '- **收口策略决定谁落 done**：`human`（缺省）——你只提议，由人确认（agent 自写会被拒）；'
+      + '`auto`——任务全达成后由驱动器自动收口。',
+    '- **任务有回合预算**（`max_rounds`，缺省由配置兜底）：到顶由系统记为 blocked（落盘，重启不丢）并停住，'
+      + '恢复要人来（`update_worktask action=resume`）；不要靠反复重试绕过。',
+    '- **落 block 有门槛**（与预算到顶是两件事）：在本任务上至少撑过 ' + String(blockedAfter) + ' 轮才允许宣告"被挡住"'
+      + '（真人直接发起不受此限）。',
+    '- 自动续跑回合以 `<workprocess_round>` / `<workprocess_plan>` / `<workprocess_ask>` 标签的指令出现'
+      + '（它们不是人打的字）：只做那一轮说的事，做完停手。',
+    '- 终局会投 `<workprocess_done>`（流程落幕）/ `<workprocess_blocked>`（停住等人）让你给用户说结束语——'
+      + '那一轮只说话，不要再调任何工具。',
+    '- **续跑许可是耐久的**（`get_workstage` 回执的 `activation`）：会话从盘上恢复（应用重启）后自动置为 `disarmed`；'
+      + '人说"继续"时调 `update_workstage action=arm` 放回（真人专属，agent 不能自己放行自己）。',
+    '- **写只限本会话这条流程**：`scope` 不给就是本会话；写别的归属必须由人直接发起'
+      + '（`WORK_TOOL_AUTHORITY_REQUIRED`）；读不受限。',
   ].join('\n')
 }
 
@@ -102,6 +103,9 @@ export function workToolDepsOf(ctx: Context, config?: WorkToolConfig): WorkToolD
     // 归属缺省 = **本会话**（一个会话一条流程；多流程并存时要显式给 scope）。
     defaultScope: (exec) => agentOf(exec)?.session?.id,
     resolveAuthority: authorityResolverOf(ctx),
+    // **写工具的调用者门**（宿主 tool-goal 三重校验 + 只认根 agent）：不接它，子 agent 会经
+    // 授权兜底（autonomous）把 complete/clear/pause/block 全做掉——非根 agent 对流程只读。
+    verifyCaller: callerVerifierOf(ctx),
     // 工具回执之后的**通告**（宿主 `exec.deferContext`）：落成一条自署 `work-tool` 的消息。
     deferNotice: (exec, n) => deferNoticeOf(exec, n),
     // **人机确认口**（宿主 `ctx.userQuestions`）：策略 human 的阶段收口由**工具自己问人**。

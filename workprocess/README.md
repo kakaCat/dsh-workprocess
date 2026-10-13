@@ -7,7 +7,7 @@ workprocess 的**插件入口**（组合根）：把「内核 + 宿主存储域�
 
 | 缺口 | 本包怎么补（**只补自己这一层**：其余缺口在兄弟包里，见右列） |
 |---|---|
-| 没有 `store` 实现 | `src/storage.ts` + `src/index.ts`：**用宿主的存储域**（`defineDomain` + `ctx.storageDomain.open`，域 `workprocess` v1、表 `processes`、键 = 归属域）。schema 校验、耐久、`domain/changed` 事件都由宿主后端负责——**不自造文件库**。`workProcess` 的权威校验器仍是**内核**的 `decodeWorkProcess`（schema 的 `superRefine` 调它） |
+| 没有 `store` 实现 | `src/storage.ts` + `src/index.ts`：**用宿主的存储域**（`defineDomain` + `ctx.storageDomain.open`，域 `workprocess` v1、表 `processes`、键 = 归属）。schema 校验、耐久、`domain/changed` 事件都由宿主后端负责——**不自造文件库**。`workProcess` 的权威校验器仍是**内核**的 `decodeWorkProcess`（schema 的 `superRefine` 调它） |
 | 真人判定 | **本包不判**（保持领域层"只管状态规则"）：判定在 `tool-workprocess/src/authority.ts`（从会话事件切面判本回合由谁发起 + 动作分级），合法性来源在 `command-workprocess`（命令由人敲、投话自署 `user`）。内核只**定义域词汇**（**域**错误码 `WORK_ERROR_CODES`，住在 `src/domain.ts`；阶段策略 `closePolicy: 'human' \| 'auto'`）——**授权是工具面的牙**，它的政策码是 `tool-workprocess/src/codes.ts` 里的 `WORK_TOOL_*`（`WORK_TOOL_AUTHORITY_REQUIRED`），不进域联合（对齐宿主：`GoalErrorCode` 在 domain.ts、`GOAL_TOOL_*` 在工具面） |
 | `drive` 的结论没人执行 | 在 `workprocess-round-driver` 包：开工 / auto 收口 / 落盘 block 由 tick 直接落，续跑回合由 `agent.followup` 投递（本包只提供 `ctx.workprocess` 服务面） |
 | 投递会冒充人话 | 在 `workprocess-round-driver/src/index.ts` + `tool-workprocess/src/authority.ts`：往 `@deepseek-ai/dsh-llm` 的 `MessageSourceMap` 加 `work` 一格并**自署来源**——自动回合 = `autonomous`，`human` 策略的收口照样落不了章（省略 source 会被当成 user，那正是"自动回合替人收口"的口子） |
@@ -50,7 +50,7 @@ apply(ctx, config) ⇒
         tick: true            # 回合边界是否自动驱动（缺省 true）
         drive: true           # 空闲边界是否**自动投递续跑回合**（缺省 false；本仓装载层打开）
         defaultMaxRounds: 20  # 任务没写 max_rounds 时的硬上限（防跑飞）
-        close: auto           # 流程收口：auto（缺省）= 最后一段 done 即收口；human = 全阶段 done 后投「请判」轮（判了不落章，方案 B 口径）
+        close: auto           # 流程收口：auto（缺省）= 最后一段 done 即收口；human = 全阶段 done 后投「请判」轮（判了不落定，方案 B 口径）
 ```
 
 ## 续跑是怎么跑的（刹车在哪）
@@ -65,7 +65,7 @@ apply(ctx, config) ⇒
    **本阶段一个任务都没有**（每过一个阶段边界都必然如此）⇒ 投**阶段规划轮**，请 agent 用
    `create_worktask` 给本阶段建任务。同一阶段只问一次，问过就停手等人（不空转、也不替它臆造任务）。
 4. 任务全达成但策略 `human`（或全阶段 done ⇒ 流程级收口）⇒ 投**收口确认轮**，请 agent 用
-   `ask_user_question`（或直接开口）把"该人拍板了"摆到人面前；人一确认就是人类回合，agent 落章
+   `ask_user_question`（或直接开口）把"该人拍板了"摆到人面前；人一确认就是人类回合，agent 落定
    时授权面自然放行。**同一件事只问一次**（不刷屏）。没有这一轮，流程会安静地停在阶段边界上——
    看起来就是卡死（真机踩过）。
 4. 同一轮（`taskId:revision:round`）**只投一次**；回合被接手（会话里出现该 source 的 `user/message`）才把
@@ -118,7 +118,7 @@ ln -sfn <repo>/workprocess ~/.dsh/profiles/desktop/node_modules/workprocess
 - **`ask-*`（宿主弹框通道）已接**：`human` 策略的阶段收口由**工具自己问人**——
   `update_workstage action=done` 在缺授权时调 `ctx.get('userQuestions').ask(...)`（对齐宿主
   `plan-mode` 的 `exit_plan_mode`）。为什么必须这样：宿主把 `ask_user_question` 的答复**只记成
-  工具结果**，不产生 `user/message` 事件 ⇒ 授权面看不见，"模型问完再自己落章"必然被拒（真机踩过）。
+  工具结果**，不产生 `user/message` 事件 ⇒ 授权面看不见，"模型问完再自己落定"必然被拒（真机踩过）。
   没弹框通道（CLI / 无头 / 子 agent）时退回原来的"拒绝并指路"。
 
 ## 工具面上与流程相关的三个动词（在 `tool-workprocess`）

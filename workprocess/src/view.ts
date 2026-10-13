@@ -40,7 +40,7 @@ export interface WorkTaskWire {
   readonly max_rounds?: number
 }
 
-/** 全量线值：`GET /workprocess/api/stages` 的响应体（`scope` 由调用方补）。 */
+/** 全量线值：`GET /workprocess/api/stages` 响应体与 SSE 帧的 `process` 键值（`scope` 由调用方包在外层）。 */
 export interface WorkWire {
   readonly process_id: string
   readonly objective: string

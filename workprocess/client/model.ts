@@ -9,7 +9,7 @@
  */
 import type { WorkWire } from '../src/view.js'
 
-/** 数据面一帧：`GET /workprocess/api/stages` 的响应体（`process: null` = 本归属域没有流程）。 */
+/** 数据面一帧：`GET /workprocess/api/stages` 的响应体（`process: null` = 本归属没有流程）。 */
 export interface WorkSnapshot {
   readonly scope: string
   readonly process: WorkWire | null | undefined

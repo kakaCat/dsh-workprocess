@@ -68,7 +68,7 @@ describe('端到端 · 一条三段流程（两层模型）', () => {
 
     // ① 还没有流程：明说的缺失（不是空表）
     expect(await human.getWorkstage.execute({ scope: 'ws-a' })).toMatchObject({
-      success: false, error: '该归属域还没有流程（先调 create_workstage 建流程）',
+      success: false, error: '该归属下还没有流程（先调 create_workstage 建流程）',
     })
 
     // ② 建流程：三段，初态全 pending、全无任务

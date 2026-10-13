@@ -91,9 +91,9 @@ client/*.tsx ──────────────── tsdown ─▶ lib/
 ```bash
 pnpm install
 pnpm typecheck
-pnpm test          # 282 条（17 个 *.spec.ts）：领域插件 128（内核 59 · 插件 38 · 伴生件 9 · 服务 8
-                   #        · 视图 4 · 客户端 7 · 内核纯度 3）/ 回合驱动器 72（决策 26 · 插件 14
-                   #        · 伴生件 20 · 循环 12）/ 工具面 64（登记表+授权 28 · 工具壳 14 · HTTP 13 · 端到端 2 · 插件 5）/ 命令行 18
+pnpm test          # 305 条（17 个 *.spec.ts）：领域插件 132（内核 61 · 插件 40 · 伴生件 9 · 服务 8
+                   #        · 视图 4 · 客户端 7 · 内核纯度 3）/ 回合驱动器 79（决策 22 · 插件 25
+                   #        · 伴生件 20 · 循环 12）/ 工具面 76（处理器+授权+归属边界 41 · 工具壳 14 · HTTP 14 · 端到端 2 · 插件 5）/ 命令行 18
                    #   ↑ `pretest` 先跑 `workprocess` 的 `build:client`：客户端契约测试读的是产物 lib/client.js
 pnpm build         # tsc 出中间态 dist/types/（逐模块 + .d.ts），tsdown 按**装载入口**收成
                    # dist/index.js（+ 伴生件 dist/invariant.js）——宿主加载的就是那一个文件
@@ -202,13 +202,15 @@ node scripts/audit-storage.mjs <文件>      # 审指定文件（拿副本验证
 进程内那份保留：装载时发现即记一行警告（不阻断装载）；**有问题的记录不播种**进不变量伴生件的影子状态
 （读起来就不可信，别拿它当基准）。
 
-## 真机才暴露的三个坑（都已修 + 防回归测试）
+## 真机才暴露的坑（都已修 + 防回归测试）
 
 | 坑 | 症状 | 修法 |
 |---|---|---|
 | 规划轮把任务轮挤掉 | 两阶段跑完 `rounds.started` 仍是 0 ⇒ 回合预算与 block 门槛形同虚设 | 规划轮只建任务、不动手（`458f4f4`） |
 | 重启后新建流程继承残留的 `disarmed` | 新流程一开就静默停住 | **域层**：`discard` 把整本回合账（含许可）一起摘掉（记录里留下的任何一格都是上一个对象的结论）；工具面兜底：人发起的新建再把许可打开（老记录也纠正），自治回合不动这个开关（`3a3b2f5` + 本轮） |
 | 投递即消耗（预约撤得太早） | 任务轮与 blocked 收束轮**同时**到手：预算被烧光、agent 一次手都没动 | 撤预约只在 `agent/status → idle`（真·空闲转换）里做；`drive()` 见预约挂着就直接返回（宿主同款） |
+| **stop 按钮点了不停** | 人点宿主 stop，agent 停一下立刻又跑：驱动器不看 `turn/end` 的中止原因，agent 一空闲就投下一轮 | 对齐宿主 goal driver：`user/message` 受理记 `admitted`；`turn/end` = `aborted` ⇒ 被取消的回合在空闲边界把任务**落盘暂停**（`/work` 看得见、`resume` 放行），不是我们那一轮 ⇒ 收回续跑许可；`max-tokens` 同。上一轮**没跑成**（排队中被丢弃/被认领没进步骤/中途被中止）一律先落盘暂停再考虑下一拍；跑成过的（`admitted`）不暂停、照常续投（见 `workprocess-round-driver/README.md`「停止语义」） |
+| 收口弹框「跳过」被报成「还要补做」 | 人在收口确认弹框点「跳过」（宿主 UI 编码 `selected: []` 无 `custom`），工具回 `WORK_TOOL_HUMAN_DECLINED` 且叙述「人在弹框里选了『还要补做』」——替人编造一句没说过的话，agent 还可能据此乱建任务 | 适配器裁决映射加第三格：「跳过」⇒ `cancelled`（与 `ASK_CANCELLED` 同桶，落 `WORK_TOOL_HUMAN_UNAVAILABLE` 停手等人）；`tool-workprocess/src/authority.ts` + 三格回归测试（`workprocess/tests/plugin.spec.ts` 人机确认接线） |
 
 ## 两处去重记号都是耐久的
 
@@ -257,7 +259,8 @@ node scripts/audit-storage.mjs <文件>      # 审指定文件（拿副本验证
   （否则 `auto` 就是绕过判据的后门）。策略属于**定义**，故改它走 `create_workstage` 替换阶段表，
   不新增状态动词。
 - **要人确认的动作**：流程 `edit`（改整条流程的目标）/ 任务 `edit`（改目标）/ `resume`（改人的意图）、
-  阶段 `done`（收口——**仅 `human` 策略的阶段**）、`discard`（丢整条流程）。
+  阶段 `done`（收口——**仅 `human` 策略的阶段**）、`discard`（丢整条流程）、
+  **跨归属写**（`scope` 是别的会话/项目——读任意归属不受限，写收窄成真人专属，审计 M5）。
   `pause` / `block` / `complete` / `clear` 可由 agent 发起。
 - **目标可改但不是随手改**：`objective-edit` 是**真人专属**状态动词（阶段与任务原样保留，
   不靠"丢弃重来"换目标）；INV-4 只放行 `init` 与它两个动词改写 `objective`。

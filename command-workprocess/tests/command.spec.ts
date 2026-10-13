@@ -6,7 +6,7 @@
  *      pause / resume / clear 直落；`edit` 缺目标如实报错；
  *   ② **结构化动作由 agent 做**：`<目标>` 与 `edit <目标>` 只投一条消息（followup），
  *      命令**不碰内核**（不猜阶段表、不自己建流程）；控制动作 pause / resume / clear 才直接落；
- *   ③ 投话的来源自署 `user`（这一轮是人敲的命令发起的，真人专属动作才落得下章）；
+ *   ③ 投话的来源自署 `user`（这一轮是人敲的命令发起的，真人专属动作才作数）；
  *   ④ 排版：走到哪了 / 谁该动 / 能做什么——人一眼能读懂；
  *   ⑤ 接线：`apply` 真的把它注册进 `ctx.commands`（inject 只要 commands + workprocess）。
  */
@@ -202,7 +202,7 @@ describe('\`/work\` · handler 分派（假服务）', () => {
     expect(created.text).toContain('已把目标交给 agent')
     expect(sent).toHaveLength(1)
     expect(sent[0].content[0].text).toContain('把登录 500 修掉')
-    // 来源自署 user（人敲的命令发起的一轮）——真人专属动作据此落章
+    // 来源自署 user（人敲的命令发起的一轮）——真人专属动作据此落定
     expect(sent[0].source).toEqual({ kind: 'user' })
 
     expect((await handler(invocation('', agent))).text).toContain('还没有流程')
