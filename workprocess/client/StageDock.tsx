@@ -8,7 +8,7 @@
  * @module workprocess/client/StageDock
  */
 import { useState } from 'react'
-import { STAGE_LABEL, TASK_LABEL, stageDotState, taskDotState } from './model.js'
+import { STAGE_LABEL, TASK_LABEL, dockActivationBadge, stageDotState, taskDotState } from './model.js'
 import type { WorkStageWire, WorkTaskWire } from '../src/view.js'
 import { useWorkWire } from './useWorkWire.js'
 import styles from './StageDock.module.css'
@@ -106,6 +106,8 @@ export function StageDock(props: StageDockProps) {
   const stages = wire.stages
   const done = stages.filter((s) => s.state === 'done').length
   const current = wire.current_stage
+  // 续跑许可被收回 ⇒ 头行挂徽标（**折叠时也看得见**：它改变的是"这屏会不会自己往下走"）。
+  const activation = dockActivationBadge(wire)
   const openTasks = current === null
     ? []
     : wire.tasks.filter((t) => t.stage_key === current && t.phase !== 'complete')
@@ -128,6 +130,9 @@ export function StageDock(props: StageDockProps) {
           <span className={styles.progress}>
             {String(done) + '/' + String(stages.length) + (current !== null ? ' · ' + current : ' · 全部收口')}
           </span>
+          {activation !== undefined && (
+            <span className={styles.disarmed} title={activation.hint}>{activation.text}</span>
+          )}
           <Chevron up={collapsed} />
         </button>
         {!collapsed && (

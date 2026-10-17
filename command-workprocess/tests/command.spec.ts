@@ -75,6 +75,17 @@ describe('\`/work\` · 语法与声明（与 /goal 逐字同形）', () => {
     expect(parseWorkCommand('EDIT')).toEqual({ kind: 'invalid-edit' })
   })
 
+  // 续跑许可是**真人专属**（工具面拦 agent 自签）⇒ 人必须有一条不求模型的机械路径：
+  // 会话 resume 会自动落 disarmed，而模型一旦没想起来 arm，流程就在 disarmed 上静默冻死。
+  it('续跑许可：arm / disarm 是控制词（不吃成目标）', () => {
+    expect(parseWorkCommand('arm')).toEqual({ kind: 'arm' })
+    expect(parseWorkCommand('ARM')).toEqual({ kind: 'arm' })
+    expect(parseWorkCommand('disarm')).toEqual({ kind: 'disarm' })
+    // 控制词只吃整串：`arm 一下`、`disarmed` 都是目标（与 pause/resume/clear 同一纪律）
+    expect(parseWorkCommand('arm 一下这个流程')).toEqual({ kind: 'create', objective: 'arm 一下这个流程' })
+    expect(parseWorkCommand('disarmed')).toEqual({ kind: 'create', objective: 'disarmed' })
+  })
+
   it('其余一律当目标（只有自己的控制词被吃掉，同 goal）', () => {
     expect(parseWorkCommand('把登录偶发 500 修掉')).toEqual({ kind: 'create', objective: '把登录偶发 500 修掉' })
     expect(parseWorkCommand('  edit 换成另一个目标 ')).toEqual({ kind: 'edit', objective: '换成另一个目标' })
@@ -182,6 +193,36 @@ describe('\`/work\` · 排版（人看的）', () => {
     const done: WorkprocessStatus = { ...status, currentStageKey: undefined, stages: status.stages.map((s) => ({ ...s, state: 'done' as const })) }
     expect(renderWorkStatus('流程', done).text).toContain('流程没有"完成"态')
   })
+
+  // 这一屏原来**无条件**承诺"空闲边界上驱动器会自动投递续跑回合"——disarmed 时那是假承诺
+  // （驱动器连副作用都不落）。人据此以为流程在推进，而它原地冻着，屏幕上什么都不说。
+  it('disarmed：先说明驱动器已停手，并给出放回路径（不再输出会"自动推进"的假承诺）', () => {
+    const out = renderWorkStatus('流程（workprocess）', { ...status, activation: 'disarmed' })
+    expect(out.text).toContain('续跑许可 disarmed')
+    expect(out.text).toContain('驱动器已停手')
+    expect(out.text).toContain('/work arm')
+    // 原来的"会自动…"降级成"放回后会…"，不再是无条件承诺
+    expect(out.text).toContain('（放回后驱动器会：')
+    const unconditional = String(out.text).split('\n')
+      .filter((line) => line.includes('驱动器会自动') && !line.startsWith('（放回后'))
+    expect(unconditional).toEqual([])
+  })
+
+  it('disarmed 且全阶段已收口（等流程级收口判断）：不套"放回后驱动器会"（那是人判的话，不是驱动器的动作）', () => {
+    const allDone = renderWorkStatus('流程', {
+      ...status, activation: 'disarmed', currentStageKey: undefined,
+      stages: status.stages.map((s) => ({ ...s, state: 'done' as const })),
+    })
+    expect(allDone.text).toContain('驱动器已停手')
+    expect(allDone.text).toContain('/work arm')
+    expect(allDone.text).not.toContain('放回后驱动器会')
+  })
+
+  it('armed 时不留许可噪声：照旧说"驱动器会自动…"', () => {
+    const out = renderWorkStatus('流程（workprocess）', { ...status, activation: 'armed' })
+    expect(out.text).toContain('自动投递续跑回合')
+    expect(out.text).not.toContain('驱动器已停手')
+  })
 })
 
 describe('\`/work\` · handler 分派（假服务）', () => {
@@ -190,6 +231,7 @@ describe('\`/work\` · handler 分派（假服务）', () => {
     discard: async () => false,
     pauseActive: async () => [],
     resumePaused: async () => [],
+    setActivationFor: async () => false,
     ...over,
   })
   const view: WorkprocessStatus = { objective: 'x', stages: [], roundsStarted: 0 }
@@ -259,6 +301,28 @@ describe('\`/work\` · handler 分派（假服务）', () => {
     expect((await handler(invocation('resume', AGENTLESS))).text).toContain('没有被暂停的任务')
   })
 
+  it('arm / disarm 直接落许可（幂等如实回报；没有流程时不假装成功）', async () => {
+    const calls: string[] = []
+    const handler = workCommandHandler(stub({
+      view: async () => view,
+      setActivationFor: async (_agent, activation) => { calls.push(activation); return true },
+    }))
+    const armed = await handler(invocation('arm', AGENTLESS))
+    expect(armed.kind).toBe('success')
+    expect(armed.text).toContain('已放回')
+    expect((await handler(invocation('disarm', AGENTLESS))).text).toContain('已收回')
+    expect(calls).toEqual(['armed', 'disarmed'])
+
+    // 幂等（同值零写入）：如实说"本来就是"，不谎报改过
+    const idempotent = workCommandHandler(stub({ view: async () => view, setActivationFor: async () => false }))
+    expect((await idempotent(invocation('arm', AGENTLESS))).text).toContain('已经是 armed')
+    expect((await idempotent(invocation('disarm', AGENTLESS))).text).toContain('已经是 disarmed')
+
+    // 没有流程：和其他控制动作一样给人话错误
+    const bare = workCommandHandler(stub())
+    expect((await bare(invocation('arm', AGENTLESS))).kind).toBe('error')
+  })
+
   it('服务拒绝变成人话错误（不甩栈）', async () => {
     const handler = workCommandHandler(stub({ view: async () => { throw new Error('归属记录损坏') } }))
     const out = await handler(invocation('', AGENTLESS))
@@ -287,6 +351,7 @@ describe('\`/work\` · 真接线（apply 注册 + 真服务 + 真内核）', () 
     expect(commands.registered.map((c) => c.name)).toEqual(['work'])
     expect(commands.registered[0].input.hint).toContain('<目标>')
     expect(commands.registered[0].input.hint).toContain('edit')
+    expect(commands.registered[0].input.hint).toContain('arm')
 
     const show = await commands.registered[0].handler(invocation('', AGENTLESS))
     expect(show.kind).toBe('success')
@@ -306,5 +371,24 @@ describe('\`/work\` · 真接线（apply 注册 + 真服务 + 真内核）', () 
 
     expect((await commands.registered[0].handler(invocation('clear', AGENTLESS))).text).toContain('已丢弃')
     expect(await workProcessOf({ store }, 'session-1')).toBeUndefined()
+  })
+
+  // 真机那条恢复路径：会话 resume 自动落 disarmed ⇒ 人敲 `/work arm` 必须真把许可写回去
+  // （工具面的 arm 是真人专属，模型在自治回合里调不动；命令是人敲的，天然带那份授权）。
+  it('arm / disarm 真改许可；disarmed 时状态屏说"驱动器已停手"', async () => {
+    const { store, commands } = await seeded()
+    const handler = commands.registered[0].handler
+
+    expect((await handler(invocation('disarm', AGENTLESS))).text).toContain('已收回')
+    expect((await workProcessOf({ store }, 'session-1'))!.stages[0].key).toBe('repro')   // 流程没被动过
+    expect((await store.get('session-1'))!.rounds?.activation).toBe('disarmed')
+
+    const show = await handler(invocation('', AGENTLESS))
+    expect(show.text).toContain('驱动器已停手')
+    expect(show.text).toContain('/work arm')
+
+    expect((await handler(invocation('arm', AGENTLESS))).text).toContain('已放回')
+    expect((await store.get('session-1'))!.rounds?.activation).toBe('armed')
+    expect((await handler(invocation('', AGENTLESS))).text).toContain('自动投递续跑回合')
   })
 })

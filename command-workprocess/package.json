@@ -18,13 +18,13 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@deepseek-ai/dsh-llm": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
     "workprocess": "workspace:*"
   },
   "description": "/work 命令行：给目标即让 agent 拆阶段建流程，另可查看与干预（与 @deepseek-ai/dsh-command-goal 同形）",
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.0.4",
-    "@deepseek-ai/dsh-commands": "0.2.0-rc.2"
+    "@deepseek-ai/dsh-commands": "0.2.1-rc.2"
   },
   "dsh": {
     "bundle": {

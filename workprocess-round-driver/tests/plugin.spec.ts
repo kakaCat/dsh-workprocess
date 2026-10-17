@@ -15,11 +15,21 @@ import type { Context } from '@deepseek-ai/cordis'
 
 interface Sent { readonly id?: string; readonly source?: Record<string, unknown>; readonly content?: unknown }
 
+/** 真会**推进**流程的那几条投递（任务轮 / 规划轮 / 确认轮 / 收束轮）。 */
+const advancing = (sent: readonly Sent[]): readonly Sent[] =>
+  sent.filter((m) => (m.source as { notice?: string } | undefined)?.notice === undefined)
+
+/** **停手通告轮**（`notice: 'disarmed'`）：它不推进任何东西，只是把"驱动器停手了"说出口。 */
+const notices = (sent: readonly Sent[]): readonly Sent[] =>
+  sent.filter((m) => (m.source as { notice?: string } | undefined)?.notice === 'disarmed')
+
 /** 极简宿主：够驱动器决策 + 投递 + 围栏即可（流程状态用一个假域服务喂）。 */
 function harness(options: {
   status?: string
   process?: unknown
   activation?: string
+  /** 「谁收回的」耐久记号（只在 disarmed 时有意义）：'human' = 人亲手按的（粘性）；'driver' = 驱动器落的。 */
+  activationBy?: 'driver' | 'human'
   asked?: { plan?: { key: string; revision: number }; ask?: { key: string; revision: number } }
   /** 投递即抛错（queue-failed 纪律的观测面）。 */
   followupThrows?: boolean
@@ -70,6 +80,8 @@ function harness(options: {
   let activation = options.activation ?? 'armed'
   /** 域读数（process）是否抛错（可中途打开：模拟"投递成功后通道才坏"）。 */
   let processThrows = options.processThrows ?? false
+  /** 许可写盘是否抛错（模拟"放回许可时落不了盘"）。 */
+  let activationThrows = false
   /** 逐任务回合账（与归属记录同形：预算按任务计）。 */
   let taskRounds: Record<string, { rounds: number; grants: number }> = {}
   let asked: { plan?: { key: string; revision: number }; ask?: { key: string; revision: number } } | undefined
@@ -80,8 +92,14 @@ function harness(options: {
   const pauses: string[] = []
   /** 被落盘 block 的任务（`queue-failed` / `prompt-rejected` 的观测面；桩同样模拟域折叠）。 */
   const blocks: Array<{ taskId: string; code?: string }> = []
+  /** 阶段开工 / 收口（`start-stage` / `close-stage` 的观测面；桩顺带折叠阶段态，让决策环走得下去）。 */
+  const starts: string[] = []
+  const closes: string[] = []
+  /** 「谁收回的」记号（与内核 `setWorkActivation` 同一套规则：human 粘性、armed 清零、值没变时人可认领）。 */
+  let activationBy: 'driver' | 'human' | undefined = options.activationBy
   const domain = {
     activation: async (): Promise<string> => activation,
+    activationBy: async (): Promise<typeof activationBy> => activationBy,
     asked: async (): Promise<typeof asked> => asked,
     markAsked: async (_scope: string, kind: 'plan' | 'ask', key: string, revision: number): Promise<boolean> => {
       if (asked?.[kind]?.key === key && asked[kind]!.revision === revision) return false
@@ -89,10 +107,17 @@ function harness(options: {
       marks.push(kind + ':' + key + '@' + String(revision))
       return true
     },
-    setActivation: async (_scope: string, next: string): Promise<boolean> => {
+    setActivation: async (_scope: string, next: string, _revision?: number, by?: 'driver' | 'human'): Promise<boolean> => {
+      if (activationThrows) throw new Error('store offline')
       disarms.push(next)
-      if (activation === next) return false
+      // 与内核同规则：armed 清记号；armed→disarmed 记谁按的；同值再写时人可认领（'human' 粘性）、
+      // 驱动器不许覆盖人记号（否则宿主重启的自动再收会把人记号抹成机器的——审查发现的那条）。
+      const nextBy = next === 'armed' ? undefined
+        : activation !== 'disarmed' ? by ?? 'driver'
+        : by === 'human' ? 'human' : activationBy
+      if (activation === next && activationBy === nextBy) return false
       activation = next
+      activationBy = nextBy
       return true
     },
     pauseTask: async (_scope: string, taskId: string, _revision?: number): Promise<boolean> => {
@@ -125,8 +150,26 @@ function harness(options: {
       if (round <= used) return
       taskRounds = { ...taskRounds, [taskId]: { rounds: round, grants: taskRounds[taskId]?.grants ?? 0 } }
     },
-    startStage: async (): Promise<boolean> => false,
-    closeStage: async (): Promise<boolean> => false,
+    startStage: async (_scope: string, stageKey: string): Promise<boolean> => {
+      starts.push(stageKey)
+      // 模拟域折叠：该阶段开工、流程修订前进一格（决策环据此走到下一个结论）。
+      const current = process as { revision: number; stages: Array<{ key: string; state: string }> }
+      current.revision += 1
+      for (const stage of current.stages) {
+        if (stage.key === stageKey && stage.state === 'pending') stage.state = 'active'
+      }
+      return true
+    },
+    closeStage: async (_scope: string, stageKey: string): Promise<boolean> => {
+      closes.push(stageKey)
+      // 模拟域折叠：该阶段收口、流程修订前进一格。
+      const current = process as { revision: number; stages: Array<{ key: string; state: string }> }
+      current.revision += 1
+      for (const stage of current.stages) {
+        if (stage.key === stageKey && stage.state === 'active') stage.state = 'done'
+      }
+      return true
+    },
     blockTask: async (_scope: string, taskId: string, reason?: { code?: string }): Promise<boolean> => {
       blocks.push({ taskId, code: reason?.code })
       // 模拟域折叠：任务 blocked、任务修订与流程修订各前进一格。
@@ -206,12 +249,17 @@ function harness(options: {
     marks,
     pauses,
     blocks,
+    starts,
+    closes,
     cancels,
     whenIdleCalls,
     setProcessThrows: (next: boolean) => { processThrows = next },
-    /** 跑宿主卸载路径（ctx.effect 的清理回调，异步）。 */
+    setActivationThrows: (next: boolean) => { activationThrows = next },
+    /** 跑宿主卸载路径（ctx.effect 的清理回调，异步）+ **摘掉监听器**（宿主卸载插件时监听器一并
+        摘除——本桩原来只跑清理不摘监听，等于"卸载了但还活着"，会把 unload 之后的状态机测歪）。 */
     dispose: async (): Promise<void> => {
       for (const cleanup of cleanups) await (cleanup as () => Promise<void>)()
+      handlers.clear()
       await settle()
     },
     /**
@@ -337,6 +385,81 @@ describe('驱动器插件：宿主 goal-round-driver 同款设计', () => {
     apply(h.ctx, { drive: true })
     await h.fire('agent/created', { agent: h.agent, source: 'startup' })
     expect(h.disarms).toEqual([])
+  })
+
+  // 【跨会话真机踩过】goal 的许可与流程的许可各管各的，而恢复口令只有一个"继续"：
+  // 只 resume 了 goal ⇒ goal 轮照跑、模型照干活，流程这一半却仍冻着（disarmed 时 drive() 连副作用
+  // 都不落：auto 收口 / 开工 / 规划轮全停）。症状是"看着很忙，流程停在半路"——5/5 任务全达成、
+  // auto 收口永远不落、下一阶段永远开不了工。
+  it('目标 resume（人说"继续"）⇒ 流程许可跟着放回，并在空闲边界立刻推一拍', async () => {
+    const h = harness({ activation: 'disarmed' })
+    apply(h.ctx, { drive: true })
+    await h.fireSession({ type: 'goal/change', data: { operation: 'resume' } })
+    expect(h.disarms).toContain('armed')          // 许可真放回了
+    expect(h.sent).toHaveLength(1)                // 不用等人再说一句话：该投的那一轮已经投出
+    expect((h.sent[0].source as Record<string, unknown>).kind).toBe('work')
+  })
+
+  it('goal 的其它操作（create / block / complete）不动流程许可：那是 goal 自己的账', async () => {
+    const h = harness({ activation: 'disarmed' })
+    apply(h.ctx, { drive: true })
+    for (const operation of ['create', 'block', 'complete']) {
+      await h.fireSession({ type: 'goal/change', data: { operation } })
+    }
+    expect(h.disarms).toEqual([])
+    expect(h.sent).toHaveLength(0)                // 仍停手
+  })
+
+  it('许可本来就是 armed ⇒ resume 零写入（幂等，不刷状态）', async () => {
+    const h = harness()
+    apply(h.ctx, { drive: true })
+    await h.fireSession({ type: 'goal/change', data: { operation: 'resume' } })
+    expect(h.disarms).toEqual([])
+  })
+
+  // 真机那条流程的形状（盯盘升级的 engine 阶段）：**任务 5/5 达成 + `auto` + 下一段 pending**。
+  // 冻结发生在**重启那一刻**：会话 resume ⇒ 驱动器自己收回许可（记 by='driver'）⇒ 一个副作用都不落、
+  // 但要把停手说出口；人说"继续"（goal resume）后整条链（收口 → 开工 → 规划轮）要自己走完。
+  it('真机形状：5/5 达成 + auto + 下一段 pending——重启收许可（零副作用但说出口），"继续"后收口 → 开工 → 规划轮', async () => {
+    const h = harness({
+      process: {
+        id: 'wp:session-1', revision: 40, objective: '盯盘升级',
+        stages: [
+          {
+            key: 'engine', statement: '引擎修正', doneCriteria: [], state: 'active', closePolicy: 'auto',
+            tasks: [1, 2, 3, 4, 5].map((n) => ({
+              id: 'wt:engine:' + String(n), objective: 't' + String(n), phase: 'complete', revision: 2, maxRounds: 8,
+            })),
+          },
+          { key: 'validate', statement: '整体验收', doneCriteria: [], state: 'pending', closePolicy: 'human', tasks: [] },
+        ],
+      },
+    })
+    apply(h.ctx, { drive: true })
+
+    // ① 宿主重启 ⇒ 会话 resume ⇒ **驱动器自己**收回许可：仍然一个副作用都不落，但要说出口
+    await h.fire('agent/created', { agent: h.agent, source: 'resume' })
+    await h.fireStatus('idle')
+    expect(h.closes).toEqual([])                  // 通告**不是**推进：收口照样没落
+    expect(h.starts).toEqual([])                  //    下一段不开工
+    expect(advancing(h.sent)).toHaveLength(0)
+    expect(notices(h.sent)).toHaveLength(1)       // 但"驱动器停手了"必须让人看见
+    expect(String((notices(h.sent)[0].content as Array<{ text?: string }>)[0]?.text))
+      .toContain('<workprocess_disarmed>')
+    // 通告被接手（模型跑完那一轮）后回到空闲：预约撤掉，但许可仍不在 ⇒ 依旧不推进、不重复喊
+    await h.fireAdmitted()
+    await h.fireStatus('idle')
+    expect(h.closes).toEqual([])
+    expect(notices(h.sent)).toHaveLength(1)
+
+    // ② 人说"继续"（goal resume）⇒ 记号是 'driver' ⇒ 放行：收口 engine → 开工 validate → 投 validate 的规划轮
+    await h.fireSession({ type: 'goal/change', data: { operation: 'resume' } })
+    expect(h.closes).toEqual(['engine'])
+    expect(h.starts).toEqual(['validate'])
+    expect(advancing(h.sent)).toHaveLength(1)
+    const plan = advancing(h.sent)[0]
+    expect((plan.source as Record<string, unknown>).stageKey).toBe('validate')
+    expect((plan.source as Record<string, unknown>).kind).toBe('work')
   })
 
   it('流程收口（全阶段 done）⇒ 投终局收束轮，让"跑完了"在对话里看得见', async () => {
@@ -693,7 +816,8 @@ describe('停止语义（宿主 stop 按钮：turn/end aborted ⇒ 真的停住�
     await h.fireSession({ type: 'turn/end', data: { turn: 2, reason: { kind: 'aborted', reason: { kind: 'user' } } } })
     expect(h.disarms).toEqual(['disarmed'])
     await h.fireStatus('idle')
-    expect(h.sent).toHaveLength(1)              // 许可已收回：一拍都不投
+    expect(advancing(h.sent)).toHaveLength(1)   // 许可已收回：不再推进（只剩刚才那一条）
+    expect(notices(h.sent)).toHaveLength(1)     // 但"驱动器停手了"要说出口
   })
 
   it('回合到输出上限（max-tokens）⇒ 收回续跑许可（配置不适配，不许无限自动续跑）', async () => {
@@ -704,7 +828,26 @@ describe('停止语义（宿主 stop 按钮：turn/end aborted ⇒ 真的停住�
     await h.fireSession({ type: 'turn/end', data: { turn: 1, reason: { kind: 'max-tokens' } } })
     expect(h.disarms).toEqual(['disarmed'])
     await h.fireStatus('idle')
+    expect(advancing(h.sent)).toHaveLength(1)
+    expect(notices(h.sent)).toHaveLength(1)
+  })
+
+  // 【故意不处理的闭合标记】宿主类型文档：`interrupted` 是"crash-orphaned turn was closed after the
+  // fact…the loop never emits this marker live"（agent-loop resume 给没收尾的日志补的），`forked` 同源。
+  // 按 `aborted` 处理会在**每次崩溃修复 / fork**时误落暂停、误收许可——比不处理更糟。
+  it('turn/end = interrupted（崩溃孤儿的补记）⇒ 不暂停、不收许可，自动推进照旧', async () => {
+    const h = harness()
+    apply(h.ctx, { drive: true })
+    await h.fireStatus('idle')
     expect(h.sent).toHaveLength(1)
+    await h.fireAdmitted()
+    await h.fireSession({ type: 'turn/end', data: { turn: 1, reason: { kind: 'interrupted' } } })
+    expect(h.pauses).toEqual([])
+    expect(h.disarms).toEqual([])
+    // 许可与任务相位都没被这个标记动过 ⇒ 下一个空闲边界照常续投下一轮
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(2)
+    expect((h.sent[1].source as Record<string, unknown>).round).toBe(2)
   })
 
   it('排队中就被丢弃的回合 ⇒ 空闲边界同样把任务落盘暂停（fail closed）', async () => {
@@ -730,7 +873,8 @@ describe('停止语义（宿主 stop 按钮：turn/end aborted ⇒ 真的停住�
     await h.fireSession({ type: 'turn/end', data: { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } } })
     await h.fireStatus('idle')
     expect(h.pauses).toEqual([])                // 许可不在 ⇒ 不替人落暂停（停手就够了）
-    expect(h.sent).toHaveLength(1)
+    expect(advancing(h.sent)).toHaveLength(1)
+    expect(notices(h.sent)).toHaveLength(1)     // 停手通告照投（resume 收的许可，人不知情）
   })
 })
 
@@ -913,7 +1057,8 @@ describe('围栏纪律对齐宿主（disarm / block / 装载与卸载）', () =>
     await h.fire('agent/error', { agent: h.agent })
     expect(h.disarms).toEqual(['disarmed'])
     await h.fireStatus('idle')
-    expect(h.sent).toHaveLength(1)                       // 许可已收回：一拍都不投
+    expect(advancing(h.sent)).toHaveLength(1)            // 许可已收回：不再推进
+    expect(notices(h.sent)).toHaveLength(1)              // 停手通告照投
   })
 
   it('投递失败（followup 抛错）⇒ 任务落盘 block（queue-failed），不只 warn', async () => {
@@ -940,7 +1085,95 @@ describe('围栏纪律对齐宿主（disarm / block / 装载与卸载）', () =>
     await h.settle()
     expect(h.disarms).toEqual(['disarmed'])
     await h.fireStatus('idle')
+    expect(advancing(h.sent)).toHaveLength(0)            // 冷/热装载都不偷跑
+    expect(notices(h.sent)).toHaveLength(1)              // 但要说一句为什么不动
+  })
+
+  // ── 停手通告轮（`disarmOnResume` 不该是静默的）────────────────────────────
+  // 真机：机器重启 ⇒ 会话 resume ⇒ 自动收回许可 ⇒ 驱动器连副作用都不落，可会话里**看不出异常**
+  // （模型照跑、阶段照显示进行中），流程在 engine 阶段冻了半天。回执与 /work 给了"看得见"，
+  // 这一轮给"被推着知道"。
+  it('停手通告：驱动器自己收的许可 + 有该推进的事 ⇒ 投一轮说出口，且**只投一次**', async () => {
+    const h = harness()
+    apply(h.ctx, { drive: true })
+    await h.fire('agent/created', { agent: h.agent, source: 'resume' })
+    await h.fireStatus('idle')
+    const sent = notices(h.sent)
+    expect(sent).toHaveLength(1)
+    expect(sent[0].source?.notice).toBe('disarmed')
+    expect(sent[0].source?.round).toBeUndefined()        // 不消耗任何任务的回合预算
+    expect(sent[0].source?.taskId).toBeUndefined()
+    expect(String((sent[0].content as Array<{ text?: string }>)[0]?.text))
+      .toContain('<workprocess_disarmed>')
+    // 再空闲两次：同一条流程同一次停手不再重复喊（不刷屏）
+    await h.fireStatus('idle')
+    await h.fireStatus('idle')
+    expect(notices(h.sent)).toHaveLength(1)
+  })
+
+  it('人自己按的停手（activationBy = human）：不喊，且"继续"口令（goal resume）也**不放回**——人收的要人放', async () => {
+    const h = harness({ activation: 'disarmed', activationBy: 'human' })
+    apply(h.ctx, { drive: true })
+    await h.fireStatus('idle')
+    expect(h.sent).toHaveLength(0)                 // 不喊（明确意图不打扰）
+    await h.fireSession({ type: 'goal/change', data: { operation: 'resume' } })
+    expect(h.disarms).toEqual([])                  // 不放回
+    expect(h.sent).toHaveLength(0)                 // 也不推进
+  })
+
+  it('"问过了、在等人答"不是"停手卡住" ⇒ 不喊（闸与 driveOnce 同一份）', async () => {
+    const h = harness({
+      activation: 'disarmed',
+      process: {
+        id: 'wp:session-1', revision: 1, objective: 'x',
+        stages: [{
+          key: 'prep', statement: '准备', doneCriteria: [], state: 'active', closePolicy: 'human',
+          tasks: [{ id: 't-1', objective: '清洗', phase: 'complete', revision: 1, maxRounds: 5 }],
+        }],
+      },
+      asked: { ask: { key: 'stage-done:prep', revision: 1 } },
+    })
+    apply(h.ctx, { drive: true })
+    await h.fireStatus('idle')
     expect(h.sent).toHaveLength(0)
+  })
+
+  it('围栏放行停手通告轮：许可被收回也不拦它（它不是"推进"）', async () => {
+    const h = harness()
+    apply(h.ctx, { drive: true })
+    await h.fire('agent/created', { agent: h.agent, source: 'resume' })
+    await h.fireStatus('idle')
+    const notice = notices(h.sent)[0]
+    expect(notice).toBeDefined()
+    await h.fire('agent/inbox/claimed', { agent: h.agent, message: notice })
+    expect(await h.firePreStep([notice])).toMatchObject({ kind: 'enter', startsRequestSeries: true })
+  })
+
+  it('围栏反核：通告投递后许可已被放回 ⇒ 拒收过期的停手通告（不许谎报停手）', async () => {
+    const h = harness()
+    apply(h.ctx, { drive: true })
+    await h.fire('agent/created', { agent: h.agent, source: 'resume' })
+    await h.fireStatus('idle')
+    const notice = notices(h.sent)[0]
+    expect(notice).toBeDefined()
+    await h.fire('agent/inbox/claimed', { agent: h.agent, message: notice })
+    // 通告在认领后、进步骤前，许可被放回了（人说"继续"）——`running` 挡掉驱动的推进拍，
+    // 好让围栏单独面对"同一条预约 + 许可已 armed"这个组合。
+    h.setStatus('running')
+    await h.fireSession({ type: 'goal/change', data: { operation: 'resume' } })
+    expect(await h.firePreStep([notice])).toMatchObject({ kind: 'reject' })
+  })
+
+  it('goal resume 的写盘失败 ⇒ 许可原样、不刷状态，修好后再说一次"继续"照样放回', async () => {
+    const h = harness({ activation: 'disarmed', activationBy: 'driver' })
+    apply(h.ctx, { drive: true })
+    h.setActivationThrows(true)
+    await h.fireSession({ type: 'goal/change', data: { operation: 'resume' } })
+    expect(h.disarms).toEqual([])                  // 写失败：没有"armed"这一笔
+    h.setActivationThrows(false)
+    await h.fireSession({ type: 'goal/change', data: { operation: 'resume' } })
+    expect(h.disarms).toEqual(['armed'])           // 重试照常放回
+    expect(h.sent).toHaveLength(1)                 // 且推进立刻跟上（不用人再说一次）
   })
 
   it('卸载：收许可 + 预约置 stale + cancel 在跑回合 + 等 idle/run 收尾（不只置 stopping）', async () => {

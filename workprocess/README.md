@@ -22,7 +22,7 @@ apply(ctx: Context, config) ⇒
   · ctx.provide('workprocess', 域服务)   ← 官方 cordis provide，纯对象即可（无 instanceof Service 检查）
      域 API：process / createProcess / defineStages / editObjective / closeStage /
              createTask / editTask / pause·resume·block·complete·clearTask / discardProcess / closeProcess
-     人机干预：view / discard / pauseActive / resumePaused（agent 键）
+     人机干预：view / discard / pauseActive / resumePaused / setActivationFor（agent 键）
   · **发 `work/changed` typed 事件**（declare module '@deepseek-ai/cordis'；写路径统一进事件总线；
      payload = { scope, change }，丢弃为墓碑 change: undefined——外部插件可 ctx.on 订阅）
   · 回合边界驱动（agent/status = idle）+ 续跑投递（M4 迁往 round-driver 插件）
@@ -99,15 +99,16 @@ ln -sfn <repo>/workprocess ~/.dsh/profiles/desktop/node_modules/workprocess
 ## 命令行：`/work`（**独立包** `dsh-command-workprocess`）
 
 与宿主的 `/goal` 同构：**命令行也是一个独立包、独立装载行**，不塞在领域插件里；
-语法也逐字同形 —— `/work [<目标>|edit <目标>|pause|resume|clear]`。
+语法也逐字同形 —— `/work [<目标>|edit <目标>|pause|resume|arm|disarm|clear]`。
 
 - 装载：本包的 `cordis.patch.yml` 插两行——`workprocess`（本包）+ `dsh-command-workprocess`（命令行包），
   与宿主 base bundle 里 `dsh-goal` / `dsh-command-goal` 的关系一致。
 - 数据来源：命令行只消费 **`ctx.workprocess`**（本包 `ctx.provide` 出去的领域服务：view / discard /
-  pauseActive / resumePaused），不自己开存储域（同名域重复 `open` 会被响亮拒绝），也不绕内核改状态。
+  pauseActive / resumePaused / setActivationFor），不自己开存储域（同名域重复 `open` 会被响亮拒绝），也不绕内核改状态。
 - **`/work <目标>` 不由命令建流程**：流程必须带阶段表，而"该拆成哪几段"是判断——命令只把目标转成一条
   指令投给会话（`agent.followup`，source 自署 `user`），由 agent 用 `create_workstage` 自己拆。
-  `pause` / `resume` / `clear` 反过来是机械动作，命令直接落领域（模型不在也能用）。
+  `pause` / `resume` / `arm` / `disarm` / `clear` 反过来是机械动作，命令直接落领域（模型不在也能用）；
+  `arm` 尤其重要：`update_workstage action=arm` 是**真人专属**，模型在自治回合里调不动，人得有自己那条路。
 - 命令天然的授权：由人敲出来（投出去的指令也自署 `user`），所以 `edit` / `resume` / `clear` 这类真人专属
   动作在那一层合法（与工具面同源，不是开后门）。
 - 没装命令行包 = 只少一条命令行，六个工具照旧（两者是两条独立装载行）。
@@ -149,7 +150,7 @@ ln -sfn <repo>/workprocess ~/.dsh/profiles/desktop/node_modules/workprocess
 ## 测试
 
 ```bash
-pnpm test   # 全仓 282 条；本包 128 条：装配面 / 域声明与内核校验 / 归属缺省 / 真人判定 /
+pnpm test   # 全仓 347 条；本包 136 条：装配面 / 域声明与内核校验 / 归属缺省 / 真人判定 /
             #   空闲边界（开工·auto 收口·running 不动手）/ 续跑投递（自署来源·去重·上限刹车·门槛两处同值）/ **阶段规划轮** / **收口确认轮** /
-            #   服务面 ctx.workprocess（view / pauseActive / resumePaused / discard 幂等 / **逐任务回合账 + resume 追加预算**）/ 内核（含"域有意允许提前建任务"）
+            #   服务面 ctx.workprocess（view / pauseActive / resumePaused / setActivationFor / discard 幂等 / **逐任务回合账 + resume 追加预算**）/ 内核（含"域有意允许提前建任务"）
 ```

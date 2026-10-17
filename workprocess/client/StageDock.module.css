@@ -63,6 +63,20 @@
 .chevron { color: var(--dsw-alias-label-tertiary); flex: none; }
 .icon { color: var(--dsw-alias-label-secondary); flex: none; }
 
+/* 续跑许可被收回（disarmed）：头行徽标——**只读**，只回答"这屏会不会自己往下走"。
+   类名用 disarmed 不用 paused：任务的相位里已有一个 paused（`data-phase`），两回事别混。
+   没有徽标 = 正在自动推进（armed 是常态，故不占位置）。 */
+.disarmed {
+  flex: none;
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  color: var(--dsw-alias-state-warn-primary);
+  white-space: nowrap;
+}
+
 /* 列表。 */
 .list {
   list-style: none;

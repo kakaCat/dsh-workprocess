@@ -24,14 +24,14 @@ import {
 import { WORK_CHANGE_VERSION, WorkError, WorkProcessId, WorkTaskId } from './runtime.js'
 import type { WorkChangedNotification, WorkEvent } from './domain.js'
 import type {
-  CreateWorkProcessRequest, CreateWorkTaskRequest, EditWorkTaskRequest, WorkActivation, WorkBlockReason,
+  CreateWorkProcessRequest, CreateWorkTaskRequest, EditWorkTaskRequest, WorkActivation, WorkActivationBy, WorkBlockReason,
   WorkProcess, WorkProcessView, WorkProgress, WorkStage, WorkStageDraft, WorkTask, WorkTaskPhase,
 } from './types.js'
 
 // 选择性再导出（对齐宿主 index 的做法）：types 的 `WorkProcessId` / `WorkTaskId`（类型）与
 // runtime 的同名构造器会撞——类型改以 `…Type` 露出。
 export type {
-  WorkActivation, WorkBlockReason, WorkProcess, WorkProcessView, WorkProgress, WorkStage, WorkStageDraft,
+  WorkActivation, WorkActivationBy, WorkBlockReason, WorkProcess, WorkProcessView, WorkProgress, WorkStage, WorkStageDraft,
   WorkStageClosePolicy, WorkStageState, WorkTask, WorkTaskDraft, WorkTaskPhase, WorkTaskRef, WorkTaskTombstone,
   CreateWorkProcessRequest, CreateWorkTaskRequest, EditWorkTaskRequest,
   WorkProcessId as WorkProcessIdType, WorkTaskId as WorkTaskIdType,
@@ -125,6 +125,8 @@ export interface WorkRoundLedger {
   tasks?: Readonly<Record<string, WorkTaskRounds>>
   /** 续跑许可（控制面读数，不进事件表、不发 `work/changed`）。 */
   activation?: WorkActivation
+  /** **谁收回的**（只在 `disarmed` 时有意义；`armed` 时恒缺省）。规则见 `setWorkActivation`。 */
+  activationBy?: WorkActivationBy
 }
 
 /** 服务依赖（对齐宿主服务构造期注入的 ctx 面）。 */
@@ -265,19 +267,39 @@ export async function editWorkObjective(
  */
 export async function setWorkActivation(
   deps: WorkDeps, scope: string, activation: WorkActivation, expectedRevision?: number,
+  by?: WorkActivationBy,
 ): Promise<boolean> {
   let changed = false
   await deps.store.mutate(scope, (r) => {
     const prev = decodeExisting(r.workProcess)
     assertRevision(prev, expectedRevision)          // CAS 与写同区（理由见 `mutateWork`）
     if (prev === undefined) return undefined
-    if ((r.rounds?.activation ?? 'armed') === activation) return undefined
-    r.rounds = { ...r.rounds, activation }
+    const prevActivation = r.rounds?.activation ?? 'armed'
+    const prevBy = r.rounds?.activationBy
+    // 「谁收回的」记号（只在 disarmed 时有意义）：
+    //   · 值变化（armed → disarmed）：谁按的记谁；
+    //   · 同值再写：人可以把记号**认领**成 'human'（人后来亲手说"就停着"）；驱动器**不许覆盖**——
+    //     否则宿主重启时驱动器自动再收一次（armed→disarmed 没变）会把人记号悄悄抹成机器的，
+    //     "人亲手收的要人亲手放"就成空话（审查发现）。
+    const nextBy = activation === 'armed' ? undefined
+      : prevActivation !== 'disarmed' ? by ?? 'driver'
+      : by === 'human' ? 'human' : prevBy
+    if (prevActivation === activation && prevBy === nextBy) return undefined   // 幂等零写入
+    const rounds = { ...r.rounds, activation }
+    if (nextBy === undefined) delete rounds.activationBy; else rounds.activationBy = nextBy
+    r.rounds = rounds
     r.updatedAt = deps.now()
     changed = true
     return { changed: true }
   })
   return changed
+}
+
+/** 读"**谁收回的**"（没有流程 / 没记过 ⇒ `undefined`）。驱动器的 goal-resume 联动与停手通告都按它判。 */
+export async function workActivationByOf(deps: WorkDeps, scope: string): Promise<WorkActivationBy | undefined> {
+  const record = await deps.store.get(scope)
+  if (decodeExisting(record?.workProcess) === undefined) return undefined
+  return record?.rounds?.activationBy
 }
 
 /**
@@ -574,6 +596,10 @@ export function auditWorkRecord(scope: string, record: WorkRecordLike | undefine
   const activation = record?.rounds?.activation
   if (activation !== undefined && activation !== 'armed' && activation !== 'disarmed') {
     findings.push('续跑许可不合法：' + JSON.stringify(activation))
+  }
+  const activationBy = record?.rounds?.activationBy
+  if (activationBy !== undefined && activationBy !== 'driver' && activationBy !== 'human') {
+    findings.push('续跑许可的"谁收回的"不合法：' + JSON.stringify(activationBy))
   }
   return findings
 }

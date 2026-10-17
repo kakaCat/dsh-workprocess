@@ -1,10 +1,11 @@
 /**
  * `ctx.workprocess` 服务面（**给命令行等消费者用的那一层**）。
  *
- * 【守护什么】读与三种干预都在**真内核**上生效，且都按 `agent.session.id` 定位归属：
+ * 【守护什么】读与四种干预都在**真内核**上生效，且都按 `agent.session.id` 定位归属：
  *   ① `view`：阶段表 / 当前阶段 / 任务 / 已准入回合（没有流程 ⇒ undefined，不编）；
  *   ② `pauseActive` / `resumePaused`：只动**当前阶段**的对应相位任务，返回真被改的 id；
- *   ③ `discard`：幂等（没有流程 ⇒ false），丢了就读不到。
+ *   ③ `setActivationFor`：人机干预面放回 / 收回续跑许可（幂等；没有流程 ⇒ false）；
+ *   ④ `discard`：幂等（没有流程 ⇒ false），丢了就读不到。
  */
 import { describe, it, expect } from 'vitest'
 import { createWorkprocessService } from 'workprocess'
@@ -88,6 +89,42 @@ describe('续跑许可（服务面）', () => {
     const status = await service.view({ session: { id: 'session-1' } })
     expect(status?.activation).toBe('disarmed')
     expect(await service.setActivation('session-1', 'armed')).toBe(true)
+  })
+
+  // 命令面（人敲的 `/work arm`）走的就是这一条：**人机干预面**必须有 agent 键的许可写入——
+  // 工具面的 arm 是真人专属，模型在自治回合里调不动；恢复路径不能只剩"求模型想起来"。
+  // 「谁收回的」记号（`activationBy`）是 goal-resume 联动与停手通告的共同判据：
+  // 人亲手按的停手是**明确意图**——机器的同值重写（宿主重启时驱动器自动再收一次）不许覆盖它。
+  it('activationBy：armed 清零；armed→disarmed 记谁按的；同值重写时人可认领、机器不许覆盖', async () => {
+    const { service } = await seeded()
+    // 人亲手停手（命令面）
+    expect(await service.setActivationFor(agent, 'disarmed')).toBe(true)
+    expect(await service.activationBy('session-1')).toBe('human')
+    // 宿主重启 ⇒ 驱动器同值再收一次：人记号不许被抹成机器的（幂等零写入）
+    expect(await service.setActivation('session-1', 'disarmed', undefined, 'driver')).toBe(false)
+    expect(await service.activationBy('session-1')).toBe('human')
+    // 放回 ⇒ 记号清零
+    expect(await service.setActivation('session-1', 'armed')).toBe(true)
+    expect(await service.activationBy('session-1')).toBeUndefined()
+    // 驱动器自己落的停手记 'driver'
+    expect(await service.setActivation('session-1', 'disarmed', undefined, 'driver')).toBe(true)
+    expect(await service.activationBy('session-1')).toBe('driver')
+    // 人随后亲手说"就停着"：记号认领成 human
+    expect(await service.setActivationFor(agent, 'disarmed')).toBe(true)
+    expect(await service.activationBy('session-1')).toBe('human')
+    // 没有流程 ⇒ 读不到记号
+    expect(await service.activationBy('session-nope')).toBeUndefined()
+  })
+
+  it('setActivationFor：按 agent 定位归属（幂等；没有流程 / 认不出 agent ⇒ false）', async () => {
+    const { service } = await seeded()
+    expect(await service.setActivationFor(agent, 'disarmed')).toBe(true)
+    expect(await service.activation('session-1')).toBe('disarmed')
+    expect(await service.setActivationFor(agent, 'disarmed')).toBe(false)   // 幂等零写入
+    expect(await service.setActivationFor(agent, 'armed')).toBe(true)
+    expect(await service.setActivationFor(agent, 'armed')).toBe(false)
+    expect(await service.setActivationFor({ session: { id: 'nope' } }, 'disarmed')).toBe(false)
+    expect(await service.setActivationFor(undefined, 'disarmed')).toBe(false)
   })
 })
 

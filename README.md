@@ -91,9 +91,9 @@ client/*.tsx ──────────────── tsdown ─▶ lib/
 ```bash
 pnpm install
 pnpm typecheck
-pnpm test          # 305 条（17 个 *.spec.ts）：领域插件 132（内核 61 · 插件 40 · 伴生件 9 · 服务 8
-                   #        · 视图 4 · 客户端 7 · 内核纯度 3）/ 回合驱动器 79（决策 22 · 插件 25
-                   #        · 伴生件 20 · 循环 12）/ 工具面 76（处理器+授权+归属边界 41 · 工具壳 14 · HTTP 14 · 端到端 2 · 插件 5）/ 命令行 18
+pnpm test          # 347 条（17 个 *.spec.ts）：领域插件 136（内核 61 · 插件 40 · 伴生件 9 · 服务 10
+                   #        · 视图 4 · 客户端 9 · 内核纯度 3）/ 回合驱动器 107（决策 22 · 插件 50
+                   #        · 伴生件 22 · 循环 13）/ 工具面 80（处理器+授权+归属边界 41 · 工具壳 18 · HTTP 14 · 端到端 2 · 插件 5）/ 命令行 24
                    #   ↑ `pretest` 先跑 `workprocess` 的 `build:client`：客户端契约测试读的是产物 lib/client.js
 pnpm build         # tsc 出中间态 dist/types/（逐模块 + .d.ts），tsdown 按**装载入口**收成
                    # dist/index.js（+ 伴生件 dist/invariant.js）——宿主加载的就是那一个文件
@@ -211,6 +211,7 @@ node scripts/audit-storage.mjs <文件>      # 审指定文件（拿副本验证
 | 投递即消耗（预约撤得太早） | 任务轮与 blocked 收束轮**同时**到手：预算被烧光、agent 一次手都没动 | 撤预约只在 `agent/status → idle`（真·空闲转换）里做；`drive()` 见预约挂着就直接返回（宿主同款） |
 | **stop 按钮点了不停** | 人点宿主 stop，agent 停一下立刻又跑：驱动器不看 `turn/end` 的中止原因，agent 一空闲就投下一轮 | 对齐宿主 goal driver：`user/message` 受理记 `admitted`；`turn/end` = `aborted` ⇒ 被取消的回合在空闲边界把任务**落盘暂停**（`/work` 看得见、`resume` 放行），不是我们那一轮 ⇒ 收回续跑许可；`max-tokens` 同。上一轮**没跑成**（排队中被丢弃/被认领没进步骤/中途被中止）一律先落盘暂停再考虑下一拍；跑成过的（`admitted`）不暂停、照常续投（见 `workprocess-round-driver/README.md`「停止语义」） |
 | 收口弹框「跳过」被报成「还要补做」 | 人在收口确认弹框点「跳过」（宿主 UI 编码 `selected: []` 无 `custom`），工具回 `WORK_TOOL_HUMAN_DECLINED` 且叙述「人在弹框里选了『还要补做』」——替人编造一句没说过的话，agent 还可能据此乱建任务 | 适配器裁决映射加第三格：「跳过」⇒ `cancelled`（与 `ASK_CANCELLED` 同桶，落 `WORK_TOOL_HUMAN_UNAVAILABLE` 停手等人）；`tool-workprocess/src/authority.ts` + 三格回归测试（`workprocess/tests/plugin.spec.ts` 人机确认接线） |
+| **disarm 没有指示灯**（跨会话静默冻死） | 会话 `resume` 自动落 `disarmed` 后驱动器**连副作用都不落**（auto 收口 / 阶段开工 / 规划轮全停），可回执只报「3/5 阶段已收口（当前 engine）」、`/work` 还写着「驱动器在边界上自动收口」——agent 以为流程在推进，一边干等一边另找活干（真机：机器重启把许可收回后，盯盘流程 5/5 任务全达成、engine 的 auto 收口永远不落、validate 永远开不了工，而 goal 轮照跑、会话看着很忙） | 四层一起补：① **回执带许可**——`get_workstage` 无条件报 `activation`，disarmed 时明写「驱动器已停手 + 怎么放回」，`get_worktask` 带逐任务 id/相位（原来只报「5 个任务」）；② **人对齐**——`/work` 在 disarmed 时先说停手、把「会自动…」降级成「放回后会…」，并给 `/work arm` 这条机械路径；③ **结构耦合**——同会话 goal 被 `resume`（= 人说「继续」）⇒ 流程许可跟着放回、空闲边界立刻推一拍；④ **推着知道**——空闲边界投一条**停手通告轮**（`<workprocess_disarmed>`，只读判定 + 每实例一次），UI 头行挂「已停手」徽标 |
 
 ## 两处去重记号都是耐久的
 
@@ -225,14 +226,24 @@ node scripts/audit-storage.mjs <文件>      # 审指定文件（拿副本验证
 
 | | 说明 |
 |---|---|
-| 落点 | 归属记录的 `rounds.activation`（**不进事件表、不发 `work/changed`**：它是控制面读数，不是领域值） |
-| 读 | `get_workstage` 回执里的 `activation`；服务面 `ctx.workprocess.activation(scope)` |
+| 落点 | 归属记录的 `rounds.activation`（**不进事件表、不发 `work/changed`**：它是控制面读数，不是领域值）+ 伴生记号 `rounds.activationBy`（**谁收回的**：`'human'` 粘性 / `'driver'`；只在 disarmed 时有意义，armed 清零） |
+| 读 | `get_workstage` 回执：JSON 里的 `activation` + **摘要行无条件明写**「续跑许可 armed / disarmed」（disarmed 时另起一行写清"驱动器已停手"与怎么放回）；`/work` 状态屏同款；客户端阶段条头行的**「已停手」徽标**（`dockActivationBadge`）；服务面 `ctx.workprocess.activation(scope)` |
 | 自动收 | 会话 **`resume`**（宿主重启后从盘上加载）⇒ 驱动器落 `disarmed`，一拍都不推进（对齐 goal："after session resume or fork, an active goal is disarmed"） |
-| 人工放 | `update_workstage action=arm`（**真人专属**；agent 自发起 = 自签通行证，一律拒） |
-| 人工收 | `update_workstage action=disarm`（同上，真人专属） |
+| 人工放 | `update_workstage action=arm`（**真人专属**）；或命令面 `/work arm`（人敲的命令天然带那份授权，模型不在场也能用）；或**同会话的 goal 被 `resume`**——"继续"这一个口令同时放回两个许可位（见下），**但只放回 `activationBy = 'driver'` 的那一格**：人亲手按的停手（`'human'`）机器口令不许放回 |
+| 人工收 | `update_workstage action=disarm`（同上，真人专属）；或 `/work disarm`（两者都记 `activationBy: 'human'`——**粘性**：机器的同值重写不覆盖） |
 | 关掉自动收 | 驱动器配置 `disarmOnResume: false`（长时间无人值守的流程要跨重启继续跑时用） |
+| 说出口 | 许可被**驱动器自己**收回（`activationBy = 'driver'`：resume / error / 非本轮的 aborted / max-tokens / 装载 / 检查点失败）且只读判定说"有该推进的事" ⇒ 空闲边界投一条**停手通告轮**（`<workprocess_disarmed>`，不消耗回合预算；围栏反核要求它进步骤时许可**仍是** disarmed——被放回后过期的通告拒收，不许谎报停手）：每实例每条流程一次；`activationBy = 'human'`（人亲手按的）不喊（那是明确意图） |
 
 `disarmed` 顺带解决"重启后重复打扰"：驱动器停手 ⇒ 既不重投规划轮，也不重问收口确认。
+
+**停手通告的"只喊一次"是进程内记号**（`noticeSentFor = processId@revision`，与上表那两处耐久记号不同）：
+重启后重新喊一遍是**对的**——刚重启完正是人最需要知道"流程还停着"的时刻。
+
+**两个许可位是两套（`goal.activation` 与 `rounds.activation`），而人的恢复口令只有一个"继续"**——
+这正是"disarm 没有指示灯"那个坑的根：只 resume 了 goal，goal 轮照跑、流程这一半仍冻着。
+故驱动器在 `goal/change` 的 `resume` 上把流程许可一起放回（goal 的 `resume` 本身是真人专属动作，
+跟着放行不构成"自己给自己发通行证"）。**反向不联动**：goal 被 `block` / `complete` 时流程许可不动——
+那是 goal 自己的账，不是流程的。
 
 ## 六条不变量
 

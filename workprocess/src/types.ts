@@ -54,6 +54,16 @@ export type WorkStageClosePolicy = 'human' | 'auto'
 export type WorkActivation = 'armed' | 'disarmed'
 
 /**
+ * **谁收回的**续跑许可（只在 `disarmed` 时有意义，`armed` 时恒缺省）：
+ *   · `'human'`——人亲手按的（`/work disarm`、`update_workstage action=disarm`）：**明确意图，粘性**
+ *     ——机器的同名重写（宿主重启时驱动器自动再收一次）不许覆盖它，goal 的 `resume`（"继续"口令）
+ *     也不放回它——人亲手收的要人亲手放；
+ *   · `'driver'`——驱动器落的（resume / error / 非本轮的 aborted / max-tokens / 装载 / 检查点失败）：
+ *     人**不知情**的停手，停手通告轮与"goal resume 顺带放回"都只认这一格。
+ */
+export type WorkActivationBy = 'driver' | 'human'
+
+/**
  * 阻塞原因（对齐宿主 `GoalBlockReason`：**结构化**，不是自由文本）。
  * 人靠 `code` 判断"该找谁"（额度 / 鉴权 / 等人裁 / 等上游）；`message` 才是给人看的那句。
  */

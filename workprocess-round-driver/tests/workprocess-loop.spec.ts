@@ -18,7 +18,7 @@ import {
 import type { WorkProcess, WorkRecordLike } from 'workprocess'
 import {
   decideWorkRound, DEFAULT_MAX_ROUNDS, factsOf as projectedFactsOf, tickWorkprocess,
-  renderWorkPlanPrompt, renderWorkRoundPrompt, renderWorkWrapupPrompt,
+  renderWorkNoticePrompt, renderWorkPlanPrompt, renderWorkRoundPrompt, renderWorkWrapupPrompt,
 } from 'workprocess-round-driver'
 import type { RoundDecision, WorkFacts, RoundScopeFacts } from 'workprocess-round-driver'
 
@@ -370,6 +370,22 @@ describe('两种轮次的分工口径（防"规划轮把活干完、回合预算
     expect(blocked).toContain('<workprocess_blocked>')
     expect(blocked).toContain('round-limit')
     expect(blocked).toContain('不要再调任何工具')
+  })
+
+  it('停手通告轮：说清停在哪、怎么放回，并明确本轮不能自己放行', () => {
+    const text = renderWorkNoticePrompt({
+      processObjective: '盯盘升级',
+      stage: { key: 'engine', state: 'active', tasksDone: 5, tasksTotal: 5, closePolicy: 'auto' },
+    })
+    expect(text).toContain('<workprocess_disarmed>')
+    expect(text).toContain('驱动器已停手')
+    expect(text).toContain('`engine`')                 // 停在哪一段
+    expect(text).toContain('任务 5/5 达成')
+    expect(text).toContain('/work arm')                // 放回方式
+    expect(text).toContain('不要再调任何工具')
+    expect(text).toContain('会被拒')                   // 自治回合里 arm 一定被拒，别白跑一轮
+    // 全阶段收口过的流程没有"当前阶段" ⇒ 不编一段出来
+    expect(renderWorkNoticePrompt({ processObjective: 'x' })).not.toContain('停在这一段')
   })
 
   it('任务轮才是干活的那一轮（带任务、带轮号、说明做完停手）', () => {

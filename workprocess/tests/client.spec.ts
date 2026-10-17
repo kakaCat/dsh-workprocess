@@ -5,7 +5,8 @@
  *   ① loader 形态：注册 id 必须 === 包名；factory 返回模块面（name / inject / apply）；
  *   ② `apply` 后**确实注册进 `conversation.input.dock`**（name / id / order 逐字）；
  *   ③ 穷举映射无兜底：阶段 3 态 / 任务 4 相位的取值表钉死，未知输入返回 undefined；
- *   ④ 降级三态裁决：loading（未拿到）/ none（无流程）/ error（未成功就失败）/ ready（含 stale 标灰）。
+ *   ④ 降级三态裁决：loading（未拿到）/ none（无流程）/ error（未成功就失败）/ ready（含 stale 标灰）；
+ *   ⑤ 续跑许可徽标：disarmed 才有徽标（armed 不占位置）——界面上"流程是停的还是走的"的唯一指示灯。
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { readFileSync } from 'node:fs'
@@ -19,6 +20,7 @@ interface LoaderSpec {
       stageDotState: (state: string) => string | undefined
       taskDotState: (phase: string) => string | undefined
       viewModelOf: (snapshot: unknown, failed: boolean) => { kind: string; wire?: unknown; stale?: boolean }
+      dockActivationBadge: (wire: { activation?: string }) => { text: string; hint: string } | undefined
     }
     apply: (ctx: unknown) => void
   }
@@ -134,5 +136,26 @@ describe('降级三态裁决', () => {
       .toEqual({ kind: 'ready', wire, stale: false })
     expect(viewModelOf({ scope: 's', process: wire }, true))
       .toEqual({ kind: 'ready', wire, stale: true })
+  })
+})
+
+/**
+ * 真机教训：`activation` 早就跟着数据面到了浏览器，却没人渲染——于是"驱动器已停手"在界面上
+ * **没有任何痕迹**（会话里模型照跑、阶段条照显示"进行中"），跨会话那条盯盘流程冻在 engine 阶段
+ * 半天，屏幕上什么都没说。
+ */
+describe('续跑许可徽标（头行指示灯：没有徽标 = 正在自动推进）', () => {
+  it('disarmed ⇒ 有徽标（文案 + 放回方式都在 tooltip 里）', () => {
+    const { dockActivationBadge } = face().internals
+    const badge = dockActivationBadge({ activation: 'disarmed' })
+    expect(badge?.text).toBe('已停手')
+    expect(badge?.hint).toContain('驱动器不会自动收口 / 开工 / 投续跑回合')
+    expect(badge?.hint).toContain('/work arm')
+  })
+
+  it('armed（常态）与缺省都不占位置', () => {
+    const { dockActivationBadge } = face().internals
+    expect(dockActivationBadge({ activation: 'armed' })).toBeUndefined()
+    expect(dockActivationBadge({})).toBeUndefined()
   })
 })

@@ -15,7 +15,7 @@ import { WORK_TOOL_CODES, WORK_TOOL_REGISTRY, workPolicyText } from 'tool-workpr
 import { STAGE_ACTIONS, WORK_TOOL_FACTORIES } from 'tool-workprocess'
 import type { WorkToolDeps } from 'tool-workprocess'
 import type { WorkRecordLike, WorkStoreLike } from 'workprocess'
-import { WORK_ERROR_CODES, createWorkprocessService, startWorkStage } from 'workprocess'
+import { WORK_ERROR_CODES, closeWorkProcess, createWorkprocessService, startWorkStage } from 'workprocess'
 
 interface ToolLike {
   name?: string
@@ -86,6 +86,83 @@ describe('工具壳 · 与登记表同源', () => {
       // 渲染的是**第二个**形参（宿主口径 render(args, value)）：读成第一个只会渲染出一行"未成功"。
       expect(String(blocks[0].text)).toContain('已收口')
     }
+  })
+})
+
+/**
+ * 回执摘要就是模型**唯一**看得见的东西（`render` 返回的内容块覆盖结构化回执）。
+ * 真机教训：摘要只报"3/5 阶段已收口（当前 engine）"，而 `drive()` 读到 `disarmed` 时连副作用都不落
+ * ——于是 disarmed 的流程在模型眼里与"驱动器正在推进"一模一样，谁都没去 arm，流程静默冻死
+ * （跨会话那条盯盘流程 5/5 任务全达成、auto 收口永远不落、下一阶段永远开不了工）。
+ */
+describe('回执摘要 · 续跑许可与任务相位必须看得见（disarm 要有指示灯）', () => {
+  /** 取某个工具的 `render` 结果文本（宿主口径：渲染第二个形参）。 */
+  const renderOf = (tools: Record<string, ToolLike>, handler: string, value: unknown): string => {
+    const output = (tools[handler] as { output?: { render?: (a: unknown, v: unknown) => unknown } }).output
+    return String((output?.render?.({}, value) as Array<{ text?: string }>)[0]?.text)
+  }
+
+  async function seededTools() {
+    const records = { 'ws-a': { updatedAt: 1 } }
+    const deps = depsOf(records, true)
+    const tools = allTools(deps)
+    await tools.createWorkstage.execute({
+      scope: 'ws-a', objective: '盯盘升级', stages: [{ key: 'engine', statement: '引擎修正', close_policy: 'auto' }],
+    })
+    await tools.createWorktask.execute({ scope: 'ws-a', stage_key: 'engine', objective: '迟滞闩锁' })
+    return { deps, tools }
+  }
+
+  it('阶段摘要带当前阶段的达成度与收口策略（"5/5 达成 + auto" 是"只差驱动器落收口"的判据）', async () => {
+    const { tools } = await seededTools()
+    await tools.updateWorktask.execute({ scope: 'ws-a', task_id: 'wt:engine:1', action: 'complete' })
+    const text = renderOf(tools, 'getWorkstage', await tools.getWorkstage.execute({ scope: 'ws-a' }))
+    expect(text).toContain('0/1 阶段已收口')
+    expect(text).toContain('当前 engine')
+    expect(text).toContain('任务 1/1 达成')
+    expect(text).toContain('收口 auto')
+    expect(text).toContain('续跑许可 armed')
+  })
+
+  it('disarmed：摘要明写"驱动器已停手"与放回动作（否则模型以为收口会自动落）', async () => {
+    const { deps, tools } = await seededTools()
+    await tools.updateWorktask.execute({ scope: 'ws-a', task_id: 'wt:engine:1', action: 'complete' })
+    await deps.domain.setActivationFor({ session: { id: 'ws-a' } }, 'disarmed')
+
+    const text = renderOf(tools, 'getWorkstage', await tools.getWorkstage.execute({ scope: 'ws-a' }))
+    expect(text).toContain('disarmed')
+    expect(text).toContain('驱动器已停手')
+    expect(text).toContain('update_workstage action=arm')
+    expect(text).toContain('任务 1/1 达成')          // 状态原样：任务没丢，只是没人推
+    expect(text).not.toContain('续跑许可 armed')
+  })
+
+  it('已收口的流程不带许可尾巴（终止记录的一切写都被内核拒，别再教人去 arm）', async () => {
+    const { deps, tools } = await seededTools()
+    // 开工是驱动器的动作（没有工具动词）：用内核把阶段开起来，再走任务完成与人工收口。
+    await startWorkStage({ store: deps.store, now: deps.now }, 'ws-a', 'engine')
+    await tools.updateWorktask.execute({ scope: 'ws-a', task_id: 'wt:engine:1', action: 'complete' })
+    await tools.updateWorkstage.execute({ scope: 'ws-a', stage_key: 'engine', action: 'done' })
+    // 流程收口同理（终止水印）：
+    await closeWorkProcess({ store: deps.store, now: deps.now }, 'ws-a')
+    await deps.domain.setActivationFor({ session: { id: 'ws-a' } }, 'disarmed')   // 最误导的组合
+
+    const text = renderOf(tools, 'getWorkstage', await tools.getWorkstage.execute({ scope: 'ws-a' }))
+    expect(text).toContain('1/1 阶段已收口')
+    expect(text).toContain('全部收口')
+    expect(text).not.toContain('续跑许可')          // 没有许可尾巴
+    expect(text).not.toContain('action=arm')
+  })
+
+  it('任务摘要带 id 与相位（只报计数 = 模型看不见谁已完成，只能去翻库猜）', async () => {
+    const { tools } = await seededTools()
+    await tools.createWorktask.execute({ scope: 'ws-a', stage_key: 'engine', objective: '日上限' })
+    await tools.updateWorktask.execute({ scope: 'ws-a', task_id: 'wt:engine:1', action: 'complete' })
+
+    const one = renderOf(tools, 'getWorktask', await tools.getWorktask.execute({ scope: 'ws-a', stage_key: 'engine' }))
+    expect(one).toContain('2 个任务')
+    expect(one).toContain('wt:engine:1 complete')
+    expect(one).toContain('wt:engine:2 active')
   })
 })
 

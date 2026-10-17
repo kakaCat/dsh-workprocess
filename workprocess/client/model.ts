@@ -67,3 +67,29 @@ export function viewModelOf(snapshot: WorkSnapshot | undefined, failed: boolean)
   if (snapshot.process === null || snapshot.process === undefined) return { kind: 'none' }
   return { kind: 'ready', wire: snapshot.process, stale: failed === true }
 }
+
+/** 头行徽标（文本 + tooltip）——`undefined` = 不占位置。 */
+export interface DockBadge {
+  readonly text: string
+  readonly hint: string
+}
+
+/**
+ * **续跑许可的展示裁决**（纯函数）：`disarmed` ⇒ 头行给一个徽标。
+ *
+ * 【为什么必须有】`activation` 早就随数据面到了浏览器（`WorkWire.activation`，见 `../src/view.js`），
+ * 只是没人渲染——于是"驱动器已停手"在界面上**没有任何痕迹**：模型照跑、阶段条照显示"进行中"，
+ * 人分不出流程是停的还是走的（真机：机器重启把许可收回后，跨会话的盯盘流程在 engine 阶段冻了
+ * 半天，屏幕上什么都没说）。`armed` 是常态 ⇒ 不占位置（**没有徽标 = 正在自动推进**）。
+ *
+ * 徽标只报读数与放回方式，**不提供按钮**：放回是真人专属动作（工具面 `process_arm`），
+ * 界面这一格是只读的（D-4：dock 不做推进/收口）。
+ */
+export function dockActivationBadge(wire: Pick<WorkWire, 'activation'>): DockBadge | undefined {
+  if (wire.activation !== 'disarmed') return undefined
+  return {
+    text: '已停手',
+    hint: '续跑许可 disarmed：驱动器不会自动收口 / 开工 / 投续跑回合（任务与阶段状态原样保留）。'
+      + '放回：会话里 /work arm，或让人说一句"继续"（resume 目标也会把流程许可一起放回）。',
+  }
+}

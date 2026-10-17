@@ -563,10 +563,12 @@ export async function updateWorkstage(
       return { success: true, scope, action, objective, changed }
     }
     if (action === 'arm' || action === 'disarm') {
+      // 这是**人亲手按的**停手（真人专属动作）：记 `by: 'human'`——粘性记号，机器的口令
+      // （goal 的 resume、宿主重启时驱动器自动再收一次）都不许替人放回/改写。
       // 真人专属（"要不要让它自己往下跑"是人的决定）：agent 自行放行自己 = 自签通行证。
       authorize('process_arm', authorityOf(deps, exec))
       const activation = action === 'arm' ? 'armed' as const : 'disarmed' as const
-      const changed = await deps.domain.setActivation(scope, activation, revision)
+      const changed = await deps.domain.setActivation(scope, activation, revision, 'human')
       if (changed) {
         notice(deps, exec, 'process-' + action,
           action === 'arm'
@@ -876,16 +878,62 @@ const EDIT_MAX_ROUNDS_PARAM = { type: 'number', description: 'edit 用：换掉�
 /** 回执 schema：字段随工具不同，故放开；`render` 给宿主一行摘要。 */
 const REPLY_SCHEMA = { type: 'object', additionalProperties: true } as const
 
+/**
+ * **续跑许可必须出现在回执里**（真机教训）：
+ *
+ * 摘要原先只报"3/5 阶段已收口（当前 engine）"，而 `drive()` 读到 disarmed 时是**连副作用都不落**
+ * 的（auto 收口 / 阶段开工 / 规划轮全停）——于是 disarmed 的流程在模型眼里与"驱动器正在推进"
+ * 一模一样：模型以为收口会自动落、一边干等一边另找活干，谁都没去 arm，流程静默冻死（跨会话那
+ * 条盯盘流程就冻在 engine 阶段，5/5 任务全达成、auto 收口永远不落、validate 永远开不了工）。
+ * 故许可读数**无条件**报出；disarmed 时再把恢复动作写成一句可照做的话。
+ */
+function activationNote(o: Record<string, unknown>): string {
+  if (o.activation !== 'disarmed') return ' · 续跑许可 armed'
+  return ' · 续跑许可 **disarmed**\n'
+    + '⚠ 驱动器已停手：自动收口 / 阶段开工 / 续跑回合都不会发生（任务状态照旧，只是没人推）。'
+    + '人说「继续」时调 `update_workstage action=arm` 放回（真人专属，agent 自己不能放行自己）。'
+}
+
+/** `get_workstage` 的摘要：走到哪 + 当前阶段的达成度 + 许可读数。 */
+function renderStageReply(toolName: string, o: Record<string, unknown>): string {
+  const list = o.stages as Array<{
+    key?: string; state?: string; tasks?: number; tasks_done?: number; close_policy?: string
+  }>
+  const current = o.current_stage
+  let line = toolName + '：' + String(list.filter((s) => s.state === 'done').length) + '/' + String(list.length) + ' 阶段已收口'
+  if (current === undefined || current === null) {
+    line += '（全部收口）'
+  } else {
+    // 当前阶段的**达成度**是"该不该有人动手"的判据（5/5 达成 + auto = 只差驱动器落收口）：
+    // 只报阶段键等于让模型去猜自己是干完了还是在半路。
+    const stage = list.find((s) => s.key === current)
+    line += '（当前 ' + String(current)
+    if (stage !== undefined) {
+      line += '：任务 ' + String(stage.tasks_done ?? 0) + '/' + String(stage.tasks ?? 0) + ' 达成，收口 ' + String(stage.close_policy ?? 'human')
+    }
+    line += '）'
+  }
+  // 已收口的流程一切写都被内核拒（终止记录）：许可读数对它没有意义，别再带尾巴
+  // （命令面 `/work` 同款判据——两面不许一个带一个不带）。
+  if (o.closed_at !== undefined) return line
+  return line + activationNote(o)
+}
+
+/** `get_worktask` 的摘要：**逐任务 id + 相位**（只报计数 = 模型看不见谁已完成）。 */
+function renderTaskReply(toolName: string, o: Record<string, unknown>): string {
+  const list = o.tasks as Array<{ id?: string; phase?: string; blocked_reason?: string }>
+  const items = list.map((t) => String(t.id ?? '?') + ' ' + String(t.phase ?? '?')
+    + (t.blocked_reason === undefined ? '' : '（blocked:' + String(t.blocked_reason) + '）'))
+  return toolName + '：' + String(list.length) + ' 个任务'
+    + (items.length === 0 ? '' : '（' + items.join(' · ') + '）')
+}
+
 /** 回执摘要（人看的一行；不改变语义）。 */
 function renderReply(toolName: string, value: unknown): string {
   const o = (value ?? {}) as Record<string, unknown>
   if (o.success !== true) return toolName + ' 未成功：' + String(o.error ?? '未知原因')
-  if (Array.isArray(o.stages)) {
-    const list = o.stages as Array<{ state?: string }>
-    return toolName + '：' + list.filter((s) => s.state === 'done').length + '/' + list.length + ' 阶段已收口'
-      + (o.current_stage === undefined || o.current_stage === null ? '（全部收口）' : '（当前 ' + String(o.current_stage) + '）')
-  }
-  if (Array.isArray(o.tasks)) return toolName + '：' + o.tasks.length + ' 个任务'
+  if (Array.isArray(o.stages)) return renderStageReply(toolName, o)
+  if (Array.isArray(o.tasks)) return renderTaskReply(toolName, o)
   if (o.changed === false) {
     return toolName + '：无变更' + (o.reason === undefined ? '' : '（' + String(o.reason) + '）')
   }

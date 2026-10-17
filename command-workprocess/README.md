@@ -2,15 +2,17 @@
 
 `/work` 命令行（**独立包、独立装载行**，与宿主 `@deepseek-ai/dsh-command-goal` 同形）。
 
-## 语法（与 `/goal [<目标>|edit <目标>|pause|resume|clear]` 逐字同形）
+## 语法（与 `/goal [<目标>|edit <目标>|pause|resume|arm|disarm|clear]` 逐字同形）
 
 | 命令 | 谁来做 | 作用 |
 |---|---|---|
-| `/work` | 命令直读 | 看：目标 / 各阶段（key · 态 · 收口策略 · 任务 done/total）/ 当前阶段的任务 / 回合（**本任务**已准入/上限 + 全程累计）/ 谁该动 |
+| `/work` | 命令直读 | 看：目标 / 各阶段（key · 态 · 收口策略 · 任务 done/total）/ 当前阶段的任务 / 回合（**本任务**已准入/上限 + 全程累计）/ 谁该动。**许可被收回（disarmed）时先说"驱动器已停手"**，不再承诺"会自动收口/开工" |
 | `/work <目标>` | **agent** | 把目标投给 agent（`agent.followup`），由它用 `create_workstage` **自己拆阶段**建流程 |
 | `/work edit <目标>` | **agent** | 让 agent 改流程目标（`update_workstage action=edit`，阶段与任务保留；要重排它再用 `create_workstage`） |
 | `/work pause` | 命令直落 | 暂停**当前阶段**的活动任务（自动续跑随之停下） |
 | `/work resume` | 命令直落 | 恢复当前阶段被暂停的任务（**不含**被 `round-limit` 挡下的任务——那种要 `update_worktask action=resume`，顺带追加一份回合预算，见根 README 的 block 语义） |
+| `/work arm` | 命令直落 | **放回续跑许可**（`armed`）：空闲边界上驱动器接着自动推进（收口 / 开工 / 续跑回合）。会话 `resume` 会自动落 `disarmed`，这就是人那条机械的放回路径（同值零写入，如实回报"本来就是"） |
+| `/work disarm` | 命令直落 | **收回续跑许可**（`disarmed`）：驱动器停手，任务与阶段状态原样保留（不等于 `/work pause`——那个动的是任务相位） |
 | `/work clear` | 命令直落 | 丢弃整条流程（不可逆；幂等）。`discard` 作老写法别名仍认 |
 
 **只有自己的控制词被吃掉，其余一律当目标**（同 `/goal`）——所以 `/work 全部推倒重来` 是目标，不是命令。
@@ -21,7 +23,14 @@ goal 的目标是一句话，命令自己就能落库；workprocess 的流程**�
 是判断，不是机械转换。所以命令只把目标转成一条投给会话的指令，由 agent 用工具面自己拆：
 **命令绝不替它猜阶段表**（猜出来的结构会把模型绑在它没同意过的东西上）。
 
-控制动作（`pause` / `resume` / `clear`）反过来——机械、可判定，命令**直接落领域**，模型不在也能用。
+控制动作（`pause` / `resume` / `arm` / `disarm` / `clear`）反过来——机械、可判定，命令**直接落领域**，
+模型不在也能用。
+
+**`arm` / `disarm` 为什么必须在命令面**：`update_workstage action=arm` 是**真人专属**（模型在自治回合里
+调会被拒——不能自己给自己发通行证），而会话 `resume` 又会自动落 `disarmed`。若恢复路径只剩"让模型在
+人的回合里想起来调工具"，它一旦没想起来，流程就在 `disarmed` 上**静默冻死**，而 agent 还在别处忙
+（真机：跨会话那条盯盘流程 5/5 任务全达成、auto 收口永远不落、下一阶段永远开不了工）。命令由人敲出来，
+天然带着那份授权，故把放回/收回做成机械动作。
 
 ## 投给 agent 的指令怎么写（`createInstruction` / `editInstruction` 同一套纪律）
 
@@ -69,6 +78,6 @@ goal 的目标是一句话，命令自己就能落库；workprocess 的流程**�
 ## 测试
 
 ```bash
-pnpm test   # 18 条：语法（与 /goal 同形）/ 排版 / 分派（投话 vs 直落）/ 真服务接线 /
+pnpm test   # 24 条：语法（与 /goal 同形，含 arm / disarm）/ 排版（含 disarmed 说真话）/ 分派（投话 vs 直落）/ 真服务接线（含 /work arm 真改许可）/
             #   指令措辞（教质量判据·不替 schema 说话·必带停手条件·不复述策略段·形状照范本·长度上限）
 ```

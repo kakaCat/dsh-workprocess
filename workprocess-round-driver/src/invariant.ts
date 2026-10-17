@@ -33,7 +33,7 @@ import { isDeepStrictEqual } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
 import { currentStageOf, stageClosePolicyOf, workprocessOf } from 'workprocess'
 import type { WorkprocessService, WorkProcess } from 'workprocess'
-import { askDeliveryOf, DEFAULT_BLOCKED_AFTER_ROUNDS, DEFAULT_MAX_ROUNDS, effectiveMaxRoundsOf, planDeliveryOf, roundDeliveryOf, wrapupDeliveryOf } from './index.js'
+import { askDeliveryOf, DEFAULT_BLOCKED_AFTER_ROUNDS, DEFAULT_MAX_ROUNDS, effectiveMaxRoundsOf, noticeDeliveryOf, planDeliveryOf, roundDeliveryOf, wrapupDeliveryOf } from './index.js'
 import type { RoundDelivery, WorkRoundMessageSource } from './index.js'
 
 /** 伴生插件名（宿主同款命名：`<包>-invariant`）。 */
@@ -69,6 +69,7 @@ export interface WorkRoundMessageLike {
 
 /** 来源的**人话标签**（违规上报里点名用）。 */
 function describeSource(source: NonNullable<WorkRoundMessageLike['data']>['source']): string {
+  if (source?.notice !== undefined) return `停手通告轮（${source.notice}）`
   if (source?.round !== undefined) return `任务轮 ${source.taskId ?? '?'} 第 ${source.round} 轮`
   if (source?.stageKey !== undefined) return `阶段轮 ${source.stageKey}`
   return '流程级轮次'
@@ -196,6 +197,12 @@ export function reconstructDelivery(
         + '——发布那一刻锚必须成立（旧轮次的消息走启动重放口径）')
     }
   }
+  // ①b **停手通告轮**：许可被收回时把停手说出口的那一轮。带 `notice` 标记，不带 round / taskId / stageKey。
+  if (source.notice !== undefined) {
+    requireProcessRevision()
+    return noticeDeliveryOf(process)
+  }
+
   const stage = currentStageOf(process)
   // ② 带 stageKey、不带 round / taskId：阶段规划轮（本阶段没任务）或阶段收口确认轮（任务全 complete 且策略 human）。
   if (source.stageKey !== undefined) {

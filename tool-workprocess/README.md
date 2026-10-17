@@ -18,7 +18,7 @@ workprocess 的**工具面**：两层各三工具（`src/tools.ts` 顶部的登�
 |---|---|---|
 | `get_workstage` | 层1 | 读阶段表（顺序即串行顺序）+ 当前阶段 + 串行门 + 收口条件 + 每阶段的收口策略（`close_policy`） |
 | `create_workstage` | 层1 | 建流程（带阶段表：`key / statement / done_criteria? / close_policy?`）或整体替换阶段表；会丢掉**非空**阶段的一律被内核拒；改动**已开工**阶段的定义（含 close_policy）是真人专属（`process_define` 授权门） |
-| `update_workstage` | 层1 | `action=done`：阶段收口落定——按**该阶段 `close_policy`** 判谁来落（`human` = **真人专属**；`auto` = 驱动器/自治回合可落）；任务须非空且全部 complete。`action=edit`：**改流程目标**（要 `objective`；阶段与任务原样保留；**真人专属**）。`action=discard`：**丢弃整条流程**（不需要 `stage_key`，不可逆，**真人专属**）。`action=arm` / `disarm`：**续跑许可**（**真人专属**；`disarm` 时驱动器停手，`arm` 由人在说"继续"时放回） |
+| `update_workstage` | 层1 | `action=done`：阶段收口落定——按**该阶段 `close_policy`** 判谁来落（`human` = **真人专属**；`auto` = 驱动器/自治回合可落）；任务须非空且全部 complete。`action=edit`：**改流程目标**（要 `objective`；阶段与任务原样保留；**真人专属**）。`action=discard`：**丢弃整条流程**（不需要 `stage_key`，不可逆，**真人专属**）。`action=arm` / `disarm`：**续跑许可**（**真人专属**；`disarm` 时驱动器停手——此时连 auto 收口 / 阶段开工都不落，回执与 `/work` 会明写，驱动器还会投一条 `<workprocess_disarmed>` 停手通告说出口；`arm` 由人在说"继续"时放回，或人敲 `/work arm`，或同会话 goal 被 resume 时驱动器跟着放回） |
 | `get_worktask` | 层2 | 读任务（给 `task_id` 读一条 / 给 `stage_key` 读一阶段 / 都不给读全部） |
 | `create_worktask` | 层2 | 在某阶段建任务；身份由内核分配 `wt:<阶段键>:<序号>`，回执直接给 `task_id` 与**聚合 `revision`** |
 | `update_worktask` | 层2 | `action` 六动词：`edit / pause / resume / block / complete / clear`（`edit`、`resume` = **真人专属**，`block` 必须给原因，且门槛轮数由配置渲染进自述） |
@@ -226,5 +226,5 @@ workprocess 的**工具面**：两层各三工具（`src/tools.ts` 顶部的登�
 ## 测试
 
 ```bash
-cd tool-workprocess && pnpm test   # 76 条：登记表自洽 / 模型面措辞（单行·无术语·取数点名·语义只写一处·门槛随配置）/ 授权口径（含收口策略与 process_edit）/ **归属边界**（跨域写真人专属·读开放·调用者门先拦）/ 六工具行为（含"任务只属于当前阶段"的写前拒）/ 回执 CAS 可用性 / 人机确认（userQuestions）/ 工具通告（deferContext 适配）/ 数据面访问判据（跨源·跨站·非本机 Host·只读方法）/ **两套词汇的机械守卫**（码表自洽·不许串门·不许手写未登记的码）
+cd tool-workprocess && pnpm test   # 80 条：登记表自洽 / 模型面措辞（单行·无术语·取数点名·语义只写一处·门槛随配置）/ 授权口径（含收口策略与 process_edit）/ **归属边界**（跨域写真人专属·读开放·调用者门先拦）/ 六工具行为（含"任务只属于当前阶段"的写前拒）/ 回执 CAS 可用性 / 人机确认（userQuestions）/ 工具通告（deferContext 适配）/ 数据面访问判据（跨源·跨站·非本机 Host·只读方法）/ **两套词汇的机械守卫**（码表自洽·不许串门·不许手写未登记的码）
 ```

@@ -13,7 +13,7 @@
 |---|---|
 | `src/index.ts` | 插件壳 + 运行时（事实投影 · 一拍 · 投递）+ 消息来源声明（`kind: 'work'`） |
 | `src/decide.ts` | 契约类型 + 决策树（**纯层**：零 I/O、零宿主依赖，可穷举单测） |
-| `src/prompt.ts` | 四种轮次的提示词渲染（纯字符串函数）：任务轮 / 规划轮 / 收口确认轮 / **终局收束轮** |
+| `src/prompt.ts` | 五种轮次的提示词渲染（纯字符串函数）：任务轮 / 规划轮 / 收口确认轮 / **终局收束轮** / **停手通告轮** |
 | `src/invariant.ts` | **不变量伴生件**（独立入口 `workprocess-round-driver/invariant`，对齐宿主 `goal-round-driver/invariant`）：每条自称 `kind:'work'` 的会话消息必须与驱动器给定持久状态会渲染的载荷**逐字节一致**——没有它，`kind:'work'` 就是"自动回合冒充人话"的口子 |
 
 宿主那个包源码也是三个模块（`index` / `prompt` / `invariant`）——粒度一致；我们的第二模块是**决策树**
@@ -29,11 +29,13 @@
 | `agent.followup(createUserMessage(...))` + `attempt` 预约（消息身份精确比对） | 同（来源自署 `work`，绝不冒充人） |
 | `turn/end` 停止信号：`aborted` ⇒ 被取消的回合把任务落盘暂停（空闲边界），不是我们那一轮 ⇒ 收回续跑许可；`max-tokens` ⇒ 收回许可 | 同（goal 的 pause ⇔ 任务 pause；disarm ⇔ `rounds.activation`） |
 | `goal.activation !== 'armed'` ⇒ 一拍不推进（会话 resume 自动 disarm） | 同（读归属记录的 `rounds.activation`；`agent/created` 的 `source === 'resume'` 时落 `disarmed`） |
+| `goal/changed` 触发驱动（人的 `resume` 也在这一步生效） | 同形但**多一格**：`session/event` 的 `goal/change` 且 `operation === 'resume'`（= 人说"继续"）⇒ 把流程许可一起放回（`disarmed` → `armed`）并立刻推一拍。**两个许可位各管各的，而恢复口令只有一个**——只放回 goal 那一半，流程仍冻着，且 disarmed 时连副作用都不落（auto 收口 / 开工 / 规划轮全停），会话里看不出异常（真机：盯盘流程 5/5 任务全达成、auto 收口永远不落）。反向**不联动**：goal 被 block / complete 时流程许可不动 |
 | `agent/inbox/inserted｜claimed｜discarded` 竞态围栏（`sameQueued`：内容 + 来源逐字节深比对，不只看消息 id） | 同 |
 | `agent/pre-step` waterfall 三段式：进步骤前验预约、拿到 enter 后再验一次，不过 ⇒ 置 stale + 撤预约 + 放回同批其它消息 + 重拍 + `reject` | 同（七核判据映射见下节） |
 | `agent/error` / `drive()` 失败 ⇒ 收回续跑许可（不许静默重试）；投递失败 ⇒ 落 block（`queue-failed`）；下游 reject ⇒ 落 block（`prompt-rejected`） | 同（goal 的 `ctx.goals.block` ⇔ 域服务 `blockTask` 直调——不走工具面"撑满 N 轮"门槛，那是管 agent 的纪律） |
 | 装载时对在场 agent 全部 disarm；卸载 ⇒ 收许可 + 预约置 stale + cancel 在跑回合 + 等 idle/run 收尾 | 同 |
 | `wrapup` 模块：终局（complete / blocked）投一轮让模型给用户写结束语 | 同（`wrapupDeliveryOf` → `<workprocess_done>` / `<workprocess_blocked>`；收口是静默写，没有这一轮人分不清"跑完"与"卡死"） |
+| （无） | **多一格：停手通告轮**——许可被驱动器自己收回（耐久记号 `activationBy = 'driver'`：`disarmOnResume` 等）且**有该推进的事**时投一轮（`notice: 'disarmed'` → `<workprocess_disarmed>`），把"驱动器停手了、怎么放回"说出口。不消耗回合预算；围栏**反核**：它进步骤时许可须仍是 `disarmed`（被放回后拒收，不许谎报停手）；每实例每条流程只喊一次；`activationBy = 'human'`（人亲手按的）不喊 |
 | `ctx.effect(function* () { ... })` 挂监听 + `ctx.logger.warn` | 同 |
 
 ## pre-step 围栏（进步骤前的预约校验，fail closed）
@@ -94,6 +96,8 @@
 | `turn/end` = `aborted`，中止的是我们那一轮 | 预约记 `cancelled`；随后的空闲边界把该任务**落盘暂停**（`paused`：停得看得见、`/work resume` 放行），**不再投下一轮** |
 | `turn/end` = `aborted`，不是我们那一轮 | 收回续跑许可（`disarmed`）：自动推进就此停住，任务相位原样保留 |
 | `turn/end` = `max-tokens` | 收回续跑许可：模型在给定预算内说不完 = 配置不适配，不许无限自动续跑 |
+| `goal/change` = `resume`（人说"继续"） | **放回**续跑许可（`disarmed` → `armed`，幂等零写入；已经是 `armed` 就不写）：goal 的 `resume` 本身是真人专属动作，跟着放行不构成自己给自己发通行证。**但只放回 `activationBy = 'driver'` 的那一格**：人亲手按的停手（`'human'`，粘性记号）机器口令不许放回 |
+| 空闲边界，许可 `disarmed` 且耐久记号是 `activationBy = 'driver'`（**驱动器自己落的停手**） | 投一条**停手通告轮**（若只读判定说"有该推进的事"）：每实例每条流程一次，不刷屏；人亲手按的（`'human'`，粘性记号）不喊——重启后驱动器的同值重写也覆盖不了它 |
 | 空闲边界，上一轮没跑成（`queued`/`claimed` 或被丢弃） | 同上：**先落盘暂停，再考虑下一拍**——"停了又跑"的根治点 |
 | 空闲边界，上一轮 `admitted` | 正常完成的回合：不暂停，接着投下一轮（否则每个回合都要人 resume） |
 
@@ -110,6 +114,7 @@
 | `blockedAfterRounds` | `3` | 投递里写几轮门槛；**必须与 `tool-workprocess` 的同名配置取同一个数**（拒 block 的是那边） |
 | `close` | `'auto'` | 流程收口：`auto` = 最后一段 done 即落 close；`human` = 投「请判」轮（判了不落定） |
 | `disarmOnResume` | `true` | 会话 `resume`（宿主重启后加载）⇒ 自动收回续跑许可（`disarmed`，一拍不推进），要人 `arm` 才继续；设 `false` = 跨重启接着自动跑 |
+| （无开关） | — | 同会话 goal 被 `resume` ⇒ 流程许可跟着放回（`goal/change` 的 `resume`）。这是**纪律**不是配置：没有它，"继续"这一个口令只管半个系统 |
 
 ## "已经问过"的记号（耐久：跨重启不重复打扰）
 
@@ -156,6 +161,7 @@ B 会话的"已问过"（重复打扰，或记号修订恰好撞上对方的当�
 | `decideWorkRound(input)` | 纯决策树（零 I/O，可穷举单测）；结论穷尽十态 |
 | `renderWorkRoundPrompt(input)` | 纯提示词渲染：流程目标 / 当前阶段与判据 / 本轮任务 / 边界（含"不越阶段开工"与**收口策略**写的"请人确认 / 自动收口"）/ 停手条件 |
 | `renderWorkPlanPrompt(input)` | **阶段规划轮**提示词：本阶段开工了却没任务 ⇒ 请 agent 用 `create_worktask` 给本阶段建任务（**只建、不动手**：动手会绕过任务轮的回合预算与 block 门槛） |
+| `renderWorkNoticePrompt(input)` | **停手通告轮**提示词（`<workprocess_disarmed>`）：说清停在哪一段、驱动器为什么不动、怎么放回（`/work arm` / 说一句"继续"），并明确**本轮不能自己 arm**（真人专属，自治回合里调会被拒） |
 | `renderWorkAskPrompt(input)` | **收口确认轮**提示词（三种投递都包在 `<workprocess_round>` / `<workprocess_plan>` / `<workprocess_ask>` 标签里，与宿主 `<goal_round>` 同款：便于模型分清「自动回合」与「人说的话」）：任务全达成（策略 `human`）或全阶段 done ⇒ 请 agent 向人拍板（`ask_user_question`），并给回落定路径 |
 | 契约类型 | `RoundScopeFacts` / `GateFacts` / `WorkFacts` / `StageFacts` / `TaskFacts` / `DecideInput` / `RoundDecision` |
 
@@ -182,5 +188,5 @@ B 会话的"已问过"（重复打扰，或记号修订恰好撞上对方的当�
 ## 测试
 
 ```bash
-cd workprocess-round-driver && pnpm test   # 93 条：闸顺序 / 串行门 / 收口策略 / 相位机 / 回合上限（**按任务计**）/ 规划轮 / 提示词（含门槛随配置）/ 不变量伴生件（含门槛自署）/ 停止语义（turn/end aborted ⇒ 落盘暂停或收回许可）/ pre-step 围栏（拒过期 · 拒 stale · 放回同批消息 · 下游 reject 落 block · 校验异常收许可）/ 装载卸载纪律
+cd workprocess-round-driver && pnpm test   # 107 条：闸顺序 / 串行门 / 收口策略 / 相位机 / 回合上限（**按任务计**）/ 规划轮 / 提示词（含门槛随配置）/ 不变量伴生件（含门槛自署）/ 停止语义（turn/end aborted ⇒ 落盘暂停或收回许可；`interrupted` 是崩溃孤儿补记、**故意不处理**）/ **goal resume ⇒ 流程许可跟着放回**（human 记号不放回）/ **停手通告轮（说出口 + 只喊一次 + 只读判定 + 围栏反核）** / pre-step 围栏（拒过期 · 拒 stale · 放回同批消息 · 下游 reject 落 block · 校验异常收许可）/ 装载卸载纪律
 ```

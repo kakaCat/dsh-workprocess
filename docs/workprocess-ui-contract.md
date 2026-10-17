@@ -60,7 +60,7 @@
     "allows_start": false,            // 串行门：当前阶段 pending 且前序全 done
     "allows_close": false,            // 是否具备收口条件
     "closed_at": 0,                   // 仅已收口时出现
-    "activation": "armed",            // 仅归属记录里有时出现
+    "activation": "armed",            // 仅归属记录里有时出现；"disarmed" ⇒ 头行挂「已停手」徽标（见 §2 的徽标一格）
     "tasks": [{                       // 全量任务（展开行只需 current_stage 的子集）
       "id": "wt:design:2",
       "stage_key": "design",

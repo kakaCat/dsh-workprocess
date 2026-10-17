@@ -24,8 +24,9 @@ HOME = os.path.expanduser('~')
 STORAGE = os.path.join(HOME, '.dsh', 'storages', 'workprocess.json')
 SESSIONS = os.path.join(HOME, '.dsh', 'sessions')
 
-# 三种投递的提示词标签（驱动器投递时包在标签里；来源都自署 kind='work'）
-TAGS = (('<workprocess_round>', '任务轮'), ('<workprocess_plan>', '规划轮'), ('<workprocess_ask>', '确认轮'))
+# 四种投递的提示词标签（驱动器投递时包在标签里；来源都自署 kind='work'）
+TAGS = (('<workprocess_round>', '任务轮'), ('<workprocess_plan>', '规划轮'), ('<workprocess_ask>', '确认轮'),
+        ('<workprocess_disarmed>', '停手通告'))
 
 
 def load_records():

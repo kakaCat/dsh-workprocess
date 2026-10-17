@@ -18,7 +18,7 @@
  * @module workprocess/client
  */
 import { StageDock } from './StageDock.js'
-import { stageDotState, taskDotState, viewModelOf } from './model.js'
+import { dockActivationBadge, stageDotState, taskDotState, viewModelOf } from './model.js'
 
 /** 模块面名（宿主日志 / 诊断用；与包名区分开）。 */
 export const name = 'workprocess/client'
@@ -30,7 +30,7 @@ export const inject = ['slots']
  * 测试口：穷举映射与降级裁决是纯函数，node 里直接断言（不渲染 React）——
  * 见 `tests/client.spec.ts`。
  */
-export const internals = { stageDotState, taskDotState, viewModelOf }
+export const internals = { stageDotState, taskDotState, viewModelOf, dockActivationBadge }
 
 /** dock 槽与条目的注册面（结构最小化：只声明本模块用到的两个动词）。 */
 interface SlotRegistry {

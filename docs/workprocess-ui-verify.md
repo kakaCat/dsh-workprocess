@@ -61,6 +61,10 @@
 
 ## 五、重启后看不到卡片？排查顺序（wt:verify:2 预备）
 
+> **先排除宿主升级导致的"整栈未装载"**：若工具 / 卡片 / `/work` 命令**一起**消失且重启无效，
+> 判据与修法见 [`docs/workprocess-dsh-upgrade.md`](./workprocess-dsh-upgrade.md)。本节假设宿主没升级，
+> 只是浏览器半或数据面的问题。
+
 1. **确认真重启了**：宿主必须整个退出再开（扫描缓存按 boot 算，热重载插件行不重扫 manifest）。
 2. **浏览器半加载报告**：宿主里跑 `cordis_inspect what:"temporary"`，看有没有 `workprocess` 的报错
    （注册失败/未注册都会点名）。**这一步只能人跑**（我够不到宿主工具面）。

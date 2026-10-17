@@ -16,7 +16,7 @@ import {
   createWorkProcess,
   createWorkTask, currentStageOf, defineWorkStages, discardWorkProcess, editWorkObjective, editWorkTask,
   decodeWorkProcess, grantWorkTaskRounds, markWorkAsked, pauseWorkTask, recordWorkRound, resumeWorkTask,
-  setWorkActivation, startWorkStage,
+  setWorkActivation, startWorkStage, workActivationByOf,
   workActivationOf, workAskedOf, workProcessOf, workTaskOf, workTaskRoundsAllOf,
 } from './kernel.js'
 import type {
@@ -24,6 +24,8 @@ import type {
   WorkBlockReason, WorkProcess, WorkStage, WorkStageDraft, WorkTaskRounds,
 } from './kernel.js'
 import type { WorkDeps } from './kernel.js'
+// 「谁收回的」是 types.ts 的类型（kernel 只消费不转出口）。
+import type { WorkActivationBy } from './types.js'
 
 /** 会话的最小读取面（与 authority/message 同源的窄类型）。 */
 interface AgentLike { readonly session?: { readonly id?: string } }
@@ -105,8 +107,13 @@ export interface WorkprocessService {
   // ── 续跑许可（耐久在归属记录里；驱动器的自动推进开关）────────────
   /** 读续跑许可（缺省 `armed`）；没有流程 ⇒ `undefined`。 */
   activation(scope: string): Promise<WorkActivation | undefined>
-  /** 设置续跑许可（幂等：同值零写入；没有流程 ⇒ `false`）。 */
-  setActivation(scope: string, activation: WorkActivation, revision?: number): Promise<boolean>
+  /**
+   * 设置续跑许可（幂等：同值零写入；没有流程 ⇒ `false`）。
+   * `by` = **谁收回的**（只在 disarmed 时记）：'human' 粘性（机器的同名重写不覆盖）；缺省按 'driver' 记。
+   */
+  setActivation(scope: string, activation: WorkActivation, revision?: number, by?: WorkActivationBy): Promise<boolean>
+  /** 读"谁收回的"（没有流程 / 没记过 ⇒ `undefined`）。 */
+  activationBy(scope: string): Promise<WorkActivationBy | undefined>
 
   // ── "已经问过"的耐久记号（驱动器的去重判据；跨重启不重复打扰）────────
   /** 读记号（没有流程 / 没记过 ⇒ `undefined`）；只在 `revision` 与当前流程相符时采信。 */
@@ -135,6 +142,15 @@ export interface WorkprocessService {
   pauseActive(agent: unknown): Promise<readonly string[]>
   /** 恢复当前阶段被暂停的任务；返回被恢复的任务 id。 */
   resumePaused(agent: unknown): Promise<readonly string[]>
+  /**
+   * **放回 / 收回该 agent 会话这条流程的续跑许可**（人机干预面；幂等，没有流程 ⇒ `false`）。
+   *
+   * 【为什么命令面需要它】`process_arm` 在工具面是**真人专属**——模型不能自己放行自己。
+   * 会话 `resume`（宿主重启后加载）会自动落 `disarmed`，此时唯一能放回的就是人：命令由人敲出来，
+   * 天然带着那份授权，故恢复路径不能只有"让模型在人的回合里想起来调工具"这一条
+   * （真机踩过：模型没想起来，流程在 disarmed 上静默冻死，而 agent 还在别处忙）。
+   */
+  setActivationFor(agent: unknown, activation: WorkActivation): Promise<boolean>
 }
 
 /** 归属键 = 调用者会话（命令与动作都挂在这条会话上）。 */
@@ -236,7 +252,8 @@ export function createWorkprocessService(
     asked: (scope) => workAskedOf(deps, scope),
     markAsked: (scope, kind, key, revision) => markWorkAsked(deps, scope, kind, key, revision),
     activation: (scope) => workActivationOf(deps, scope),
-    setActivation: (scope, activation, revision) => setWorkActivation(deps, scope, activation, revision),
+    setActivation: (scope, activation, revision, by) => setWorkActivation(deps, scope, activation, revision, by),
+    activationBy: (scope) => workActivationByOf(deps, scope),
     roundsStarted: async (scope) => (await deps.store.get(scope))?.rounds?.started,
     taskRounds: (scope) => workTaskRoundsAllOf(deps, scope),
     observeRound: (scope, round, taskId) => recordWorkRound(deps, scope, taskId, round).then(() => undefined),
@@ -264,6 +281,12 @@ export function createWorkprocessService(
     async resumePaused(agent) {
       const scope = scopeOfAgent(agent)
       return scope === undefined ? [] : pauseOrResume(scope, 'paused')
+    },
+    async setActivationFor(agent, activation) {
+      const scope = scopeOfAgent(agent)
+      // 没有流程 ⇒ `setWorkActivation` 自己零写入返回 false（没有可授权的对象）。
+      // 人机干预面 ⇒ 记 `by: 'human'`：人亲手收回的停手，机器的口令（goal resume 等）不许放回。
+      return scope === undefined ? false : setWorkActivation(deps, scope, activation, undefined, 'human')
     },
   }
 }

@@ -50,10 +50,13 @@ export function workPolicyText(blockedAfter: number): string {
       + '（真人直接发起不受此限）。',
     '- 自动续跑回合以 `<workprocess_round>` / `<workprocess_plan>` / `<workprocess_ask>` 标签的指令出现'
       + '（它们不是人打的字）：只做那一轮说的事，做完停手。',
-    '- 终局会投 `<workprocess_done>`（流程落幕）/ `<workprocess_blocked>`（停住等人）让你给用户说结束语——'
-      + '那一轮只说话，不要再调任何工具。',
-    '- **续跑许可是耐久的**（`get_workstage` 回执的 `activation`）：会话从盘上恢复（应用重启）后自动置为 `disarmed`；'
-      + '人说"继续"时调 `update_workstage action=arm` 放回（真人专属，agent 不能自己放行自己）。',
+    '- 终局会投 `<workprocess_done>`（流程落幕）/ `<workprocess_blocked>`（停住等人），停手会投'
+      + '`<workprocess_disarmed>`（许可被收回、驱动器停手了）——这几轮都**只说话**：把情况说清楚给用户，'
+      + '不要再调任何工具（`<workprocess_disarmed>` 那轮尤其不要自己试着 arm：那是真人专属，会被拒）。',
+    '- **续跑许可是耐久的**（`get_workstage` 回执里的 `activation`）：会话从盘上恢复（应用重启）后自动置为 `disarmed`，'
+      + '回执会明写这一行（disarmed = 驱动器已停手：自动收口 / 开工 / 续跑回合都不会发生）。'
+      + '放回用 `update_workstage action=arm`（真人专属，agent 不能自己放行自己）——人敲 `/work arm` 也行，'
+      + '人在"继续"时 resume 那条 goal 也会同时放回流程许可。',
     '- **写只限本会话这条流程**：`scope` 不给就是本会话；写别的归属必须由人直接发起'
       + '（`WORK_TOOL_AUTHORITY_REQUIRED`）；读不受限。',
   ].join('\n')

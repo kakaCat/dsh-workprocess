@@ -246,6 +246,54 @@ export function renderWorkWrapupPrompt(input: WorkWrapupPromptInput): string {
   ])
 }
 
+/** **停手通告轮**的输入（只由流程快照决定：不变量伴生件要能拿当前快照逐字节重建）。 */
+export interface WorkNoticePromptInput {
+  /** 流程（聚合根）：目标。 */
+  readonly processObjective: string
+  /** 停在哪一段（全阶段收口过 ⇒ 缺省）。 */
+  readonly stage?: {
+    readonly key: string
+    readonly state: string
+    readonly tasksDone: number
+    readonly tasksTotal: number
+    readonly closePolicy: 'human' | 'auto'
+  }
+}
+
+/**
+ * **停手通告轮**：续跑许可被收回、而**有该推进的事**时投一轮，把停手说出口。
+ *
+ * 【为什么必须有这一轮】`disarmOnResume` 是安全刹车（宿主重启后不被自动续跑），但它是**静默**的：
+ * 会话里模型照跑、状态照旧，人分不出流程是停的还是走的（真机：机器重启把许可收回后，跨会话那条
+ * 盯盘流程在 engine 阶段冻了半天，agent 一边干等一边另找活干——它从回执里也看不出所以然，
+ * 因为回执那时只报"3/5 阶段已收口"）。
+ *
+ * 【与另外两种收束轮的分别】`<workprocess_done>` / `<workprocess_blocked>` 是**终局**；
+ * 这一轮是"**暂停**"：流程没死，等人一句话就能接着跑。所以话术要落在"怎么放回"上，
+ * 并且明确**本轮不能自己放回**（`update_workstage action=arm` 是真人专属动作，自治回合里调会被拒）。
+ */
+export function renderWorkNoticePrompt(input: WorkNoticePromptInput): string {
+  const stage = input.stage
+  return wrap('workprocess_disarmed', [
+    '流程目标：' + input.processObjective,
+    ...(stage === undefined ? [] : [
+      '',
+      '停在这一段：`' + stage.key + '`（' + stage.state + '，任务 '
+        + String(stage.tasksDone) + '/' + String(stage.tasksTotal) + ' 达成，收口策略 `' + stage.closePolicy + '`）',
+    ]),
+    '',
+    '**驱动器已停手**（续跑许可 `disarmed`）：阶段收口 / 阶段开工 / 续跑回合都不会自动发生。'
+      + '流程没死，任务与阶段状态原样保留——只是没有执行者了。',
+    '给用户说清三件事：',
+    '- 驱动器停手了、流程正卡在哪一步（上面那段）；',
+    '- 放回方式：会话里 `/work arm`，或说一句"继续"（resume 目标会把流程许可一起放回）；',
+    '- 放回之后会接着做什么（该收口的收口 / 该开工的开工 / 该投的续跑回合）。',
+    '这一轮只说话：不要再调任何工具，也不要自己试着调 `update_workstage action=arm`'
+      + '（那是真人专属动作，这个回合里调会被拒，白跑一轮）。',
+    '只报真正确立的事，不确定就说不确定。',
+  ])
+}
+
 /**
  * 把一段提示词包进标签（对齐宿主 `goal-round-driver` 的 `<goal_round>`）。
  *

@@ -40,6 +40,8 @@ const recordSchema = z.object({
       // 逐任务回合账（预算按任务计）：`rounds` = 该任务已准入回合数，`grants` = 人追加的预算份数。
       tasks: z.record(z.string(), z.object({ rounds: z.number(), grants: z.number() })).optional(),
       activation: z.enum(['armed', 'disarmed']).optional(),
+      // 谁收回的（只在 disarmed 时有意义）：'human' = 人亲手按的（粘性，机器口令不碰）；'driver' = 驱动器落的。
+      activationBy: z.enum(['driver', 'human']).optional(),
     })
     .optional(),
   asked: z

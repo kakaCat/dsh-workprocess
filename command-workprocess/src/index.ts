@@ -5,11 +5,17 @@
  * 命令是**人**的入口，工具是**模型**的入口，两者的依赖面不同（命令只要 `commands` + 领域服务）。
  * 拆开之后：没装命令行的组合不影响工具面；命令行也可以单独换。
  *
- * 【语法逐字对齐 `/goal`】`/work [<目标>|edit <目标>|pause|resume|clear]`
+ * 【语法逐字对齐 `/goal`】`/work [<目标>|edit <目标>|pause|resume|arm|disarm|clear]`
  *   · 缺省 = 看状态（人看的一屏：走到哪了 / 谁该动 / 能做什么）；
  *   · `<目标>` = **把目标交给 agent**（见下）；
  *   · `edit <目标>` = **让 agent 改目标**；
- *   · `pause` / `resume` / `clear` = 命令**直接落**（机械的控制动作，不该求模型帮忙）。
+ *   · `pause` / `resume` / `arm` / `disarm` / `clear` = 命令**直接落**（机械的控制动作，不该求模型帮忙）。
+ *
+ * 【`arm` / `disarm` 为什么必须在命令面】`process_arm` 在工具面是**真人专属**——模型不能自己放行
+ * 自己；而会话 `resume`（宿主重启后加载）会自动落 `disarmed`。若恢复路径只剩"让模型在人的回合里
+ * 想起来调工具"，那它一旦没想起来，流程就在 disarmed 上**静默冻死**，而 agent 还在别处忙
+ * （真机踩过：跨会话的盯盘流程 5/5 任务全达成、auto 收口永远不落、下一阶段永远开不了工）。
+ * 命令由人敲出来，天然带着那份授权，故把放回/收回做成机械动作。
  *
  * 【创建为什么是"投话"而不是命令自己建】goal 的目标是一句话，命令自己就能落库；
  * workprocess 的流程**必须带阶段表**，而"这条目标该拆成哪几段"是判断，不是机械转换——
@@ -41,13 +47,13 @@ export const name = 'command-workprocess'
 /** 装配依赖：命令注册面 + workprocess 领域服务（由 `workprocess` 提供）。 */
 export const inject = ['commands', 'workprocess']
 
-const USAGE = '用法：/work [<目标>|edit <目标>|pause|resume|clear]'
+const USAGE = '用法：/work [<目标>|edit <目标>|pause|resume|arm|disarm|clear]'
 
 /**
- * 命令面只要的**四个干预方法**（接口隔离）：`workprocessOf(ctx)` 是完整域服务，
- * 命令只读概览 + 做三种人可做的干预——收窄之后测试桩不必补一整套写方法。
+ * 命令面只要的**五个干预方法**（接口隔离）：`workprocessOf(ctx)` 是完整域服务，
+ * 命令只读概览 + 做人可做的四种干预——收窄之后测试桩不必补一整套写方法。
  */
-export type WorkprocessFacade = Pick<WorkprocessService, 'view' | 'discard' | 'pauseActive' | 'resumePaused'>
+export type WorkprocessFacade = Pick<WorkprocessService, 'view' | 'discard' | 'pauseActive' | 'resumePaused' | 'setActivationFor'>
 
 type WorkCommand =
   | { readonly kind: 'show' }
@@ -56,12 +62,14 @@ type WorkCommand =
   | { readonly kind: 'invalid-edit' }
   | { readonly kind: 'pause' }
   | { readonly kind: 'resume' }
+  | { readonly kind: 'arm' }
+  | { readonly kind: 'disarm' }
   | { readonly kind: 'clear' }
 
 /**
  * 解析 `/work` 的语法（与 `/goal` 逐字同形：**只吃掉自己的控制词，其余一律当目标**）。
  *
- * 认领的控制词：`pause` / `resume` / `clear`（另收 `discard` 作 `clear` 的老写法别名）。
+ * 认领的控制词：`pause` / `resume` / `arm` / `disarm` / `clear`（另收 `discard` 作 `clear` 的老写法别名）。
  * `edit` 单独出现 = 缺新目标（报错，不当成目标叫 "edit"）。
  * 目标就是"人写的那句话"——命令不修剪、不改写、不校验（那是 agent 与内核的活）。
  */
@@ -72,6 +80,8 @@ export function parseWorkCommand(rawInput: string): WorkCommand {
   if (control === 'clear' || control === 'discard') return { kind: 'clear' }
   if (control === 'pause') return { kind: 'pause' }
   if (control === 'resume') return { kind: 'resume' }
+  if (control === 'arm') return { kind: 'arm' }
+  if (control === 'disarm') return { kind: 'disarm' }
   if (control === 'edit') return { kind: 'invalid-edit' }
   if (/^edit(?=\s)/iu.test(input)) return { kind: 'edit', objective: input.slice(4).trim() }
   return { kind: 'create', objective: input }
@@ -110,7 +120,10 @@ export function renderWorkStatus(title: string, status: WorkprocessStatus): Work
     ? String(status.roundsStarted)
     : String(status.taskRounds) + (status.maxRounds === undefined ? '' : '/' + String(status.maxRounds))
       + '（全程累计 ' + String(status.roundsStarted) + '）'
-  const whoActs = status.closedAt !== undefined
+  // 这一屏原先无条件承诺"驱动器会在边界上自动收口 / 自动开工"——`disarmed` 时那是**假承诺**
+  // （`drive()` 读到 disarmed 连副作用都不落：auto 收口 / 开工 / 规划轮全停）。人据此以为流程在推进，
+  // 而它其实原地冻着（真机：跨会话的盯盘流程在 engine 阶段冻了半小时，屏幕上什么都没说）。
+  const next = status.closedAt !== undefined
     ? ['流程已收口（' + new Date(status.closedAt).toLocaleString() + '）：记录终止，写被拒；重开新流程用 /work <目标>（旧流程须先 /work clear）。']
     : current === undefined
       ? ['全部阶段已收口：流程没有"完成"态——成没成是判据（人判）。']
@@ -123,7 +136,21 @@ export function renderWorkStatus(title: string, status: WorkprocessStatus): Work
             ? '任务全部完成：策略 auto ⇒ 驱动器在边界上自动收口。'
             : '任务全部完成：策略 human ⇒ 等人确认（在会话里说一句，或让模型调 update_workstage done）。']
           : ['没有可跑的任务：等人在输入框里放行/补任务。']
-  const hints = ['/work', ...(current === undefined ? [] : ['/work pause', '/work resume']), '/work edit <目标>', '/work clear']
+  // 已经收口的流程不再提许可：那一屏的真相是"记录终止"，没有可推进的东西。
+  const whoActs = status.activation === 'disarmed' && status.closedAt === undefined
+    ? [
+      '⚠ **续跑许可 disarmed：驱动器已停手**——收口 / 阶段开工 / 续跑回合都不会自动发生'
+        + '（任务与阶段状态原样保留，不会丢）。',
+      '放回自动推进：`/work arm`；再收回：`/work disarm`。',
+      // `current` 缺省 = 全阶段已收口（只欠流程级收口判断）：那条是人判的话，不是驱动器的动作，
+      // 套上"放回后驱动器会"就自相矛盾（审查发现）。其余分支的 `next[0]` 都是驱动器的动作，可套。
+      ...(current === undefined ? [] : ['（放回后驱动器会：' + next[0] + '）']),
+    ]
+    : next
+  const hints = [
+    '/work', ...(current === undefined ? [] : ['/work pause', '/work resume']),
+    '/work arm', '/work disarm', '/work edit <目标>', '/work clear',
+  ]
   return {
     kind: 'success',
     text: [
@@ -264,6 +291,26 @@ export function workCommandHandler(service: WorkprocessFacade) {
           text: paused.length === 0 ? '当前阶段没有活动任务可暂停。' : '已暂停：' + paused.join('、') + '（自动续跑随之停下；/work resume 放行）',
         }
       }
+      // **续跑许可**（arm / disarm）：命令由人敲，天然带着那份真人授权——模型没想起来 / 不在场时，
+      // 人也能把驱动器放回（见文件头：恢复路径只剩"求模型"就会静默冻死）。
+      if (command.kind === 'arm' || command.kind === 'disarm') {
+        const changed = await service.setActivationFor(invocation.agent, command.kind === 'arm' ? 'armed' : 'disarmed')
+        const verb = command.kind === 'arm' ? '已放回' : '已收回'
+        if (!changed) {
+          return {
+            kind: 'success',
+            text: (command.kind === 'arm' ? '续跑许可已经是 armed' : '续跑许可已经是 disarmed')
+              + '（零写入）——驱动器' + (command.kind === 'arm' ? '本来就在自动推进。' : '本来就已停手。'),
+          }
+        }
+        return {
+          kind: 'success',
+          text: '续跑许可' + verb + '（' + (command.kind === 'arm' ? 'armed' : 'disarmed') + '）。'
+            + (command.kind === 'arm'
+              ? '空闲边界上驱动器会接着自动推进（收口 / 开工 / 续跑回合）。'
+              : '驱动器不再自动往下推；任务与阶段状态原样保留，/work arm 放回。'),
+        }
+      }
       const resumed = await service.resumePaused(invocation.agent)
       return { kind: 'success', text: resumed.length === 0 ? '当前阶段没有被暂停的任务。' : '已恢复：' + resumed.join('、') }
     } catch (err) {
@@ -283,7 +330,7 @@ export function apply(ctx: Context): void {
     definitionId: '@deepseek-ai/dsh-command-workprocess' as never,
     name: 'work',
     description: '建/看/干预这条流程（阶段 · 任务 · 回合）：给目标即让 agent 拆阶段建流程',
-    input: { hint: '[<目标>|edit <目标>|pause|resume|clear]' },
+    input: { hint: '[<目标>|edit <目标>|pause|resume|arm|disarm|clear]' },
     handler: workCommandHandler(workprocessOf(ctx)),
   })
 }

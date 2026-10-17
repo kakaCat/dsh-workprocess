@@ -41,12 +41,12 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-projection'
-import { currentStageOf, onWorkChanged, stageAllowsStart, workprocessOf } from 'workprocess'
-import type { WorkProcess, WorkprocessService, WorkTask, WorkTaskRounds } from 'workprocess'
+import { currentStageOf, onWorkChanged, stageAllowsStart, stageClosePolicyOf, workprocessOf } from 'workprocess'
+import type { WorkAskedState, WorkProcess, WorkprocessService, WorkTask, WorkTaskRounds } from 'workprocess'
 import { decideWorkRound } from './decide.js'
 import type { DecideInput, GateFacts, RoundDecision, StageFacts, WorkFacts } from './decide.js'
 import { reconstructDelivery } from './invariant.js'
-import { DEFAULT_BLOCKED_AFTER_ROUNDS, renderWorkAskPrompt, renderWorkPlanPrompt, renderWorkRoundPrompt, renderWorkWrapupPrompt } from './prompt.js'
+import { DEFAULT_BLOCKED_AFTER_ROUNDS, renderWorkAskPrompt, renderWorkNoticePrompt, renderWorkPlanPrompt, renderWorkRoundPrompt, renderWorkWrapupPrompt } from './prompt.js'
 
 //#region 消息来源（仓外插件必须自己声明这一格）
 /** 续跑回合的来源载荷（进程 / 阶段 / 任务 / 修订 / 回合号：授权面按它精确匹配）。 */
@@ -72,6 +72,11 @@ export interface WorkRoundMessageSource {
    * 不变量伴生件重建提示词要靠它。
    */
   readonly blockedAfterRounds?: number
+  /**
+   * **停手通告轮**（`'disarmed'`）：许可被收回时把"驱动器停手了"说出口的那一轮。
+   * 带它 = 这一轮不推进任何东西（不消耗预算、不受许可约束，见 `validReservation`）。
+   */
+  readonly notice?: 'disarmed'
 }
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -160,10 +165,16 @@ export interface TickDeps {
 }
 
 /**
- * 一拍：读现状 → 决策 → 只落"不需要人"的副作用。
- * @returns 本拍的结论（`drive` / `plan-stage` / `ask-*` 的投递由调用方做）；该归属没有流程 ⇒ `undefined`。
+ * **只读的一拍**：读现状 → 造闸 → 交给纯决策层。**不落任何副作用**。
+ *
+ * 【为什么单独一步】许可被收回时驱动器一拍都不推进——但"有该推进的事、却推不动"这件事本身要能
+ * 说出口（否则流程静默冻住，会话里看不出异常）。说出口前**不能**调 `tickWorkprocess`：它对
+ * `start-stage` / `close-stage` / `close-process` 是**会落副作用**的，那等于绕过刹车。故把"读 + 判"
+ * 抽成本函数——`tickWorkprocess` = 本函数 + 施加"不需要人"的副作用，两处共用同一套闸与同一份投影片。
+ *
+ * @returns 本拍的结论；该归属没有流程 ⇒ `undefined`。
  */
-export async function tickWorkprocess(
+export async function decideCurrentWork(
   deps: TickDeps, scope: string, sessionKey?: string,
 ): Promise<RoundDecision | undefined> {
   const process = await deps.domain.process(scope)
@@ -191,7 +202,18 @@ export async function tickWorkprocess(
     work,
     ...(Object.keys(gates).length === 0 ? {} : { gates }),
   }
-  const decision = decideWorkRound(input)
+  return decideWorkRound(input)
+}
+
+/**
+ * 一拍：**只读判定** + 只落"不需要人"的副作用（开工 / auto 收口 / 落盘 block / 流程收口）。
+ * @returns 本拍的结论（`drive` / `plan-stage` / `ask-*` 的投递由调用方做）；该归属没有流程 ⇒ `undefined`。
+ */
+export async function tickWorkprocess(
+  deps: TickDeps, scope: string, sessionKey?: string,
+): Promise<RoundDecision | undefined> {
+  const decision = await decideCurrentWork(deps, scope, sessionKey)
+  if (decision === undefined) return undefined
   switch (decision.kind) {
     case 'start-stage':
       await deps.domain.startStage(scope, decision.stageKey)
@@ -236,6 +258,11 @@ export interface RoundDelivery {
    * 不在持久状态里，不变量伴生件重建提示词要靠它）。**必须与工具面那份取同一个数**。
    */
   readonly blockedAfterRounds?: number
+  /**
+   * **停手通告轮**（`'disarmed'`）：续跑许可被收回时把"驱动器停手了"说出口的那一轮。
+   * 带上它 = 这一轮**不推进任何东西**（不消耗预算、不受许可约束，见 `validReservation`）。
+   */
+  readonly notice?: 'disarmed'
   readonly prompt: string
 }
 
@@ -355,6 +382,40 @@ export function askDeliveryOf(
     prompt: renderWorkAskPrompt({ processObjective: process.objective, kind: 'close' }),
   }
 }
+
+/**
+ * 造**停手通告轮**的载荷：许可被收回（`disarmed`）且**有该推进的事**时，把"驱动器停手了"说出口。
+ *
+ * 【为什么要有这一轮】`disarmOnResume` 是安全刹车：宿主重启（含崩溃、关机、机器重启）后从盘上加载
+ * 会话 ⇒ 自动落 `disarmed`，驱动器**连副作用都不落**（auto 收口 / 阶段开工 / 规划轮全停）。可它是
+ * **静默**的：会话里模型照跑、阶段条照显示"进行中"，人分不出流程是停的还是走的——真机：机器
+ * 18:22 重启把许可收回后，跨会话那条盯盘流程在 engine 阶段冻了半天，谁都没去 arm（agent 一边干等
+ * 一边另找活干）。回执与 `/work` 给了"看得见"，这一轮给"被推着知道"。
+ *
+ * 【锚在流程 revision 上】与收束轮同款：提示词只由快照（目标 + 当前阶段与收口策略）决定，
+ * 不变量伴生件拿当前快照就能逐字节重建（见 `invariant.ts`）。
+ */
+export function noticeDeliveryOf(process: WorkProcess): RoundDelivery {
+  const stage = currentStageOf(process)
+  return {
+    processId: process.id,
+    stageKey: '',
+    revision: process.revision,
+    notice: 'disarmed',
+    prompt: renderWorkNoticePrompt({
+      processObjective: process.objective,
+      ...(stage === undefined ? {} : {
+        stage: {
+          key: stage.key,
+          state: stage.state,
+          tasksDone: stage.tasks.filter((t) => t.phase === 'complete').length,
+          tasksTotal: stage.tasks.length,
+          closePolicy: stageClosePolicyOf(stage),
+        },
+      }),
+    }),
+  }
+}
 //#endregion
 
 //#region 驱动器插件
@@ -406,7 +467,7 @@ const FIBER_ACTIVE = 2
 
 /** 一次投递的**预约**：消息身份精确比对（竞态围栏靠它，绝不靠"内容差不多"）。 */
 interface Attempt {
-  readonly kind: 'drive' | 'plan' | 'ask' | 'wrap'
+  readonly kind: 'drive' | 'plan' | 'ask' | 'wrap' | 'notice'
   readonly messageId: string
   /**
    * 投出去的消息**内容块**全量（`sameQueued` 逐字节深比对的那一份）。
@@ -456,6 +517,14 @@ interface State {
   /** 已经问过人的**收口确认**键（`stage-done:<阶段键>` / `close`；域变更即清空）。 */
   readonly askAsked: Set<string>
   /**
+   * 已经为哪一条（`processId@revision`）投过停手通告（每实例每条流程一次，避免每个空闲边界刷屏）。
+   *
+   * 【"该不该喊"不在这里记】那一次停手是**谁**收回的，落在归属记录的耐久记号 `rounds.activationBy`
+   * 里（'human' 粘性：机器的重写不覆盖）——进程内布尔重启就失忆，耐久记号不会（见
+   * `maybeNoticeDisarm` 的判据）。
+   */
+  noticeSentFor?: string
+  /**
    * **本 agent** 这一拍读到的流程修订（耐久"已经问过"记号按它判定有效性）。
    * 必须长在每 agent 的 State 上：曾经是 apply 级共享变量，两个会话的驱动拍在 `await` 点
    * 交错时互相覆盖——A 会话的修订会被拿去判 B 会话的"已问过"（重复打扰，或误判已问而停死）。
@@ -474,6 +543,8 @@ interface SessionEventLike {
     readonly source?: { readonly kind?: string; readonly round?: number; readonly taskId?: string }
     /** `turn/end` 的结束原因（`completed` / `aborted` / `max-tokens` / …）。 */
     readonly reason?: { readonly kind?: string }
+    /** `goal/change` 的操作（`resume` = 人说"继续"，见 `arm`）。 */
+    readonly operation?: string
   }
 }
 
@@ -654,6 +725,8 @@ export function apply(ctx: Context, config?: WorkRoundDriverConfig): void {
       ...(delivery.maxRounds === undefined ? {} : { maxRounds: delivery.maxRounds }),
       // 门槛数字也是装载配置、不在持久状态里：与 `maxRounds` 同款自署，不变量伴生件重建提示词靠它。
       ...(delivery.blockedAfterRounds === undefined ? {} : { blockedAfterRounds: delivery.blockedAfterRounds }),
+      // **停手通告轮**的标记：围栏据此放行（它不推进任何东西 ⇒ 不该被许可拦下）。
+      ...(delivery.notice === undefined ? {} : { notice: delivery.notice }),
     }
     const message = createUserMessage({ content, source })
     state.attempt = {
@@ -699,7 +772,12 @@ export function apply(ctx: Context, config?: WorkRoundDriverConfig): void {
       || attempt === undefined || attempt.phase !== 'claimed' || attempt.stale
       || !sameQueued(content, source, attempt)) return false
     const scope = state.agent.session.id
-    if (await domain.activation(scope) !== 'armed') return false
+    // 许可核对两个方向的投递**各要各的**：
+    //   · 会往下推的（任务轮 / 规划轮 / 确认轮 / 收束轮）要 `armed`——停手了不许往下推；
+    //   · **停手通告轮要 `disarmed`**——它是"把停手说出口"，许可被收回正是它的主题；反过来，
+    //     许可若已被放回，这条通告就成了"谎报停手"，**不许进步骤**（投递后被 arm 的竞态）。
+    const required = source.notice === undefined ? 'armed' : 'disarmed'
+    if (await domain.activation(scope) !== required) return false
     const process = await domain.process(scope)
     if (process === undefined || process.id !== source.processId) return false
     if (source.round !== undefined) {
@@ -712,19 +790,29 @@ export function apply(ctx: Context, config?: WorkRoundDriverConfig): void {
     return matchesCurrentState(process, source)
   }
 
+  /**
+   * 决策闸（**内存快挡 + 耐久记号**）：`driveOnce` 与停手通告共用一份，免得两处口径漂移。
+   *
+   * "已经问过"的耐久记号：跨重启只在"没有任何状态变更"时继续算数（修订一变即作废）；
+   * 内存集合保留作**进程内快挡**：耐久写可能还没落盘，先挡住重复投递。
+   */
+  function gatesFrom(state: State, asked: WorkAskedState | undefined) {
+    const askedAt = (kind: 'plan' | 'ask', key: string): boolean =>
+      asked?.[kind] !== undefined && asked[kind]!.key === key && asked[kind]!.revision === state.askedRevision
+    return {
+      stagePlanAsked: (stageKey: string) => state.planAsked.has(stageKey) || askedAt('plan', stageKey),
+      humanAskAsked: (askKey: string) => state.askAsked.has(askKey) || askedAt('ask', askKey),
+    }
+  }
+
   /** 读现状 → 决策 → 落"不需要人"的副作用 / 投一轮；返回是否请求再拍一拍。 */
   async function driveOnce(state: State): Promise<boolean> {
     const scope = state.agent.session.id
-    // **"已经问过"的耐久记号**：跨重启只在"没有任何状态变更"时继续算数（修订一变即作废）。
-    // 内存集合保留作**进程内快挡**：耐久写可能还没落盘，先挡住重复投递。
     const asked = await domain.asked(scope)
-    const askedAt = (kind: 'plan' | 'ask', key: string): boolean =>
-      asked?.[kind] !== undefined && asked[kind]!.key === key && asked[kind]!.revision === state.askedRevision
     const decision = await tickWorkprocess({
       domain,
       defaultMaxRounds,
-      stagePlanAsked: (stageKey) => state.planAsked.has(stageKey) || askedAt('plan', stageKey),
-      humanAskAsked: (askKey) => state.askAsked.has(askKey) || askedAt('ask', askKey),
+      ...gatesFrom(state, asked),
       autoClose,
     }, scope, scope)
     if (decision === undefined) return false
@@ -813,6 +901,39 @@ export function apply(ctx: Context, config?: WorkRoundDriverConfig): void {
     }
   }
 
+  /**
+   * **停手通告**：许可被收回时，把"有该推进的事、却推不动"说出口（每实例每条流程一次）。
+   *
+   * 三个门槛缺一不可：
+   *   ① `disarmedByDriver`——只喊**驱动器自己落的**那种停手（宿主重启自动收回、出错、被中止……）；
+   *      人自己敲 `/work disarm` 是明确意图，不打扰；
+   *   ② 只读判定说**有该推进的事**（`hold` / `wait-human` 不喊：那种情况本来就该等人）；
+   *   ③ 同一条流程同一次停手只喊一次（`noticeSentFor` 记 `processId@revision`；被拒收后修订前进 ⇒ 还能补喊）。
+   *
+   * 【为什么要"只读判定"而不是 `tickWorkprocess`】后者对 `start-stage` / `close-stage` /
+   * `close-process` 是**会落副作用**的——disarmed 时调它等于绕过刹车。
+   */
+  async function maybeNoticeDisarm(state: State, scope: string): Promise<void> {
+    // 只喊**驱动器自己落的**停手（耐久记号 `activationBy === 'driver'`）：人亲手按的停手是明确意图，
+    // 不打扰（人忘了也没关系：`/work` 与回执都看得见）。按耐久记号判而不是进程内布尔：重启后不失忆。
+    if (await domain.activationBy(scope) !== 'driver') return
+    if (state.attempt !== undefined) return          // 上一轮还挂着：先别插话
+    const process = await domain.process(scope)
+    if (process === undefined) return
+    // 同一条流程同一次停手只喊一次。**按 `processId@revision` 记**而不是一个布尔：被围栏拒收
+    // （投递后修订已前进）时修订也变了 ⇒ key 变了 ⇒ 下一拍还能补喊一条，不会静默丢掉。
+    const key = process.id + '@' + String(process.revision)
+    if (state.noticeSentFor === key) return
+    // 只读判定：拿到的结论就是"许可若在，驱动器本该做的那件事"。闸与 `driveOnce` 同一份
+    //（耐久"已经问过"记号也算数：**"问过、在等人答"不是"停手卡住"**，那种情况不该喊）。
+    const asked = await domain.asked(scope)
+    const decision = await decideCurrentWork({
+      domain, defaultMaxRounds, ...gatesFrom(state, asked), autoClose,
+    }, scope, scope)
+    if (decision === undefined || decision.kind === 'hold' || decision.kind === 'wait-human') return
+    if (await reserveAndQueue(state, 'notice', noticeDeliveryOf(process))) state.noticeSentFor = key
+  }
+
   /** 一拍的完整语义（宿主 goal driver 的 `drive`：许可 → 检查点 → 收尾上一轮 → 决策）。 */
   async function drive(state: State): Promise<void> {
     if (!readyToDrive(state)) return
@@ -820,7 +941,16 @@ export function apply(ctx: Context, config?: WorkRoundDriverConfig): void {
     // 与 goal 的差别只有一处：它读 goal 的相位，我们读归属记录里的 `rounds.activation`。
     const scope = state.agent.session.id
     const activation = await domain.activation(scope)
-    if (activation === 'disarmed') return
+    if (activation === 'disarmed') {
+      // **许可被收回**：一拍都不推进（对齐宿主 goal：`activation !== 'armed'` 就返回）。但"驱动器停手了"
+      // 这件事必须说出口——否则流程静默冻住、会话里看不出异常（见 `maybeNoticeDisarm`）。
+      // 这里的修订读数是给停手通告判耐久记号用的（只读域读数；`askedRevision` 是每拍的内存读数，不落盘）。
+      state.askedRevision = (await domain.process(scope))?.revision
+      await maybeNoticeDisarm(state, scope)
+      return
+    }
+    // 许可回来了 ⇒ 停手通告的"已喊过"记号作废（下次再被收回要重新喊一次）。
+    state.noticeSentFor = undefined
     // 当前流程修订（耐久记号只在与之相符时算数）：这一读也顺手确认流程还在。
     // **每 agent 各记各的**（见 State.askedRevision）：多会话并发驱动时互不串扰。
     state.askedRevision = (await domain.process(scope))?.revision
@@ -888,13 +1018,49 @@ export function apply(ctx: Context, config?: WorkRoundDriverConfig): void {
   /**
    * 收回续跑许可（耐久）：驱动器不再自动往下推，任务相位原样保留（宿主 goal driver 的 disarm 同款）。
    * 人要说一句"继续"（arm）才重新发许可。
+   *
+   * 【只给"驱动器自己落的"停手用】`resume` / `error` / 非本轮的 `aborted` / `max-tokens` / 装载 /
+   * 检查点失败都走这里——这些是人**不知情**的停手，值得在空闲边界喊一声（`maybeNoticeDisarm`）。
+   * 人自己敲的 `/work disarm` 与 `update_workstage action=disarm` **不走这里**：那是明确意图，不打扰。
    */
   async function disarm(state: State): Promise<void> {
     const scope = state.agent.session.id
     try {
-      if (await domain.activation(scope) === 'armed') await domain.setActivation(scope, 'disarmed')
+      // 记 `by: 'driver'`（内核只在真改值时写入）：停手通告与 goal-resume 联动都按这个耐久记号判
+      // "是机器收的还是人亲手收的"。人亲手按的（by='human'）**粘性**——这里同值重写覆盖不了它。
+      if (await domain.activation(scope) === 'armed') await domain.setActivation(scope, 'disarmed', undefined, 'driver')
     } catch (error) {
-      warn(`could not disarm on abort for "${scope}": ${renderThrown(error)}`)
+      warn(`could not disarm for "${scope}": ${renderThrown(error)}`)
+    }
+  }
+
+  /**
+   * **放回续跑许可**：目标被 `resume`（人说"继续"）时跟着放回流程这一半。
+   *
+   * 【为什么必须跟着走】goal 的许可与流程的许可**各管各的**（宿主读 goal 相位，本域读归属记录的
+   * `rounds.activation`），而恢复口令只有一个"继续"。只放回 goal 那一半，流程这一半仍然冻着——
+   * 且 disarmed 时 `drive()` 连**副作用都不落**（auto 收口 / 阶段开工 / 规划轮全停），会话里却看
+   * 不出任何异常：goal 轮照跑、模型照干活，流程静默停在半路（真机：跨会话的盯盘流程 5/5 任务全
+   * 达成，engine 阶段的 auto 收口永远不落，validate 永远开不了工——agent 只能自己猜着往下做）。
+   *
+   * 【不构成"自己给自己发通行证"】宿主 goal 的 `resume` 是**真人专属**动作（自治回合里调会被拒），
+   * 跟着它放行等于"人说继续"这一个动作对两个许可位同时生效，而不是让驱动器自己决定要不要跑。
+   * 反向**不联动**：goal 被 block / complete 时流程许可不动（那是 goal 自己的账，不是流程的）。
+   */
+  async function arm(state: State): Promise<void> {
+    const scope = state.agent.session.id
+    try {
+      if (await domain.activation(scope) !== 'disarmed') return
+      // **人亲手收回的不动**：`/work disarm` / `update_workstage action=disarm` 记的是
+      // `activationBy: 'human'`。goal 的 resume（"继续"口令）只放回**机器/驱动器**收走的那一格——
+      // 人亲手收的要人亲手放（否则人说"继续"会把你亲手按下的停手悄悄顶开）。
+      if (await domain.activationBy(scope) === 'human') return
+      // 记号清在写**成功之后**：写失败时许可仍 disarmed——停了就是停了，抹掉"已喊过"反而把
+      // "静默冻死"在失败模式里原样复现（审查发现）。
+      await domain.setActivation(scope, 'armed')
+      state.noticeSentFor = undefined
+    } catch (error) {
+      warn(`could not re-arm on goal resume for "${scope}": ${renderThrown(error)}`)
     }
   }
 
@@ -923,15 +1089,30 @@ export function apply(ctx: Context, config?: WorkRoundDriverConfig): void {
   }
 
   /**
-   * 回合事实（耐久计数）+ 投递生命周期 + 停止信号，每条会话事件都看一眼：
+   * 回合事实（耐久计数）+ 投递生命周期 + 停止信号 + **目标续跑**，每条会话事件都看一眼：
+   *   · `goal/change`：**目标被 `resume` = 人说"继续"** ⇒ 把流程这一半的许可一起放回
+   *     （见 {@link arm}；两个许可位各管各的，只放回一半就会静默冻死）。
    *   · `user/message`：我们那条被**受理进步骤** ⇒ 预约记 `admitted`（这一轮跑成过的记号）；
    *     自署 `work` 且带轮号的才算一次被接手的回合（计数前进）。
    *   · `turn/end`：**人点了停止**（`aborted`）⇒ 中止的是我们投的那一轮就记 `cancelled`
    *     （空闲边界落盘暂停任务）；不是我们那一轮 ⇒ 收回续跑许可，自动推进就此停住。
    *     `max-tokens` ⇒ 同样收回许可（模型在给定预算内说不完 = 配置不适配，不许无限自动续跑）。
+   *
+   * 【`interrupted` / `forked` 故意不处理（不是漏了）】宿主类型文档写得很清楚：`interrupted` 是
+   * 「a **crash-orphaned** turn was closed after the fact…**the loop never emits this marker live**」
+   * ——agent-loop resume 给"最后一轮没收尾"的日志补的闭合标记，`forked` 是 fork 种子构造补的。
+   * 把它们当 `aborted` 处理（宿主 `accountsForClaim` 只在"记账"意义上把三者并列）会在**每次崩溃
+   * 修复、每次 fork**时误落暂停、误收许可——比不处理更糟。真机例：机器 18:22 重启后，18:15:50
+   * 被关机打断的那一轮由修复补了 `interrupted`；真正该让流程停下的原因是**会话 resume**
+   * （`agent/created` 那条路径），不是这个标记。
    */
   async function observeSessionEvent(scope: string, state: State, event: unknown): Promise<void> {
     const ev = event as SessionEventLike | undefined
+    if (ev?.type === 'goal/change') {
+      // 只有 `resume` 是"人说继续"（create / block / complete 都不放行流程）。
+      if (ev.data?.operation === 'resume') await arm(state)
+      return
+    }
     if (ev?.type === 'user/message') {
       const attempt = state.attempt
       if (attempt !== undefined && ev.data?.id === attempt.messageId) attempt.phase = 'admitted'
@@ -967,12 +1148,9 @@ export function apply(ctx: Context, config?: WorkRoundDriverConfig): void {
       // 会话 `resume`（宿主重启后从盘上加载）⇒ **收回续跑许可**：无人值守的流程不会在你
       // 不知情时接着动；人要继续说一句就 arm（对齐宿主 goal 的 disarm-on-resume 纪律）。
       if (disarmOnResume && source === 'resume') {
-        return domain.setActivation(agent.session.id, 'disarmed')
-          .then(() => undefined)
-          .catch((error: unknown) => {
-            warn(`could not disarm on resume for "${agent.session.id}": ${renderThrown(error)}`)
-            return undefined
-          })
+        // 走 `disarm()` 而不是直接写域：这条停手是**驱动器自己落的**（人根本不知道重启把许可收回了），
+        // 要记下来以便空闲边界投一条停手通告（见 `disarmedByDriver` / `maybeNoticeDisarm`）。
+        return disarm(state).then(() => undefined)
       }
       return undefined   // 该事件的监听器签名要求 promise | undefined（宿主同款）
     })
